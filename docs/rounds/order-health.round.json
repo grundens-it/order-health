@@ -2,7 +2,7 @@
   "round": "order-health-observability",
   "repo": "grundens-it/order-health",
   "brief": "docs/kickoffs/order-health-observability.md",
-  "updated": "2026-07-06 (Phase W complete, all 6 pipes on main; Phase C started)",
+  "updated": "2026-07-06 (Unit 7 merged; Unit 8 + ADR-0005 in progress)",
   "umbrella_issue": 2,
   "kickoff_pr": 1,
   "stack": {
@@ -35,9 +35,9 @@
     { "unit": 4, "issue": 7, "phase": "W", "name": "Allocator monitor + Warehouse Split decisions panel", "status": "done", "pr": 16, "merged": true },
     { "unit": 5, "issue": 8, "phase": "W", "name": "Order lifecycle table + channel dimension", "status": "done", "pr": 18, "merged": true, "note": "orphan grading behind a flag pending BA question 1" },
     { "unit": 6, "issue": 9, "phase": "W", "name": "Leadership rollup strip", "status": "done", "pr": 15, "merged": true },
-    { "unit": 7, "issue": 10, "phase": "C", "name": "Remediation runbook + health_transition wiring", "status": "active", "pr": null },
-    { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "blocked_on_unit_7", "pr": null },
+    { "unit": 7, "issue": 10, "phase": "C", "name": "Remediation runbook + health_transition wiring", "status": "done", "pr": 21, "merged": true },
+    { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "active", "pr": null },
     { "unit": 9, "issue": 19, "phase": "D", "name": "Local dev (Docker Compose) + CI workflow", "status": "active", "pr": null, "note": "unblocked; runs on stub data" },
-    { "unit": 10, "issue": 20, "phase": "D", "name": "ADR-0005 deploy target + CD pipeline", "status": "gated", "pr": null, "note": "gated on Steve deploy-target decision" }
+    { "unit": 10, "issue": 20, "phase": "D", "name": "ADR-0005 deploy target + CD pipeline", "status": "drafting_adr", "pr": null, "note": "Steve chose draft-ADR-first; ADR drafting, CD still gated on target pick" }
   ]
 }

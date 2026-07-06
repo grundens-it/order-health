@@ -26,12 +26,12 @@
     "C": "convergence, sequential, after the wave"
   },
   "units": [
-    { "unit": 0, "issue": 3, "phase": "F", "name": "Foundation scaffold", "status": "in_progress", "pr": null },
-    { "unit": 1, "issue": 4, "phase": "W", "name": "Inventory Sync Monitor (reference subsystem)", "status": "blocked_on_unit_0", "pr": null },
-    { "unit": 2, "issue": 5, "phase": "W", "name": "Back-sync monitor + missed-shipments panel", "status": "blocked_on_unit_0", "pr": null },
-    { "unit": 3, "issue": 6, "phase": "W", "name": "NAV job-queue + price-sync + Shopify-webhook monitors", "status": "blocked_on_unit_0", "pr": null },
-    { "unit": 4, "issue": 7, "phase": "W", "name": "Allocator monitor + Warehouse Split decisions panel", "status": "blocked_on_unit_0", "pr": null },
-    { "unit": 5, "issue": 8, "phase": "W", "name": "Order lifecycle table + channel dimension", "status": "blocked_on_unit_0", "pr": null, "note": "orphan grading behind a flag pending BA question 1" },
+    { "unit": 0, "issue": 3, "phase": "F", "name": "Foundation scaffold", "status": "done", "pr": 12, "merged": true },
+    { "unit": 1, "issue": 4, "phase": "W", "name": "Inventory Sync Monitor (reference subsystem)", "status": "ready", "pr": null },
+    { "unit": 2, "issue": 5, "phase": "W", "name": "Back-sync monitor + missed-shipments panel", "status": "ready", "pr": null },
+    { "unit": 3, "issue": 6, "phase": "W", "name": "NAV job-queue + price-sync + Shopify-webhook monitors", "status": "ready", "pr": null },
+    { "unit": 4, "issue": 7, "phase": "W", "name": "Allocator monitor + Warehouse Split decisions panel", "status": "ready", "pr": null },
+    { "unit": 5, "issue": 8, "phase": "W", "name": "Order lifecycle table + channel dimension", "status": "ready", "pr": null, "note": "orphan grading behind a flag pending BA question 1" },
     { "unit": 6, "issue": 9, "phase": "W", "name": "Leadership rollup strip", "status": "blocked_on_unit_0", "pr": null },
     { "unit": 7, "issue": 10, "phase": "C", "name": "Remediation runbook + health_transition wiring", "status": "blocked_on_wave", "pr": null },
     { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "blocked_on_wave", "pr": null }

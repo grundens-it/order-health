@@ -1,0 +1,16 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Env / secrets (read-only NAV + middleware endpoint config lives out of tree)
+.env
+.env.*
+*.local
+
+# Logs and temp
+*.log
+tmp/

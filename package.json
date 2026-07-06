@@ -13,7 +13,8 @@
     "test": "npm run test --workspace backend",
     "build": "npm run build --workspace shared && npm run build --workspace backend && npm run build --workspace frontend",
     "dev:backend": "npm run dev --workspace backend",
-    "dev:frontend": "npm run dev --workspace frontend"
+    "dev:frontend": "npm run dev --workspace frontend",
+    "visual-status": "node scripts/visual-status.mjs"
   },
   "engines": {
     "node": ">=20"

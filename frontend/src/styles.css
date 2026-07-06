@@ -45,6 +45,9 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-size: 14px; lin
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--card); }
 .seg button { border: 0; background: transparent; padding: 7px 13px; font-size: 12.5px; font-weight: 600; color: var(--muted); cursor: pointer; }
 .seg button.on { background: var(--orange); color: #fff; }
+/* Keyboard focus stays visible on the channel filter (inset so the rounded seg
+   border does not clip it). */
+.seg button:focus-visible { outline: 2px solid var(--orange); outline-offset: -2px; }
 .controls .count { font-size: 12.5px; color: var(--muted); margin-left: auto; }
 
 .tblwrap { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
@@ -53,16 +56,21 @@ thead th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; co
 tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-align: middle; }
 .empty { padding: 28px 12px; text-align: center; color: var(--faint); font-size: 12.5px; }
 
-/* Verdict chip: encoded by SHAPE as well as color (accessibility, per design).
-   green = circle, amber = rounded square, red = rotated diamond. */
+/* Verdict chip: encoded by SHAPE as well as color (accessibility, per design;
+   never color alone). Each verdict is a DISTINCT shape so the chip stays legible
+   with color removed. green = filled circle, amber = rounded square, red = rotated
+   diamond, unknown = dash. The word label is the third, redundant cue. */
 .chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 20px; border: 1px solid var(--slate-bg); background: var(--slate-bg); color: var(--slate); white-space: nowrap; }
 .chip .ic { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .chip.g { background: var(--green-bg); border-color: var(--green-bd); color: var(--green); }
 .chip.a { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
 .chip.r { background: var(--red-bg); border-color: var(--red-bd); color: var(--red); }
+.chip.u { background: var(--slate-bg); border-color: var(--slate-bg); color: var(--slate); }
 .chip.g .ic { border-radius: 50%; }
 .chip.a .ic { border-radius: 2px; }
 .chip.r .ic { border-radius: 0; transform: rotate(45deg); }
+/* unknown: a horizontal dash, distinct from green's filled circle. */
+.chip.u .ic { width: 9px; height: 3px; border-radius: 1px; transform: none; }
 
 .badge { font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 5px; letter-spacing: .03em; }
 .badge.dtc { background: #17324e; color: #7fb3ff; }
@@ -126,8 +134,11 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .lead-pill .lead-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .lead-pill.g { background: var(--green-bg); border-color: var(--green-bd); color: var(--green); }
 .lead-pill.r { background: var(--red-bg); border-color: var(--red-bd); color: var(--red); }
+.lead-pill.g .lead-dot { border-radius: 50%; }
 .lead-pill.r .lead-dot { border-radius: 0; transform: rotate(45deg); }
 .lead-pill.u { background: var(--slate-bg); border-color: var(--slate-bg); color: var(--slate); }
+/* fresh = circle, stale = diamond, unknown = dash: shape-distinct, not color-only. */
+.lead-pill.u .lead-dot { width: 9px; height: 3px; border-radius: 1px; transform: none; }
 .lead-empty .lead-note { font-size: 12.5px; color: var(--faint); }
 @media (max-width: 900px) { .lead-tiles { grid-template-columns: 1fr 1fr; } }
 /* --- Back-sync Monitor panel (Unit 2) -------------------------------------- */
@@ -170,3 +181,15 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .rm-result-row { display: flex; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line2); font-size: 12.5px; }
 .rm-result-row .rm-k { color: var(--faint); min-width: 150px; }
 .rm-result-row .rm-v { color: var(--ink); text-align: left; word-break: break-word; }
+
+/* --- Reduced motion (accessibility) ---------------------------------------
+   Respect the OS "reduce motion" setting: neutralize any animation/transition
+   (defensive; the shell is largely static today) and keep behaviour instant. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

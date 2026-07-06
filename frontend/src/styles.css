@@ -137,3 +137,36 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
 .oid { font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .ip-note.r { background: var(--red-bg); border-color: var(--red-bd); color: #f0a49c; }
+
+/* --- Remediation modal (Unit 7, design.md 5A.4) --------------------------- */
+/* The error-to-remediation modal: opens on a red/amber pipe verdict, names the
+   mapped tool and offers an operator trigger. Dark theme, accessible dialog. */
+.chip-btn { background: none; border: 0; padding: 0; margin: 0; cursor: pointer; border-radius: 20px; }
+.chip-btn:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+.rm-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.62); display: grid; place-items: start center; padding: 48px 16px; z-index: 50; overflow: auto; }
+.rm-modal { background: var(--card); border: 1px solid var(--line); border-radius: 12px; max-width: 640px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.rm-mh { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+.rm-mh h3 { margin: 0; font-size: 15px; }
+.rm-x { background: none; border: 0; color: var(--muted); font-size: 22px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.rm-x:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; border-radius: 4px; }
+.rm-mb { padding: 16px 18px; }
+.rm-tool { border: 1px solid var(--line); border-radius: var(--radius); padding: 13px 14px; margin-bottom: 12px; background: var(--sunken); }
+.rm-tool-hd { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.rm-tool-hd h4 { margin: 4px 0 0; font-size: 14px; }
+.rm-kicker { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--orange); }
+.rm-kind { font-size: 10.5px; font-weight: 700; padding: 3px 8px; border-radius: 20px; white-space: nowrap; border: 1px solid var(--line); color: var(--muted); }
+.rm-kind.r { color: var(--green); border-color: var(--green-bd); background: var(--green-bg); }
+.rm-desc { font-size: 12.5px; color: var(--muted); margin: 8px 0; }
+.rm-when { font-size: 12px; color: var(--faint); margin: 6px 0; }
+.rm-call { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; color: var(--ink); background: var(--band); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; white-space: pre-wrap; word-break: break-word; margin: 8px 0; }
+.rm-err { font-size: 12px; color: #f0a49c; margin: 6px 0; }
+.rm-actions { display: flex; gap: 8px; margin-top: 10px; }
+.rm-btn { background: var(--orange); border: 1px solid var(--orange); color: #fff; font-weight: 700; font-size: 12.5px; padding: 8px 13px; border-radius: 8px; cursor: pointer; }
+.rm-btn:disabled { opacity: .6; cursor: default; }
+.rm-btn.ghost { background: transparent; color: var(--muted); border-color: var(--line); }
+.rm-btn:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+.rm-result-badge { display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--amber); background: var(--amber-bg); border: 1px solid var(--amber-bd); border-radius: 20px; padding: 3px 10px; }
+.rm-result-msg { font-size: 13px; margin: 10px 0; }
+.rm-result-row { display: flex; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line2); font-size: 12.5px; }
+.rm-result-row .rm-k { color: var(--faint); min-width: 150px; }
+.rm-result-row .rm-v { color: var(--ink); text-align: left; word-break: break-word; }

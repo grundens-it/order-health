@@ -12,6 +12,8 @@ import { createNavClient } from '../sources/navClient';
 import {
   computeOrders,
   computePipelines,
+  recordOrderTransitions,
+  recordPipelineTransitions,
   writeOrderSnapshot,
   writePipelineSnapshot,
   type Sources,
@@ -22,16 +24,21 @@ function sources(): Sources {
 }
 
 // One order-layer run. Exported so it can be invoked directly (tests / manual).
+// Transitions are recorded from the PREVIOUS snapshot BEFORE the new one is
+// written (health_transition wiring, design.md 8). No remediation is invoked.
 export async function runOrderLayer(): Promise<void> {
   const asOf = new Date().toISOString();
   const orders = await computeOrders(sources());
+  await recordOrderTransitions(asOf, orders);
   await writeOrderSnapshot(asOf, orders);
 }
 
-// One inventory/pipeline-layer run.
+// One inventory/pipeline-layer run. Same order: record transitions against the
+// previous snapshot, then write the new one.
 export async function runInventoryLayer(): Promise<void> {
   const asOf = new Date().toISOString();
   const pipes = await computePipelines(sources());
+  await recordPipelineTransitions(asOf, pipes);
   await writePipelineSnapshot(asOf, pipes);
 }
 

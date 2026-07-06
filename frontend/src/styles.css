@@ -87,3 +87,11 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .ip-bar.hl { background: var(--orange); }
 .ip-empty { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px 16px; text-align: center; color: var(--faint); font-size: 12.5px; }
 @media (max-width: 900px) { .ip-cards { grid-template-columns: 1fr; } }
+
+/* --- Back-sync Monitor panel (Unit 2) -------------------------------------- */
+/* Reuses the .ip* panel tokens; adds the table utilities the panels reference
+   and a RED note variant (the missed-shipments signal may reach red, unlike the
+   amber-capped inventory divergence). */
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+.oid { font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.ip-note.r { background: var(--red-bg); border-color: var(--red-bd); color: #f0a49c; }

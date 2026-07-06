@@ -2,7 +2,7 @@
   "round": "order-health-observability",
   "repo": "grundens-it/order-health",
   "brief": "docs/kickoffs/order-health-observability.md",
-  "updated": "2026-07-06 (Unit 9 merged: local dev + CI; Unit 8 + ADR-0005 in progress)",
+  "updated": "2026-07-06 (round complete: Units 0-9 merged, ADR-0005 accepted Option B, CD pending)",
   "umbrella_issue": 2,
   "kickoff_pr": 1,
   "stack": {
@@ -36,8 +36,8 @@
     { "unit": 5, "issue": 8, "phase": "W", "name": "Order lifecycle table + channel dimension", "status": "done", "pr": 18, "merged": true, "note": "orphan grading behind a flag pending BA question 1" },
     { "unit": 6, "issue": 9, "phase": "W", "name": "Leadership rollup strip", "status": "done", "pr": 15, "merged": true },
     { "unit": 7, "issue": 10, "phase": "C", "name": "Remediation runbook + health_transition wiring", "status": "done", "pr": 21, "merged": true },
-    { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "active", "pr": null },
+    { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "done", "pr": 24, "merged": true, "note": "staleness sim, a11y shape-audit, dark-theme parity, visual-status script" },
     { "unit": 9, "issue": 19, "phase": "D", "name": "Local dev (Docker Compose) + CI workflow", "status": "done", "pr": 22, "merged": true, "note": "docker compose up, CI build/test on push+PR" },
-    { "unit": 10, "issue": 20, "phase": "D", "name": "ADR-0005 deploy target + CD pipeline", "status": "gated", "pr": 23, "note": "ADR-0005 Draft merged (PR #23); recommends Alternative A co-located internal; awaiting Steve target pick to flip Accepted and build CD" }
+    { "unit": 10, "issue": 20, "phase": "D", "name": "ADR-0005 deploy target + CD pipeline", "status": "cd_build", "pr": 23, "note": "ADR-0005 accepted Alternative B (cloud VM + owned VPN); CD workflow building; concrete VM+VPN+secrets are DevOps provisioning" }
   ]
 }

@@ -1,7 +1,7 @@
-# ADR-0005: Deploy the standalone service co-located on the internal network beside the middleware, because network line-of-sight to internal NAV and the middleware is the dominant constraint
+# ADR-0005: Deploy the standalone service on a cloud VM reaching internal NAV and the middleware over an owned, monitored VPN (Alternative B), accepted because the aggregator already reports source-unreachable distinctly from data-stale, so the tunnel is not a hidden freshness risk
 
-- Status: Draft (Architect seat, 2026-07-06), **pending Steve's sign-off on the deploy target**. This is a stop-for-the-human gate: no CD pipeline is built until the operator picks the target. Flip to Accepted once the operator signs off.
-- Deciders: Steve (operator, deciding vote), Architect seat (drafted the recommendation).
+- Status: Accepted (operator sign-off: Steve, 2026-07-06). The Architect draft recommended Alternative A (co-located on the internal network) on the reachability constraint alone. The operator leaned Alternative B (cloud VM plus VPN/tunnel) and asked for a firm recommendation rather than a default to the draft. Reassessing (see Recommendation and decision record), the Architect concurs on Alternative B, with Alternative A kept as the documented fallback if the VPN cannot be made a reliable, monitored path. CD (Unit 10) proceeds to target B.
+- Deciders: Steve (operator, deciding vote), Architect seat (drafted A, concurs on B).
 - Companion: design.md (project boundary and the internal-source facts), ADR-0001 (delivery vehicle: standalone read-only service), ADR-0004 (stack: Node + TypeScript backend, React + TypeScript frontend, Postgres snapshot store).
 
 ## Context
@@ -21,13 +21,18 @@ The other placement facts each option must answer: where Postgres lives (this se
 
 ## Decision
 
-**Recommended, pending the operator's sign-off:** deploy the service **co-located on the Grundens internal network beside the middleware** (Alternative A). A small VM or single container host on the same internal network runs the Docker Compose stack Unit 9 defines (Fastify read API plus the node-cron aggregator, the built Vite bundle served alongside the read API, and this service's own Postgres). Reachability to NAV read-only and the middleware's read-only endpoints is direct, over the internal network, with no tunnel in the path. CD is a GitHub Actions workflow that builds the backend image and the frontend bundle, publishes the artifact, and deploys onto that internal host.
+Deploy the service on a **cloud VM (or managed container service) that reaches internal NAV read-only and the middleware read-only endpoints over an owned, monitored VPN or tunnel** (Alternative B). The VM runs the Docker Compose stack Unit 9 defines (Fastify read API plus the node-cron aggregator, the built Vite bundle served alongside the read API, and this service's own Postgres, or a managed Postgres beside the compute). CD is a GitHub Actions workflow that builds the backend image and the frontend bundle and deploys onto that VM.
 
-This is the target the reachability constraint favors. It is presented for Steve to accept, not as a settled decision, and it is the one open question below that unblocks the CD work.
+Two facts make the tunnel an acceptable trade rather than the hidden freshness risk the draft feared:
+
+- The aggregator already reports **source-unreachable distinctly from data-stale** (Unit 8 verified: a source it cannot reach grades `unknown`, not a false freshness RED). So a VPN blip surfaces as a connectivity signal, correctly attributed to the tunnel, not as a spurious NAV staleness incident.
+- The VPN is treated as **owned, existing, monitored infrastructure**, not a fragile bespoke dependency stood up for this one service. On that basis the managed-compute and clean-CD upsides of B outweigh A's direct-reachability edge.
+
+**Condition and fallback:** if the VPN/tunnel to NAV and the middleware cannot be made a reliable, monitored path, fall back to Alternative A (co-located on the internal network). Alternative A stays fully specified below for that case, because reachability remains the constraint that cannot be compromised.
 
 ## Alternatives considered
 
-### Alternative A: Co-located on the internal network beside the middleware [RECOMMENDED]
+### Alternative A: Co-located on the internal network beside the middleware [FALLBACK]
 
 A small VM or single container host on the same internal network as the middleware and NAV, running the Unit 9 Docker Compose stack.
 
@@ -38,7 +43,7 @@ A small VM or single container host on the same internal network as the middlewa
 - CD shape: GitHub Actions builds and tests (reusing the Unit 9 CI), builds the backend image and the frontend bundle, and deploys onto the internal host (a pull-and-restart of the compose stack, or a registry push the host pulls). The runner needs a path to the internal host (a self-hosted runner on the internal network, or a deploy step the internal host initiates); this is the main operational detail A introduces and it is smaller than a standing tunnel.
 - Cost: a host to provision and patch on the internal network, and self-management of Postgres if it is not a nearby managed instance. This is the price of the direct reachability that the constraint makes non-negotiable.
 
-### Alternative B: Cloud VM or container service with a VPN/tunnel back to the internal network
+### Alternative B: Cloud VM or container service with a VPN/tunnel back to the internal network [SELECTED]
 
 A more managed host in the cloud, reaching NAV and the middleware through a VPN or tunnel.
 
@@ -69,13 +74,15 @@ Cloudflare Pages for the frontend, Workers for the backend.
 - Frontend: Pages is a clean, cheap home for the static bundle and is the one strong half of this option.
 - CD shape: two deploy targets (Pages for the frontend, the backend elsewhere) means a split pipeline and more moving parts. The realistic best case for D is a split: Pages for the frontend, the backend hosted under A or B. That adds a second origin (CORS, a second deploy) for a service whose backend still has to live on or tunnel into the internal network regardless.
 
-## Recommendation
+## Recommendation and decision record
 
-Alternative A. The reachability constraint decides this: the service must read internal NAV and the internal middleware, and co-location on the internal network is the only option that gives direct line-of-sight with no tunnel in the data path. B and C and the Workers half of D all reintroduce the same thing, a tunnel or connector back to the internal network, as a standing dependency in the hot path of the aggregator's reads, which is precisely the freshness/liveness surface this service is built to watch. Paying for a managed platform and then bolting a tunnel onto it to reach systems Grundens already owns network access to is the wrong trade for a single internal read-only service.
+The Architect draft recommended **Alternative A** purely on the reachability constraint: co-location is the only option with direct line-of-sight to internal NAV and the middleware and no tunnel in the aggregator's read path.
 
-The honest counter is operational convenience: B and C offer more managed compute and a cleaner GitHub Actions deploy (no self-hosted runner), and C and Pages offer managed Postgres and trivial static hosting. Those are real, and if the operator weights low-ops managed infrastructure over direct reachability, B (a cloud VM with a well-owned, monitored tunnel) is the next-best target, with the tunnel accepted as a permanent monitored dependency. Cloudflare Pages remains a reasonable home for the static frontend under any option, but it does not change where the backend must live.
+The operator (Steve) leaned **Alternative B** (cloud VM plus VPN/tunnel) and asked for a firm recommendation rather than a default to the draft. Reassessing, two things move the decision to B. First, the draft's strongest objection, that a tunnel drop would masquerade as the freshness failure this service exists to catch, does not hold: the aggregator distinguishes source-unreachable (graded `unknown`) from data-stale (freshness RED), verified in Unit 8, so a tunnel blip is attributed to connectivity, not to NAV. Second, when the VPN is owned, existing, monitored infrastructure rather than a bespoke new dependency, B's managed compute, its standard GitHub Actions deploy (no self-hosted internal runner), and its easier host lifecycle are the better operational trade for a single internal read-only service. The Architect therefore concurs with Alternative B.
 
-This is a recommendation for Steve to accept, not a settled decision. The CD pipeline is not built until the operator picks the target, because the target determines the runner topology (self-hosted internal runner for A, managed runner plus tunnel for B) and the secret store.
+Alternative A stays the documented fallback: if the VPN to NAV and the middleware cannot be made reliable and monitored, co-location is the correct answer, because reachability is still the constraint that cannot be compromised. Cloudflare Pages remains a reasonable home for the static frontend under either target, but does not change where the backend lives.
+
+This is now a settled decision (target B). The CD pipeline (Unit 10) is built to target B; the concrete VM, provider, VPN path, and secret values are DevOps provisioning work supplied before the deploy runs.
 
 ## Consequences
 
@@ -83,7 +90,7 @@ This is a recommendation for Steve to accept, not a settled decision. The CD pip
 - The DevOps provisioning gate from ADR-0004 wires in here: the read-only NAV path and the middleware endpoint base URL and auth must be provisioned and reachable from the chosen target before `AGGREGATOR_ENABLED=true` is set and the node-cron writer runs against real sources. Until then the service runs the ADR-0004 stub mode (typechecks and serves empty, `as_of`-stamped snapshots). The deploy target choice is upstream of that gate: the gate can only be satisfied from a target that has line-of-sight to the internal sources.
 - Postgres lands in this service's own datastore regardless of target (co-located container/instance under A, managed Postgres under B/C/D), never in the middleware. The channel dimension and the snapshot/`health_transition` tables from ADR-0002 and ADR-0004 are unaffected by placement.
 - Zero changes to the Symmetry middleware and no new write path into NAV, under every option. The Cloudflare WAF skip rule and the NAV staging-table boundary stay external and untouched.
-- **No CD is built until Steve picks the target.** This ADR is a human gate. The GitHub Actions CD workflow (build images/bundle, publish, deploy) is written only after sign-off, because the target sets the runner topology and the secret store. Unit 9's local Docker Compose and CI (build/test) are independent of this decision and proceed regardless.
+- **Target chosen: Alternative B, so CD (Unit 10) is now built.** A GitHub Actions CD workflow builds the backend image and the frontend bundle and deploys to the cloud VM, with the VPN/tunnel to the internal network as an owned, monitored dependency. The concrete VM, cloud provider, the VPN path to NAV and the middleware, and the secret values are DevOps provisioning work (the ADR-0004 provisioning gate), supplied by Steve and devops before the deploy runs and before `AGGREGATOR_ENABLED=true` reads real sources. Unit 9's local Docker Compose and CI (build/test) are independent of this decision and already merged.
 
 ## References
 

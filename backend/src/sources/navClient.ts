@@ -86,6 +86,9 @@ export interface NavClient {
 // Codeunit 50007; a completed Job Queue Log Entry carries [Status] = 2.
 export const NAV_IABC_OBJECT_ID = 50007;
 export const NAV_JOB_STATUS_SUCCESS = 2;
+// Sales Header holds only open/active orders (NAV deletes fully posted ones), but
+// bound the lifecycle read anyway so a busy period cannot pull an unbounded set.
+export const NAV_ORDER_LIFECYCLE_LIMIT = 500;
 
 // Bracketed, company-prefixed table name: navTable('GRUS', 'Sales Header') =>
 // "[GRUS$Sales Header]". Centralising this is what guarantees no query can read
@@ -126,14 +129,19 @@ ORDER BY [Entry No_] DESC;`,
 FROM ${jqLog}
 WHERE [Object ID to Run] = @iabcObjectId AND [Status] = @successStatus
 ORDER BY [Entry No_] DESC;`,
-    // Order lifecycle: header + staging status + posted shipment. WebOrder is
-    // selected so the channel and the orphan predicate can use it.
-    orderLifecycle: `SELECT h.[No_] AS navOrderNo, h.[Sell-to Customer No_] AS customerRef,
+    // Order lifecycle: header + staging status + latest posted shipment. WebOrder
+    // is selected so the channel and the orphan predicate can use it. Bounded to
+    // the most recent orders (Sales Header holds only open/active orders; NAV
+    // deletes fully posted ones), and the shipment posting date is a scalar
+    // subquery (MAX) rather than a join, so an order with multiple shipments
+    // stays ONE row instead of fanning out into duplicates.
+    orderLifecycle: `SELECT TOP (@limit) h.[No_] AS navOrderNo, h.[Sell-to Customer No_] AS customerRef,
        h.[Order Date] AS orderDate, h.[WebId] AS webId, h.[WebOrder] AS webOrder,
-       st.[Status] AS navStagingStatus, sh.[Posting Date] AS navShipmentAt
+       st.[Status] AS navStagingStatus,
+       (SELECT MAX(sh.[Posting Date]) FROM ${shipment} sh WHERE sh.[Order No_] = h.[No_]) AS navShipmentAt
 FROM ${salesHeader} h
-LEFT JOIN ${staging} st ON st.[No_] = h.[No_]
-LEFT JOIN ${shipment} sh ON sh.[Order No_] = h.[No_];`,
+LEFT JOIN ${staging} st ON st.[Nav Order No] = h.[No_]
+ORDER BY h.[Order Date] DESC;`,
     // Posted shipments, most-recent-first.
     recentShipments: `SELECT TOP (@limit) sh.[No_] AS navShipmentNo, sh.[WebId] AS webId,
        sh.[Order No_] AS orderRef, sh.[Shipping Agent Code] AS carrier,
@@ -145,12 +153,24 @@ ORDER BY sh.[Posting Date] DESC;`,
 
 // Normalise a NAV datetime/date value (mssql returns Date objects; may also be a
 // string or null) to an ISO string or null.
+// NAV uses 1753-01-01 (SQL Server datetime minimum) as a blank / never sentinel.
+// Treat any such value as null so downstream age math does not produce a
+// ~273-year lag that overflows the snapshot's integer columns.
+function isNavSentinelDate(d: Date): boolean {
+  return d.getUTCFullYear() <= 1753;
+}
+
 export function toIso(v: unknown): string | null {
   if (v === null || v === undefined) return null;
-  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v.toISOString();
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime()) || isNavSentinelDate(v)) return null;
+    return v.toISOString();
+  }
   if (typeof v === 'string') {
     const t = Date.parse(v);
-    return Number.isNaN(t) ? null : new Date(t).toISOString();
+    if (Number.isNaN(t)) return null;
+    const d = new Date(t);
+    return isNavSentinelDate(d) ? null : d.toISOString();
   }
   return null;
 }
@@ -181,8 +201,8 @@ export function mapWatermarkState(
   return {
     navNewestIabcEntryNo: watermark ? toNum(watermark.entryNo) : null,
     watermarkEntryNo: null,
-    lastWalkAt: watermark ? toIso(watermark.endAt ?? watermark.startAt) : null,
-    watcherHeartbeatAt: heartbeat ? toIso(heartbeat.startAt ?? heartbeat.endAt) : null,
+    lastWalkAt: watermark ? (toIso(watermark.endAt) ?? toIso(watermark.startAt)) : null,
+    watcherHeartbeatAt: heartbeat ? (toIso(heartbeat.startAt) ?? toIso(heartbeat.endAt)) : null,
   };
 }
 
@@ -191,7 +211,7 @@ export function mapWatermarkState(
 // so they are 0 here; the middleware inventory-sync endpoint enriches them.
 export function mapInventoryWalk(row: Row): InventoryWalk {
   return {
-    walk_at: toIso(row.endAt ?? row.startAt),
+    walk_at: toIso(row.endAt) ?? toIso(row.startAt),
     processed: 0,
     pushed: 0,
     skipped: 0,
@@ -424,7 +444,9 @@ class NavClientLive implements NavClient {
 
   async getOrderLifecycleRows(): Promise<NavOrderLifecycleRow[]> {
     try {
-      const rows = await this.select(this.queries.orderLifecycle);
+      const rows = await this.select(this.queries.orderLifecycle, {
+        limit: NAV_ORDER_LIFECYCLE_LIMIT,
+      });
       return rows.map(mapOrderLifecycleRow);
     } catch (err) {
       return this.degrade('order lifecycle rows', err, this.stub.getOrderLifecycleRows());

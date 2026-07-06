@@ -74,8 +74,21 @@ test('order lifecycle query selects WebId AND WebOrder from the Sales Header', (
   const q = buildQueries('GRUS');
   assert.match(q.orderLifecycle, /h\.\[WebId\] AS webId/);
   assert.match(q.orderLifecycle, /h\.\[WebOrder\] AS webOrder/);
-  assert.match(q.orderLifecycle, /LEFT JOIN \[GRUS\$Sales Header Staging\]/);
-  assert.match(q.orderLifecycle, /LEFT JOIN \[GRUS\$Sales Shipment Header\]/);
+  // Staging joins on its own key, [Nav Order No], not [No_] (which it lacks).
+  assert.match(q.orderLifecycle, /LEFT JOIN \[GRUS\$Sales Header Staging\] st ON st\.\[Nav Order No\] = h\.\[No_\]/);
+  // Shipment posting date is a MAX scalar subquery (not a fan-out join), so an
+  // order with multiple shipments stays one row.
+  assert.match(q.orderLifecycle, /SELECT MAX\(sh\.\[Posting Date\]\) FROM \[GRUS\$Sales Shipment Header\] sh WHERE sh\.\[Order No_\] = h\.\[No_\]/);
+  // Bounded read.
+  assert.match(q.orderLifecycle, /SELECT TOP \(@limit\)/);
+});
+
+test('toIso nulls the NAV 1753 sentinel date (avoids the 273-year lag overflow)', () => {
+  assert.equal(toIso(new Date('1753-01-01T00:00:00Z')), null);
+  assert.equal(toIso(new Date('0001-01-01T00:00:00Z')), null);
+  assert.equal(toIso(null), null);
+  const real = '2026-07-06T18:00:00.000Z';
+  assert.equal(toIso(new Date(real)), real);
 });
 
 // --- Read-only enforcement -------------------------------------------------

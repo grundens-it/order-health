@@ -68,6 +68,44 @@ export interface Config {
     failedAmberRatio: number;      // (unallocatable + failed) / decisions above this => AMBER
     failedRedRatio: number;        // ...above this => RED
   };
+  // Unit 3 thresholds. Ops owns the numbers; the code reads them.
+  // price_sync (design.md 3): freshness (last received) + liveness (last run),
+  // both cycle-banded like inventory-sync.
+  priceSync: {
+    cycleSeconds: number;
+    freshnessAmberCycles: number;
+    freshnessRedCycles: number;
+    livenessAmberCycles: number;
+    livenessRedCycles: number;
+  };
+  // nav_job_queue (design.md 6): verdict is CONSUMED from the middleware, never
+  // recomputed. This knob only documents the middleware's own stuck-job age so
+  // the panel can label the supporting number; it does not gate any verdict.
+  jobQueue: {
+    stuckJobWarnSeconds: number;
+  };
+  // shopify_webhook (design.md 5): per-topic last-received freshness bands. A
+  // removed subscription is amber-or-worse by rule (not a tunable band).
+  shopifyWebhook: {
+    cycleSeconds: number;
+    freshnessAmberCycles: number;
+    freshnessRedCycles: number;
+  };
+  // Back-sync monitor thresholds (Unit 2, design.md 3.2 / 5 "Missed back-sync").
+  // Freshness = age of the last successful fulfillmentCreate; liveness = back-sync
+  // watcher heartbeat age; both cycle-banded. The missed-shipments signal is
+  // count-banded and, unlike inventory divergence, may reach RED. Ops owns all
+  // numbers; nothing is hardcoded.
+  backSync: {
+    cycleSeconds: number;          // one back-sync cycle in seconds
+    freshnessAmberCycles: number;  // watermark lag >= this many cycles => AMBER
+    freshnessRedCycles: number;    // watermark lag >= this many cycles => RED
+    livenessAmberCycles: number;   // heartbeat age >= this many cycles => AMBER
+    livenessRedCycles: number;     // heartbeat age >= this many cycles => RED
+    missedWindowDays: number;      // lookback window for the missed-shipments count
+    missedAmberCount: number;      // missed count >= this => AMBER
+    missedRedCount: number;        // missed count >= this => RED (real backlog)
+  };
 }
 
 export const config: Config = {
@@ -116,6 +154,40 @@ export const config: Config = {
     // Un-allocatable / failed split share: amber above 5%, red above 15%.
     failedAmberRatio: num('ALLOCATOR_FAILED_AMBER_RATIO', 0.05),
     failedRedRatio: num('ALLOCATOR_FAILED_RED_RATIO', 0.15),
+  },
+  // Unit 3: price_sync. Default cycle 1h; green under 1 cycle, amber 1 to 2, red beyond.
+  priceSync: {
+    cycleSeconds: num('PRICE_SYNC_CYCLE_SECONDS', 3600),
+    freshnessAmberCycles: num('PRICE_SYNC_FRESHNESS_AMBER_CYCLES', 1),
+    freshnessRedCycles: num('PRICE_SYNC_FRESHNESS_RED_CYCLES', 2),
+    livenessAmberCycles: num('PRICE_SYNC_LIVENESS_AMBER_CYCLES', 1),
+    livenessRedCycles: num('PRICE_SYNC_LIVENESS_RED_CYCLES', 2),
+  },
+  // Unit 3: nav_job_queue. Verdict consumed from the middleware; this only labels
+  // the supporting stuck-job number (matches the existing 30-min tripwire).
+  jobQueue: {
+    stuckJobWarnSeconds: num('JOB_QUEUE_STUCK_JOB_WARN_SECONDS', 1800),
+  },
+  // Unit 3: shopify_webhook. Default expected-delivery window 1h; a removed
+  // subscription is amber-or-worse regardless of these bands.
+  shopifyWebhook: {
+    cycleSeconds: num('WEBHOOK_CYCLE_SECONDS', 3600),
+    freshnessAmberCycles: num('WEBHOOK_FRESHNESS_AMBER_CYCLES', 1),
+    freshnessRedCycles: num('WEBHOOK_FRESHNESS_RED_CYCLES', 4),
+  },
+  backSync: {
+    // Defaults: back-sync runs far more often than the ~2h IABC cycle, so one
+    // cycle is 1h; green under one cycle, amber one to two, red beyond.
+    cycleSeconds: num('BACK_SYNC_CYCLE_SECONDS', 3600),
+    freshnessAmberCycles: num('BACK_SYNC_FRESHNESS_AMBER_CYCLES', 1),
+    freshnessRedCycles: num('BACK_SYNC_FRESHNESS_RED_CYCLES', 2),
+    livenessAmberCycles: num('BACK_SYNC_LIVENESS_AMBER_CYCLES', 1),
+    livenessRedCycles: num('BACK_SYNC_LIVENESS_RED_CYCLES', 2),
+    // One missed shipment in the window is AMBER (the demo's "Missed 14d: 1"); a
+    // cluster (>= 5) is a real backlog and reds the pipe.
+    missedWindowDays: num('BACK_SYNC_MISSED_WINDOW_DAYS', 14),
+    missedAmberCount: num('BACK_SYNC_MISSED_AMBER_COUNT', 1),
+    missedRedCount: num('BACK_SYNC_MISSED_RED_COUNT', 5),
   },
 };
 

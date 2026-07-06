@@ -1,12 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
 import type {
   ChannelFilter as ChannelFilterValue,
+  LeadershipRollup,
   OrderHealth,
   PipelineHealth,
 } from '@order-health/shared';
-import { fetchOrders, fetchPipelines } from './api';
+import { fetchOrders, fetchPipelines, fetchRollup } from './api';
+import { LeadershipStrip } from './components/LeadershipStrip';
 import { PipelineStrip } from './components/PipelineStrip';
 import { InventoryPanel } from './components/InventoryPanel';
+import { BackSyncPanel } from './components/BackSyncPanel';
+import { PriceSyncPanel } from './components/PriceSyncPanel';
+import { JobQueuePanel } from './components/JobQueuePanel';
+import { ShopifyWebhookPanel } from './components/ShopifyWebhookPanel';
 import { AllocatorPanel } from './components/AllocatorPanel';
 import { OrderTable } from './components/OrderTable';
 import { ChannelFilter } from './components/ChannelFilter';
@@ -17,16 +23,23 @@ export function App(): JSX.Element {
   const [channel, setChannel] = useState<ChannelFilterValue>('all');
   const [pipelines, setPipelines] = useState<PipelineHealth[]>([]);
   const [orders, setOrders] = useState<OrderHealth[]>([]);
+  const [rollup, setRollup] = useState<LeadershipRollup | null>(null);
+  const [rollupAsOf, setRollupAsOf] = useState<string | null>(null);
   const [asOf, setAsOf] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchPipelines(), fetchOrders(channel)])
-      .then(([pipeRes, orderRes]) => {
+    Promise.all([fetchPipelines(), fetchOrders(channel), fetchRollup()])
+      .then(([pipeRes, orderRes, rollupRes]) => {
         if (cancelled) return;
         setPipelines(pipeRes.data);
         setOrders(orderRes.data);
+        // The rollup carries as_of inline (single object, not a list); split the
+        // headline fields from the envelope-style as_of for the strip.
+        const { as_of: rollupTime, ...rollupData } = rollupRes;
+        setRollup(rollupData);
+        setRollupAsOf(rollupTime);
         // The order snapshot is the freshest signal for the header as_of.
         setAsOf(orderRes.as_of ?? pipeRes.as_of);
         setError(null);
@@ -48,6 +61,26 @@ export function App(): JSX.Element {
   // The inventory-sync pipe owns the reference expanded panel (Unit 1).
   const inventoryPipe = useMemo(
     () => pipelines.find((p) => p.pipe === 'inventory_sync') ?? null,
+    [pipelines],
+  );
+
+  // The back-sync pipe owns the missed-shipments panel (Unit 2).
+  const backSyncPipe = useMemo(
+    () => pipelines.find((p) => p.pipe === 'back_sync') ?? null,
+    [pipelines],
+  );
+
+  // Unit 3 pipes: price-sync, NAV job queue, Shopify webhooks.
+  const priceSyncPipe = useMemo(
+    () => pipelines.find((p) => p.pipe === 'price_sync') ?? null,
+    [pipelines],
+  );
+  const jobQueuePipe = useMemo(
+    () => pipelines.find((p) => p.pipe === 'nav_job_queue') ?? null,
+    [pipelines],
+  );
+  const webhookPipe = useMemo(
+    () => pipelines.find((p) => p.pipe === 'shopify_webhook') ?? null,
     [pipelines],
   );
 
@@ -90,6 +123,9 @@ export function App(): JSX.Element {
           </div>
         )}
 
+        {/* Leadership rollup: the top-of-page glance layer (Unit 6). */}
+        <LeadershipStrip rollup={rollup} asOf={rollupAsOf} />
+
         <PipelineStrip pipelines={pipelines} />
 
         <div className="sec">
@@ -98,6 +134,34 @@ export function App(): JSX.Element {
           <span className="aux">reference monitor: freshness · liveness · push-outcome</span>
         </div>
         <InventoryPanel pipe={inventoryPipe} />
+
+        <div className="sec">
+          <h2>Back-sync</h2>
+          <div className="rule" />
+          <span className="aux">NAV shipment to Shopify: freshness · liveness · missed shipments</span>
+        </div>
+        <BackSyncPanel pipe={backSyncPipe} />
+
+        <div className="sec">
+          <h2>Price sync</h2>
+          <div className="rule" />
+          <span className="aux">Unit 3 monitor: received freshness · syncer liveness</span>
+        </div>
+        <PriceSyncPanel pipe={priceSyncPipe} />
+
+        <div className="sec">
+          <h2>NAV job queue</h2>
+          <div className="rule" />
+          <span className="aux">Unit 3 monitor: verdict consumed from middleware, not recomputed</span>
+        </div>
+        <JobQueuePanel pipe={jobQueuePipe} />
+
+        <div className="sec">
+          <h2>Shopify webhooks</h2>
+          <div className="rule" />
+          <span className="aux">Unit 3 monitor: last received per topic · subscription health</span>
+        </div>
+        <ShopifyWebhookPanel pipe={webhookPipe} />
 
         <div className="sec">
           <h2>Warehouse split</h2>

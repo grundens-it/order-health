@@ -14,6 +14,11 @@ import type { MiddlewareClient } from '../sources/middlewareClient';
 import type { NavClient } from '../sources/navClient';
 import { computeInventorySync, type InventorySyncInput } from './inventorySync';
 import { computeAllocator, type AllocatorInput } from './allocator';
+import { computeJobQueue, type JobQueueInput } from './jobQueue';
+import { computePriceSync, type PriceSyncInput } from './priceSync';
+import { computeShopifyWebhook, type ShopifyWebhookInput } from './shopifyWebhook';
+import { computeBackSync, type BackSyncInput } from './backSync';
+import type { MissedShipment } from '@order-health/shared';
 
 // The set of pipes the strip renders. Phase W units each own one key.
 export const PIPES = [
@@ -114,6 +119,147 @@ export async function computeAllocatorPipeline(sources: Sources): Promise<Pipeli
   };
 }
 
+// --- Unit 3: price_sync ----------------------------------------------------
+// Freshness (last price-sync received) + liveness (last price-sync run), both
+// cycle-banded. I/O glue only; the pure math lives in priceSync.ts.
+export async function computePriceSyncPipeline(sources: Sources): Promise<PipelineHealth> {
+  const status = await sources.middleware.getPriceSyncStatus();
+
+  const input: PriceSyncInput = {
+    lastReceivedAt: status.lastReceivedAt,
+    lastRunAt: status.lastRunAt,
+  };
+
+  const r = computePriceSync(input, config.priceSync, Date.now());
+
+  return {
+    pipe: 'price_sync',
+    pipe_verdict: r.pipeVerdict,
+    freshness_verdict: r.freshnessVerdict,
+    watermark_lag_s: r.lastReceivedAgeS, // age of last received price-sync signal
+    last_progress_at: r.lastReceivedAt,
+    liveness_verdict: r.livenessVerdict,
+    heartbeat_at: r.lastRunAt,
+    heartbeat_age_s: r.lastRunAgeS,
+    detail: r.detail as unknown as Record<string, unknown>,
+  };
+}
+
+// --- Unit 3: nav_job_queue -------------------------------------------------
+// CONSUME the middleware's already-computed job-queue verdict; do NOT recompute
+// it (design.md 6). The row's three verdict columns all reflect that single
+// adopted verdict (this pipe derives no independent freshness/liveness); the
+// supporting numbers ride in the typed detail bag.
+export async function computeJobQueuePipeline(sources: Sources): Promise<PipelineHealth> {
+  const status = await sources.middleware.getJobQueueHealthStatus();
+
+  const input: JobQueueInput = {
+    middlewareVerdict: status.verdict,
+    autoReleaseFiredAt: status.autoReleaseFiredAt,
+    longestRunningJobS: status.longestRunningJobS,
+    stuckJobCount: status.stuckJobCount,
+    checkedAt: status.checkedAt,
+  };
+
+  const r = computeJobQueue(input, config.jobQueue, Date.now());
+
+  return {
+    pipe: 'nav_job_queue',
+    pipe_verdict: r.pipeVerdict,           // == the adopted middleware verdict
+    freshness_verdict: r.adoptedVerdict,   // mirrors the single consumed verdict
+    watermark_lag_s: null,
+    last_progress_at: r.lastProgressAt,    // last CU 50009 auto-release firing
+    liveness_verdict: r.adoptedVerdict,    // mirrors the single consumed verdict
+    heartbeat_at: r.detail.checked_at,
+    heartbeat_age_s: null,
+    detail: r.detail as unknown as Record<string, unknown>,
+  };
+}
+
+// --- Unit 3: shopify_webhook -----------------------------------------------
+// Per-topic last-received freshness rolled up with the subscription-removal
+// signal (a removed/absent subscription is amber-or-worse). Pure math in
+// shopifyWebhook.ts.
+export async function computeShopifyWebhookPipeline(sources: Sources): Promise<PipelineHealth> {
+  const status = await sources.middleware.getShopifyWebhookStatus();
+
+  const input: ShopifyWebhookInput = {
+    topics: status.topics.map((t) => ({
+      topic: t.topic,
+      lastReceivedAt: t.lastReceivedAt,
+      subscribed: t.subscribed,
+    })),
+  };
+
+  const r = computeShopifyWebhook(input, config.shopifyWebhook, Date.now());
+
+  return {
+    pipe: 'shopify_webhook',
+    pipe_verdict: r.pipeVerdict,
+    freshness_verdict: r.freshnessVerdict,     // worst per-topic last-received freshness
+    watermark_lag_s: null,
+    last_progress_at: r.detail.freshest_received_at,
+    liveness_verdict: r.subscriptionVerdict,   // amber-or-worse when a subscription is removed
+    heartbeat_at: null,
+    heartbeat_age_s: null,
+    detail: r.detail as unknown as Record<string, unknown>,
+  };
+}
+
+// Back-sync pipe seam (Unit 2). Reads the middleware's read-only back-sync status
+// and its EXISTING missed-shipments endpoint, enriches missed rows with NAV shipment
+// detail (GRUS$Sales Shipment Header, read-only), assembles the seeded input, calls
+// the pure computeBackSync, and maps the result to the PipelineHealth row. All reads
+// are currently stubbed (typed nulls/empties) until DevOps provisions the sources.
+export async function computeBackSyncPipeline(sources: Sources): Promise<PipelineHealth> {
+  const [status, missed, shipments] = await Promise.all([
+    sources.middleware.getBackSyncStatus(),
+    sources.middleware.getMissedShipmentDetail(),
+    sources.nav.getRecentShipments(50),
+  ]);
+
+  // Enrich each missed row with NAV shipment header detail (carrier / tracking /
+  // posted time) keyed by NAV shipment number, when the middleware row lacks it.
+  const byShipmentNo = new Map(shipments.map((s) => [s.navShipmentNo, s]));
+  const enriched: MissedShipment[] | null =
+    missed === null
+      ? null
+      : missed.map((m) => {
+          const nav = m.nav_shipment_no !== null ? byShipmentNo.get(m.nav_shipment_no) : undefined;
+          return {
+            ...m,
+            carrier: m.carrier ?? nav?.carrier ?? null,
+            tracking: m.tracking ?? nav?.tracking ?? null,
+            posted_at: m.posted_at ?? nav?.postedAt ?? null,
+            web_id: m.web_id ?? nav?.webId ?? null,
+          };
+        });
+
+  const input: BackSyncInput = {
+    lastBackSyncAt: status.lastBackSyncAt,
+    watcherHeartbeatAt: status.watcherHeartbeatAt,
+    fulfillmentsLast24h: status.fulfillmentsLast24h,
+    errorsLast24h: status.errorsLast24h,
+    missedShipments: enriched,
+  };
+
+  const r = computeBackSync(input, config.backSync, Date.now());
+
+  return {
+    pipe: 'back_sync',
+    pipe_verdict: r.pipeVerdict, // worst of freshness / liveness / missed
+    freshness_verdict: r.freshnessVerdict,
+    watermark_lag_s: r.watermarkLagS,
+    last_progress_at: r.lastProgressAt,
+    liveness_verdict: r.livenessVerdict,
+    heartbeat_at: r.heartbeatAt,
+    heartbeat_age_s: r.heartbeatAgeS,
+    // The missed-shipments sub-verdict, counters, and detail rows for the panel
+    // table live in the typed detail bag (BackSyncDetail).
+    detail: r.detail as unknown as Record<string, unknown>,
+  };
+}
+
 // A generic placeholder pipe so the strip has a full row set before each Phase W
 // unit lands its real compute. Same PipelineHealth shape as the seam above.
 function placeholderPipe(pipe: string): PipelineHealth {
@@ -130,15 +276,20 @@ function placeholderPipe(pipe: string): PipelineHealth {
   };
 }
 
-// Compute every pipe's health for one run. Inventory-sync uses its seam; the
-// rest are placeholders until their Phase W unit lands.
+// Compute every pipe's health for one run. Each landed Phase W unit adds its real
+// seam to the `real` map; the rest stay placeholders. The strip order is fixed by
+// PIPES so units can add their entry additively without reordering the row set.
 export async function computePipelines(sources: Sources): Promise<PipelineHealth[]> {
-  const inventory = await computeInventorySyncPipeline(sources);
-  const allocator = await computeAllocatorPipeline(sources);
-  const seams = [inventory, allocator];
-  const seamPipes = new Set(seams.map((s) => s.pipe));
-  const rest = PIPES.filter((p) => !seamPipes.has(p)).map(placeholderPipe);
-  return [...seams, ...rest];
+  const landed = await Promise.all([
+    computeInventorySyncPipeline(sources),
+    computeBackSyncPipeline(sources),       // Unit 2
+    computePriceSyncPipeline(sources),      // Unit 3
+    computeJobQueuePipeline(sources),       // Unit 3
+    computeShopifyWebhookPipeline(sources), // Unit 3
+    computeAllocatorPipeline(sources),      // Unit 4
+  ]);
+  const real = new Map<string, PipelineHealth>(landed.map((p) => [p.pipe, p]));
+  return PIPES.map((p) => real.get(p) ?? placeholderPipe(p));
 }
 
 // Order-layer compute. STUB: returns no orders (the source reads are stubbed).

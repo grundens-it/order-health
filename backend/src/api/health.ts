@@ -3,9 +3,14 @@
 // read ONLY the snapshot repository; there are no live source calls in the
 // request path.
 import type { FastifyInstance } from 'fastify';
-import type { ChannelFilter, PipelinesResponse, OrdersResponse } from '@order-health/shared';
+import type {
+  ChannelFilter,
+  PipelinesResponse,
+  OrdersResponse,
+  RollupResponse,
+} from '@order-health/shared';
 import { envelope } from '@order-health/shared';
-import { latestOrders, latestPipelines } from '../repo/snapshotRepo';
+import { latestOrders, latestPipelines, latestRollup } from '../repo/snapshotRepo';
 
 function parseChannel(raw: unknown): ChannelFilter {
   if (raw === 'dtc' || raw === 'wholesale' || raw === 'all') return raw;
@@ -24,6 +29,14 @@ export async function registerHealthRoutes(app: FastifyInstance): Promise<void> 
     const channel = parseChannel((req.query as { channel?: unknown }).channel);
     const snap = await latestOrders(channel);
     return envelope(snap.asOf, snap.rows);
+  });
+
+  // Leadership rollup strip (Unit 6): headline verdict, oldest stuck age,
+  // inventory-sync-fresh, and at-a-glance counts. Derived READ-ONLY from the
+  // same latest pipeline + order snapshot; no new source, no live call.
+  app.get('/api/health/rollup', async (): Promise<RollupResponse> => {
+    const { asOf, rollup } = await latestRollup();
+    return { as_of: asOf, ...rollup };
   });
 
   // Liveness of THIS service (not a source verdict). Cheap, no DB required.

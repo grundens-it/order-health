@@ -1,11 +1,11 @@
 // Pure-surface tests for the read-only middleware HTTP client (no live fetch).
 //
 // Covers the parts testable without a live middleware (design.md QA seat):
-//   1. the per-endpoint JSON mappers  -> a fake response body maps to the EXACT
-//      typed shape the MiddlewareClient interface declares (camelCase AND
-//      snake_case wire variants both accepted);
-//   2. the read-only GET guard + the URL / header builders (Bearer only when a
-//      token is set);
+//   1. the per-endpoint JSON mappers  -> a fake response body shaped like the
+//      REAL middleware handler maps to the EXACT typed shape the MiddlewareClient
+//      interface declares (issues #36 / #37: real routes + compose logic);
+//   2. the read-only GET guard + the URL / header / query builders (Bearer only
+//      when a token is set);
 //   3. the factory's live-vs-stub selection driven by MIDDLEWARE_BASE_URL.
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -16,6 +16,7 @@ import {
   asRecordArray,
   assertReadOnlyMethod,
   buildHeaders,
+  buildPath,
   buildUrl,
   mapAllocationDecision,
   mapAllocatorStatus,
@@ -39,12 +40,18 @@ test('assertReadOnlyMethod accepts GET and rejects any mutating verb', () => {
   }
 });
 
-// --- URL + header builders --------------------------------------------------
+// --- URL + header + query builders ------------------------------------------
 test('buildUrl joins base + path without doubling the slash', () => {
-  assert.equal(buildUrl('https://middleware.grundens.com', '/api/dashboard/errors'),
-    'https://middleware.grundens.com/api/dashboard/errors');
-  assert.equal(buildUrl('https://middleware.grundens.com/', '/api/dashboard/errors'),
-    'https://middleware.grundens.com/api/dashboard/errors');
+  assert.equal(buildUrl('https://middleware.grundens.com', '/api/errors'),
+    'https://middleware.grundens.com/api/errors');
+  assert.equal(buildUrl('https://middleware.grundens.com/', '/api/errors'),
+    'https://middleware.grundens.com/api/errors');
+});
+
+test('buildPath appends a query string and skips undefined values', () => {
+  assert.equal(buildPath('/api/activity/recent'), '/api/activity/recent');
+  assert.equal(buildPath('/api/activity/recent', { limit: 200 }), '/api/activity/recent?limit=200');
+  assert.equal(buildPath('/api/errors', { days: 15, page: undefined }), '/api/errors?days=15');
 });
 
 test('buildHeaders sends Bearer ONLY when a token is set (endpoints are unauthenticated)', () => {
@@ -56,10 +63,12 @@ test('buildHeaders sends Bearer ONLY when a token is set (endpoints are unauthen
 });
 
 // --- Body coercion helpers --------------------------------------------------
-test('asRecordArray tolerates bare arrays and {items|rows|data} envelopes', () => {
+test('asRecordArray tolerates bare arrays and real middleware envelopes', () => {
   assert.deepEqual(asRecordArray([{ a: 1 }]), [{ a: 1 }]);
-  assert.deepEqual(asRecordArray({ items: [{ a: 1 }] }), [{ a: 1 }]);
-  assert.deepEqual(asRecordArray({ rows: [{ b: 2 }] }), [{ b: 2 }]);
+  assert.deepEqual(asRecordArray({ rows: [{ b: 2 }] }), [{ b: 2 }]); // errors / stuck-staging / recent / audit
+  assert.deepEqual(asRecordArray({ missed: [{ c: 3 }] }), [{ c: 3 }]); // missed-shipments
+  assert.deepEqual(asRecordArray({ pending: [{ d: 4 }] }), [{ d: 4 }]); // pending-fulfillment
+  assert.deepEqual(asRecordArray({ events: [{ e: 5 }] }), [{ e: 5 }]); // webhook events
   assert.deepEqual(asRecordArray(null), []);
   assert.deepEqual(asRecordArray('nope'), []);
 });
@@ -70,152 +79,224 @@ test('asRecord returns objects and coerces non-objects to {}', () => {
   assert.deepEqual(asRecord(null), {});
 });
 
-// --- GET /api/inventory-sync/status ----------------------------------------
-test('mapInventorySyncStatus maps the dry-run divergence (camelCase)', () => {
+// --- GET /api/nav/inventory-sync/analytics ----------------------------------
+test('mapInventorySyncStatus reads totalPairs from analytics.cron.last_walk', () => {
   const r = mapInventorySyncStatus({
-    dryRunWouldPush: 7245,
-    dryRunAt: '2026-07-05T12:00:00Z',
-    totalPairs: 12218,
+    window_days: 15,
+    total: 100,
+    cron: {
+      enabled: true,
+      interval_seconds: 900,
+      last_run_at: '2026-07-05T12:00:00Z',
+      last_walk: { running: false, completed_at: '2026-07-05T12:00:00Z', total_pairs: 12218, pushed: 42 },
+    },
   });
+  assert.equal(r.totalPairs, 12218);
+  // The dry-run "would push" preview is POST-triggered — not obtainable read-only.
+  assert.equal(r.dryRunWouldPush, null);
+  assert.equal(r.dryRunAt, null);
+});
+
+test('mapInventorySyncStatus still honours an explicit dry-run body and yields typed nulls when absent', () => {
+  const r = mapInventorySyncStatus({ dryRunWouldPush: 7245, dryRunAt: '2026-07-05T12:00:00Z', totalPairs: 12218 });
   assert.equal(r.dryRunWouldPush, 7245);
   assert.equal(r.dryRunAt, '2026-07-05T12:00:00.000Z');
   assert.equal(r.totalPairs, 12218);
+  assert.deepEqual(mapInventorySyncStatus({}), { dryRunWouldPush: null, dryRunAt: null, totalPairs: null });
 });
 
-test('mapInventorySyncStatus accepts snake_case and yields typed nulls when absent', () => {
-  const r = mapInventorySyncStatus({ dry_run_would_push: 10, total_pairs: 100 });
-  assert.equal(r.dryRunWouldPush, 10);
-  assert.equal(r.totalPairs, 100);
-  assert.equal(r.dryRunAt, null);
-  assert.deepEqual(mapInventorySyncStatus({}), {
-    dryRunWouldPush: null,
-    dryRunAt: null,
-    totalPairs: null,
-  });
-});
-
-// --- GET /api/allocator/status ---------------------------------------------
-test('mapAllocationDecision maps a warehouse_allocation_log row to the typed shape', () => {
+// --- GET /api/warehouse/rollout/audit + /api/oos-held -----------------------
+test('mapAllocationDecision maps a warehouse_allocation_log row (reason -> rule, warehouse_assigned -> location)', () => {
   const d = mapAllocationDecision({
     decided_at: '2026-07-05T10:00:00Z',
-    order_ref: 'SP-319090',
-    channel: 'dtc',
+    order_id: 319090,
     sku: 'GND-1001',
-    qty: 3,
-    rule: 'least-split -> TAC',
-    location: 'TAC',
-    outcome: 'split',
+    warehouse_assigned: 'NEW',
+    nav_location_code: 'HF1FTZ',
+    reason: 'stock_asymmetry',
   });
-  assert.equal(d.order_ref, 'SP-319090');
-  assert.equal(d.channel, 'dtc');
-  assert.equal(d.outcome, 'split');
+  assert.equal(d.order_ref, '319090');
+  assert.equal(d.sku, 'GND-1001');
+  assert.equal(d.rule, 'stock_asymmetry');
+  assert.equal(d.location, 'NEW');
+  assert.equal(d.outcome, 'allocated');
   assert.equal(d.decided_at, '2026-07-05T10:00:00.000Z');
 });
 
-test('mapAllocationDecision coerces an unknown/absent outcome to a safe default and unknown channel to null', () => {
+test('mapAllocationDecision derives an unallocatable outcome from an out_of_stock reason', () => {
+  assert.equal(mapAllocationDecision({ reason: 'out_of_stock' }).outcome, 'unallocatable');
+  // An explicit outcome still wins; unknown outcome/channel coerce safely.
   const d = mapAllocationDecision({ outcome: 'weird', channel: 'xx' });
   assert.equal(d.outcome, 'allocated');
   assert.equal(d.channel, null);
 });
 
-test('mapAllocatorStatus maps window counts + recent decisions (snake_case)', () => {
-  const r = mapAllocatorStatus({
-    last_decision_at: '2026-07-05T10:00:00Z',
-    service_heartbeat_at: '2026-07-05T10:01:00Z',
-    window_seconds: 300,
-    decisions_window: 40,
-    split_count: 6,
-    unallocatable_count: 1,
-    failed_count: 2,
-    atp_fallback_count: 3,
-    recent_decisions: [{ outcome: 'failed' }, { outcome: 'allocated' }],
-  });
-  assert.equal(r.decisionsWindow, 40);
-  assert.equal(r.splitCount, 6);
-  assert.equal(r.unallocatableCount, 1);
-  assert.equal(r.recentDecisions.length, 2);
-  assert.equal(r.recentDecisions[0].outcome, 'failed');
+test('mapAllocatorStatus composes split sample + window from the audit page and OOS-held backlog', () => {
+  const audit = {
+    total: 247,
+    rows: [
+      // order 1 split across two warehouses (OLD + NEW) -> counts as 1 split
+      { order_id: 1, line_item_id: 10, warehouse_assigned: 'OLD', reason: 'rolled', decided_at: '2026-07-05T10:05:00Z' },
+      { order_id: 1, line_item_id: 11, warehouse_assigned: 'NEW', reason: 'rolled', decided_at: '2026-07-05T10:05:00Z' },
+      // order 2 single warehouse -> not a split
+      { order_id: 2, line_item_id: 20, warehouse_assigned: 'NEW', reason: 'order_level_pref', decided_at: '2026-07-05T10:00:00Z' },
+    ],
+  };
+  const oosHeld = [
+    { order_id: 900, status: 'needs_operator', class: 'transient', first_seen_at: '2026-07-05T09:00:00Z' },
+    { order_id: 901, status: 'pending', class: 'backorder', first_seen_at: '2026-07-05T08:00:00Z' },
+  ];
+  const r = mapAllocatorStatus(audit, oosHeld);
+  assert.equal(r.lastDecisionAt, '2026-07-05T10:05:00.000Z');
+  assert.equal(r.decisionsWindow, 3);
+  assert.equal(r.splitCount, 1);
+  assert.equal(r.windowSeconds, 300); // 10:05:00 - 10:00:00
+  assert.equal(r.unallocatableCount, 2); // OOS-held backlog
+  assert.equal(r.recentDecisions.length, 3);
+  // Not obtainable read-only -> honest nulls.
+  assert.equal(r.failedCount, null);
+  assert.equal(r.atpFallbackCount, null);
+  assert.equal(r.serviceHeartbeatAt, null);
 });
 
-test('mapAllocatorStatus returns an empty decisions array when the field is missing', () => {
-  const r = mapAllocatorStatus({});
+test('mapAllocatorStatus returns honest nulls when the audit page is empty and oos-held not an array', () => {
+  const r = mapAllocatorStatus({ rows: [] }, {});
   assert.deepEqual(r.recentDecisions, []);
   assert.equal(r.lastDecisionAt, null);
+  assert.equal(r.decisionsWindow, null);
+  assert.equal(r.splitCount, null);
+  assert.equal(r.unallocatableCount, null); // non-array oos body -> unknown, not a false zero
 });
 
-// --- GET /api/nav/job-queue/health -----------------------------------------
-test('mapJobQueueHealthStatus adopts the verdict string unchanged', () => {
+// --- GET /api/nav/job-queue/health ------------------------------------------
+test('mapJobQueueHealthStatus adopts `level` as the verdict and reads the real fields', () => {
   const r = mapJobQueueHealthStatus({
-    verdict: 'green',
-    autoReleaseFiredAt: '2026-07-05T09:00:00Z',
-    longestRunningJobS: 45,
-    stuckJobCount: 0,
-    checkedAt: '2026-07-05T09:05:00Z',
+    level: 'Warn',
+    summary: 'auto-release silent 18m',
+    last_auto_release: '2026-07-05T09:00:00Z',
+    pending_staging: 7,
+    stuck_jobs: [
+      { id: 'a', minutes_stuck: 45 },
+      { id: 'b', minutes_stuck: 12 },
+    ],
+    queried_at: '2026-07-05T09:05:00Z',
   });
-  assert.equal(r.verdict, 'green');
-  assert.equal(r.longestRunningJobS, 45);
-  assert.equal(r.stuckJobCount, 0);
+  assert.equal(r.verdict, 'Warn');
+  assert.equal(r.autoReleaseFiredAt, '2026-07-05T09:00:00.000Z');
+  assert.equal(r.longestRunningJobS, 45 * 60); // max minutes_stuck -> seconds
+  assert.equal(r.stuckJobCount, 2); // stuck_jobs.length
   assert.equal(r.checkedAt, '2026-07-05T09:05:00.000Z');
 });
 
-// --- GET /api/price-sync/status --------------------------------------------
-test('mapPriceSyncStatus maps last-received + last-run', () => {
-  const r = mapPriceSyncStatus({ last_received_at: '2026-07-05T08:00:00Z', last_run_at: '2026-07-05T08:30:00Z' });
-  assert.equal(r.lastReceivedAt, '2026-07-05T08:00:00.000Z');
+test('mapJobQueueHealthStatus reports zero stuck jobs (green) from an empty stuck_jobs array', () => {
+  const r = mapJobQueueHealthStatus({ level: 'Ok', stuck_jobs: [], queried_at: '2026-07-05T09:05:00Z' });
+  assert.equal(r.verdict, 'Ok');
+  assert.equal(r.stuckJobCount, 0);
+  assert.equal(r.longestRunningJobS, null);
+});
+
+// --- GET /api/nav/price-sync/recent + /settings -----------------------------
+test('mapPriceSyncStatus composes last-received (recent) + last-run (settings)', () => {
+  const recent = {
+    days: 15,
+    rows: [
+      { id: 2, sku: 'X', synced_at: '2026-07-05T08:00:00Z' },
+      { id: 1, sku: 'Y', synced_at: '2026-07-05T07:00:00Z' },
+    ],
+  };
+  const settings = { enabled: true, interval_seconds: 900, last_run_at: '2026-07-05T08:30:00Z' };
+  const r = mapPriceSyncStatus(recent, settings);
+  assert.equal(r.lastReceivedAt, '2026-07-05T08:00:00.000Z'); // newest row
   assert.equal(r.lastRunAt, '2026-07-05T08:30:00.000Z');
-  assert.deepEqual(mapPriceSyncStatus({}), { lastReceivedAt: null, lastRunAt: null });
+  assert.deepEqual(mapPriceSyncStatus({ rows: [] }, {}), { lastReceivedAt: null, lastRunAt: null });
 });
 
-// --- GET /api/webhooks/shopify/health --------------------------------------
-test('mapWebhookTopic defaults subscribed to true when absent, false only when explicit', () => {
+// --- GET /api/shopify/webhooks/subscriptions + /events ----------------------
+test('mapWebhookTopic marks a topic subscribed unless deactivated_at is set', () => {
   assert.equal(mapWebhookTopic({ topic: 'orders/create' }).subscribed, true);
-  assert.equal(mapWebhookTopic({ topic: 'orders/create', subscribed: false }).subscribed, false);
+  assert.equal(mapWebhookTopic({ topic: 'orders/create', deactivated_at: null }).subscribed, true);
+  assert.equal(mapWebhookTopic({ topic: 'orders/create', deactivated_at: '2026-07-01T00:00:00Z' }).subscribed, false);
 });
 
-test('mapShopifyWebhookStatus accepts a bare array or a {topics:[...]} envelope', () => {
-  const fromArray = mapShopifyWebhookStatus([
-    { topic: 'orders/create', last_received_at: '2026-07-05T07:00:00Z', subscribed: true },
-  ]);
-  assert.equal(fromArray.topics.length, 1);
-  assert.equal(fromArray.topics[0].topic, 'orders/create');
-  assert.equal(fromArray.topics[0].lastReceivedAt, '2026-07-05T07:00:00.000Z');
-
-  const fromEnvelope = mapShopifyWebhookStatus({ topics: [{ topic: 'fulfillments/create', subscribed: false }] });
-  assert.equal(fromEnvelope.topics[0].subscribed, false);
-  assert.deepEqual(mapShopifyWebhookStatus({}).topics, []);
+test('mapShopifyWebhookStatus joins subscriptions to per-topic last-received events', () => {
+  const subscriptions = [
+    { topic: 'orders/create', deactivated_at: null },
+    { topic: 'fulfillments/create', deactivated_at: '2026-07-01T00:00:00Z' }, // removed subscription
+  ];
+  const events = {
+    total: 3,
+    events: [
+      { topic: 'orders/create', received_at: '2026-07-05T07:00:00Z' },
+      { topic: 'orders/create', received_at: '2026-07-05T07:30:00Z' }, // newer
+      { topic: 'fulfillments/create', received_at: '2026-07-04T06:00:00Z' },
+    ],
+  };
+  const r = mapShopifyWebhookStatus(subscriptions, events);
+  const create = r.topics.find((t) => t.topic === 'orders/create');
+  const fulfil = r.topics.find((t) => t.topic === 'fulfillments/create');
+  assert.equal(create?.subscribed, true);
+  assert.equal(create?.lastReceivedAt, '2026-07-05T07:30:00.000Z');
+  assert.equal(fulfil?.subscribed, false); // deactivated
+  assert.equal(fulfil?.lastReceivedAt, '2026-07-04T06:00:00.000Z');
 });
 
-// --- GET /api/back-sync/status ---------------------------------------------
-test('mapBackSyncStatus maps watermark + heartbeat + 24h counters', () => {
-  const r = mapBackSyncStatus({
-    lastBackSyncAt: '2026-07-05T06:00:00Z',
-    watcherHeartbeatAt: '2026-07-05T06:05:00Z',
-    fulfillmentsLast24h: 120,
-    errorsLast24h: 2,
+test('mapShopifyWebhookStatus surfaces a topic with traffic but no subscription row as unsubscribed', () => {
+  const r = mapShopifyWebhookStatus([], { events: [{ topic: 'orders/updated', received_at: '2026-07-05T07:00:00Z' }] });
+  assert.equal(r.topics.length, 1);
+  assert.equal(r.topics[0].topic, 'orders/updated');
+  assert.equal(r.topics[0].subscribed, false);
+  assert.deepEqual(mapShopifyWebhookStatus([], { events: [] }).topics, []);
+});
+
+// --- GET /api/nav/back-sync/feed --------------------------------------------
+test('mapBackSyncStatus derives watermark + 24h counters from the feed rows', () => {
+  const now = Date.parse('2026-07-05T12:00:00Z');
+  const feed = {
+    mode: 'live',
+    total: 3,
+    rows: [
+      // fulfilled 1h ago -> counts, and is the newest fulfilled -> watermark
+      { nav_shipment_no: 'SH-3', recorded_at: '2026-07-05T11:00:00Z', shopify_fulfillment_id: 903, error: null },
+      // errored 2h ago -> error count
+      { nav_shipment_no: 'SH-2', recorded_at: '2026-07-05T10:00:00Z', shopify_fulfillment_id: null, error: 'timeout' },
+      // fulfilled 40h ago -> outside 24h window, not counted, but eligible watermark (older)
+      { nav_shipment_no: 'SH-1', recorded_at: '2026-07-03T20:00:00Z', shopify_fulfillment_id: 901, error: null },
+    ],
+  };
+  const r = mapBackSyncStatus(feed, now);
+  assert.equal(r.lastBackSyncAt, '2026-07-05T11:00:00.000Z');
+  assert.equal(r.fulfillmentsLast24h, 1);
+  assert.equal(r.errorsLast24h, 1);
+  assert.equal(r.watcherHeartbeatAt, null); // not exposed read-only
+});
+
+// --- GET /api/back-sync/missed-shipments ------------------------------------
+test('mapMissedShipments maps the real handler fields via the {missed:[...]} envelope', () => {
+  const rows = mapMissedShipments({
+    total_missed: 1,
+    missed: [
+      {
+        nav_shipment_no: 'SH-42',
+        sales_order: 'SP-319090',
+        posting_date: '2026-07-05T05:00:00Z',
+        tracking_no: '1Z',
+        shipping_agent: 'UPS',
+        location_code: 'HF1FTZ',
+        status: 'missing',
+        last_error: 'no shopify_fulfillment_id',
+      },
+    ],
   });
-  assert.equal(r.lastBackSyncAt, '2026-07-05T06:00:00.000Z');
-  assert.equal(r.fulfillmentsLast24h, 120);
-  assert.equal(r.errorsLast24h, 2);
-});
-
-// --- GET /api/back-sync/missed-shipments -----------------------------------
-test('mapMissedShipments maps rows; an empty array stays an empty array (real zero-missed)', () => {
-  const rows = mapMissedShipments([
-    {
-      order_ref: 'SP-319090',
-      web_id: 'W-1',
-      nav_shipment_no: 'SH-42',
-      carrier: 'UPS',
-      tracking: '1Z',
-      posted_at: '2026-07-05T05:00:00Z',
-      age_s: 3600,
-      reason: 'escalated after 6h',
-    },
-  ]);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].nav_shipment_no, 'SH-42');
+  assert.equal(rows[0].order_ref, 'SP-319090');
+  assert.equal(rows[0].carrier, 'UPS');
+  assert.equal(rows[0].tracking, '1Z');
   assert.equal(rows[0].posted_at, '2026-07-05T05:00:00.000Z');
-  assert.deepEqual(mapMissedShipments([]), []);
+  assert.equal(rows[0].reason, 'no shopify_fulfillment_id');
+  assert.equal(rows[0].web_id, null); // not exposed by this endpoint
+  assert.equal(rows[0].age_s, null);
+  assert.deepEqual(mapMissedShipments({ missed: [] }), []);
 });
 
 // --- Factory: live-vs-stub selection ---------------------------------------
@@ -254,14 +335,21 @@ test('the stub returns typed empty shapes for every method, and null missed deta
   assert.deepEqual(await stub.getErrors(), []);
 });
 
-// --- Path table sanity (the endpoints this consumer calls, GET-only) --------
-test('MIDDLEWARE_PATHS lists exactly the existing dashboard.rs GET routes', () => {
-  assert.equal(MIDDLEWARE_PATHS.errors, '/api/dashboard/errors');
-  assert.equal(MIDDLEWARE_PATHS.inventorySyncStatus, '/api/inventory-sync/status');
-  assert.equal(MIDDLEWARE_PATHS.backSyncStatus, '/api/back-sync/status');
-  assert.equal(MIDDLEWARE_PATHS.missedShipments, '/api/back-sync/missed-shipments');
-  assert.equal(MIDDLEWARE_PATHS.priceSyncStatus, '/api/price-sync/status');
+// --- Path table sanity (the real GET routes this consumer calls) ------------
+test('MIDDLEWARE_PATHS lists the reconciled real middleware GET routes', () => {
+  // Issue #36 — corrected direct paths.
+  assert.equal(MIDDLEWARE_PATHS.activity, '/api/activity/recent');
+  assert.equal(MIDDLEWARE_PATHS.errors, '/api/errors');
+  assert.equal(MIDDLEWARE_PATHS.pendingFulfillment, '/api/middleware/pending-fulfillment-requests');
   assert.equal(MIDDLEWARE_PATHS.jobQueueHealth, '/api/nav/job-queue/health');
-  assert.equal(MIDDLEWARE_PATHS.shopifyWebhookHealth, '/api/webhooks/shopify/health');
-  assert.equal(MIDDLEWARE_PATHS.allocatorStatus, '/api/allocator/status');
+  assert.equal(MIDDLEWARE_PATHS.missedShipments, '/api/back-sync/missed-shipments');
+  assert.equal(MIDDLEWARE_PATHS.stuckStaging, '/api/nav/stuck-staging');
+  // Issue #37 — compose sources.
+  assert.equal(MIDDLEWARE_PATHS.backSyncFeed, '/api/nav/back-sync/feed');
+  assert.equal(MIDDLEWARE_PATHS.inventorySyncAnalytics, '/api/nav/inventory-sync/analytics');
+  assert.equal(MIDDLEWARE_PATHS.priceSyncRecent, '/api/nav/price-sync/recent');
+  assert.equal(MIDDLEWARE_PATHS.webhookSubscriptions, '/api/shopify/webhooks/subscriptions');
+  assert.equal(MIDDLEWARE_PATHS.webhookEvents, '/api/shopify/webhooks/events');
+  assert.equal(MIDDLEWARE_PATHS.allocatorAudit, '/api/warehouse/rollout/audit');
+  assert.equal(MIDDLEWARE_PATHS.oosHeld, '/api/oos-held');
 });

@@ -1,18 +1,31 @@
 // Read-only client for the Symmetry middleware's EXISTING HTTP endpoints.
 //
 // BOUNDARY: this is a pure external consumer. It only issues GET requests to
-// observability endpoints the middleware ALREADY exposes (its dashboard.rs:
-// dashboard activity/errors, inventory-sync/status, back-sync status +
-// missed-shipments, price-sync/status, nav/job-queue/health, webhooks health,
-// allocator/status). It never POSTs, never PUTs, never mutates, and adds NO new
-// endpoint to the middleware. Every request is hardcoded to GET and routed
-// through assertReadOnlyMethod as defence in depth. See design.md section 0.
+// observability endpoints the middleware ALREADY exposes (its warp route table
+// in main.rs / dashboard.rs / nav / shopify / warehouse_split handlers). It
+// never POSTs, never PUTs, never mutates, and adds NO new endpoint to the
+// middleware. Every request is hardcoded to GET and routed through
+// assertReadOnlyMethod as defence in depth. See design.md section 0.
 //
-// AUTH: per docs/DATA_SOURCES.md the dashboard.rs read endpoints are
-// UNAUTHENTICATED observability surfaces (the middleware notes "no auth /
-// password gates because these are observability surfaces"), so no token is
-// normally required. An Authorization: Bearer header is sent ONLY when
-// MIDDLEWARE_AUTH_TOKEN is set; it is never required and is absent by default.
+// REAL ROUTES (reconciled against the middleware repo — see
+// docs/middleware-api-reconciliation.md and issues #36 / #37). The middleware is
+// a warp server over SQLite that exposes per-source feeds/recents/analytics, NOT
+// one "status" object per pipe. Two classes of fix are applied here:
+//   * Issue #36 — direct path remaps (activity, errors, pending-fulfillment) and
+//     response-shape corrections for the confirm-shape endpoints (job-queue
+//     health, missed-shipments).
+//   * Issue #37 — five per-pipe tiles have no 1:1 status endpoint; each is
+//     COMPOSED read-only from the real feeds/recents/analytics. Where a datum is
+//     genuinely not obtainable read-only over GET (e.g. the inventory dry-run
+//     preview, allocator failed/atp-fallback counts, watcher/allocator
+//     heartbeats) the field is left null so the tile reads 'unknown' — never a
+//     false green — and the gap is documented on issue #37.
+//
+// AUTH: per docs/DATA_SOURCES.md these read endpoints are UNAUTHENTICATED
+// observability surfaces ("no auth / password gates because these are
+// observability surfaces"), so no token is normally required. An Authorization:
+// Bearer header is sent ONLY when MIDDLEWARE_AUTH_TOKEN is set; it is never
+// required and is absent by default.
 //
 // LIVE vs STUB: createMiddlewareClient() returns the live HTTP client when
 // MIDDLEWARE_BASE_URL is configured, otherwise the stub. The live client fetches
@@ -23,52 +36,62 @@ import type { AllocationDecision, AllocationOutcome, Channel } from '@order-heal
 import type { MissedShipment } from '@order-health/shared';
 import { config } from '../config';
 
-// The middleware's inventory-sync status endpoint exposes the last dry-run's
-// "would push" divergence (design.md 5A.2 / 5A.3). This is the ONLY signal the
-// monitor takes from the middleware; watermark, walks and heartbeat come from NAV.
+// Composed from the inventory-sync analytics endpoint's last completed catalog
+// walk (design.md 5A.2 / 5A.3). NOTE: the dry-run "would push" PREVIEW is only
+// produced by POST /api/nav/inventory-sync/dry-run (async) + GET
+// /dry-run/:id — there is no read-only GET for the latest dry-run, so
+// dryRunWouldPush / dryRunAt stay null here (honest 'unknown'). totalPairs is the
+// real catalog pair count from the last walk. See issue #37.
 export interface InventorySyncStatus {
-  dryRunWouldPush: number | null; // last dry-run "would push" count (the 7,245)
-  dryRunAt: string | null;        // when that dry-run ran
-  totalPairs: number | null;      // denominator (the 12,218)
+  dryRunWouldPush: number | null; // last dry-run "would push" count — NOT read-only (null)
+  dryRunAt: string | null;        // when that dry-run ran — NOT read-only (null)
+  totalPairs: number | null;      // denominator (the 12,218) from analytics.cron.last_walk
 }
 
-// The middleware's allocator status endpoint (Unit 4) exposes the recent split
-// decisions (warehouse_allocation_log) plus the window counts that drive the
-// split-sanity signal. Read-only: this is the middleware's SQLite allocation log
-// surfaced over an existing GET endpoint; we never write it.
+// Composed from GET /api/warehouse/rollout/audit (the warehouse_allocation_log
+// recent page) plus GET /api/oos-held. Read-only: these are the middleware's
+// SQLite allocation log + OOS-held backlog surfaced over existing GET endpoints;
+// we never write them. Several counts are NOT obtainable read-only (see issue
+// #37) and stay null: failedCount (the log has no failed/error outcome column),
+// atpFallbackCount (no distinct fallback reason code exposed) and
+// serviceHeartbeatAt (no allocator loop heartbeat endpoint).
 export interface AllocatorStatus {
   lastDecisionAt: string | null;      // recency of the newest split decision
-  serviceHeartbeatAt: string | null;  // allocator loop heartbeat
-  windowSeconds: number | null;       // window the counts below cover
-  decisionsWindow: number | null;     // total decisions in the window
-  splitCount: number | null;          // multi-warehouse splits
-  unallocatableCount: number | null;  // decisions with no ATP anywhere
-  failedCount: number | null;         // errored decisions
-  atpFallbackCount: number | null;    // inventory-aware fallbacks
+  serviceHeartbeatAt: string | null;  // allocator loop heartbeat — NOT exposed (null)
+  windowSeconds: number | null;       // wall-clock span the returned sample covers
+  decisionsWindow: number | null;     // decisions in the returned audit sample
+  splitCount: number | null;          // multi-warehouse splits in that sample
+  unallocatableCount: number | null;  // OOS-held backlog (order-level) from /api/oos-held
+  failedCount: number | null;         // errored decisions — NOT exposed (null)
+  atpFallbackCount: number | null;    // inventory-aware fallbacks — NOT exposed (null)
   recentDecisions: AllocationDecision[]; // most-recent-first
 }
 
 // --- Unit 3 typed read shapes ---------------------------------------------
 // nav_job_queue: the middleware ALREADY computes job-queue health (CU 50009
 // auto-release + no-stuck-job tripwire). We CONSUME that verdict, we do not
-// recompute it (design.md 6). This is the typed view of GET job-queue/health.
+// recompute it (design.md 6). This is the typed view of GET
+// /api/nav/job-queue/health, whose real body is
+// { level, summary, last_auto_release, pending_staging, stuck_jobs[], queried_at }.
 export interface JobQueueHealthStatus {
-  verdict: string | null;            // the endpoint's OWN verdict string (adopted as-is)
-  autoReleaseFiredAt: string | null; // last CU 50009 auto-release firing
-  longestRunningJobS: number | null; // age of the oldest running Job Queue Entry
-  stuckJobCount: number | null;      // jobs the middleware flags stuck (> its own threshold)
-  checkedAt: string | null;          // when the middleware computed this
+  verdict: string | null;            // the endpoint's OWN `level` string (adopted as-is)
+  autoReleaseFiredAt: string | null; // last CU 50009 auto-release firing (`last_auto_release`)
+  longestRunningJobS: number | null; // max stuck_jobs[].minutes_stuck, in seconds
+  stuckJobCount: number | null;      // stuck_jobs.length
+  checkedAt: string | null;          // when the middleware computed this (`queried_at`)
 }
 
-// price_sync: last-received (new price data flowing in) and last-run (syncer
-// alive) recency, from the middleware's dashboard price_sync feed.
+// price_sync: last-received (newest price_sync row) from
+// GET /api/nav/price-sync/recent, and last-run (syncer loop alive) from
+// GET /api/nav/price-sync/settings `last_run_at`.
 export interface PriceSyncStatus {
   lastReceivedAt: string | null; // newest price_sync row received
   lastRunAt: string | null;      // last price-sync run/loop completed
 }
 
-// shopify_webhook: last-received per topic plus each topic's subscription state
-// (subscribed === false is the removed/absent-subscription WAF failure mode).
+// shopify_webhook: last-received per topic (from GET /api/shopify/webhooks/events)
+// plus each topic's subscription state (from GET /api/shopify/webhooks/subscriptions;
+// subscribed === false is the removed/absent-subscription WAF failure mode).
 export interface WebhookTopicStatus {
   topic: string;
   lastReceivedAt: string | null;
@@ -78,79 +101,86 @@ export interface ShopifyWebhookStatus {
   topics: WebhookTopicStatus[];
 }
 
-// Unit 2 (back-sync). The middleware's back-sync status endpoint exposes the
-// back-sync watermark (last successful fulfillmentCreate), the back-sync watcher
-// heartbeat, and the 24h fulfillment/error counters. These feed the freshness and
-// liveness verdicts. Read-only.
+// Unit 2 (back-sync). Composed from GET /api/nav/back-sync/feed. The watermark
+// (lastBackSyncAt) is the newest feed row that carries a shopify_fulfillment_id;
+// the 24h counters are derived from the returned feed window. The back-sync
+// WATCHER heartbeat is not exposed read-only, so watcherHeartbeatAt stays null
+// (see issue #37).
 export interface BackSyncStatus {
-  lastBackSyncAt: string | null;      // watermark: last successful fulfillmentCreate
-  watcherHeartbeatAt: string | null;  // back-sync watcher last loop
-  fulfillmentsLast24h: number | null; // fulfillmentCreate calls sent in the last 24h
-  errorsLast24h: number | null;       // back-sync errors in the last 24h
+  lastBackSyncAt: string | null;      // watermark: newest row with a shopify_fulfillment_id
+  watcherHeartbeatAt: string | null;  // back-sync watcher last loop — NOT exposed (null)
+  fulfillmentsLast24h: number | null; // feed rows w/ fulfillment_id recorded in last 24h
+  errorsLast24h: number | null;       // feed rows w/ error recorded in last 24h
 }
 
 // Shapes are intentionally loose (Record) at the scaffold stage; Phase W units
 // tighten each endpoint's response type as they wire it in.
 export interface MiddlewareClient {
-  // dashboard.rs activity/errors merge-sorted feed.
+  // GET /api/activity/recent — merge-sorted ActivityItem[] feed.
   getActivity(): Promise<Record<string, unknown>[]>;
+  // GET /api/errors — { days, page, page_size, total, rows: ActivityItem[] }.
   getErrors(): Promise<Record<string, unknown>[]>;
   // Already-computed verdict we CONSUME rather than recompute (design.md 6).
   getJobQueueHealth(): Promise<Record<string, unknown>>;
   getMissedShipments(): Promise<Record<string, unknown>[]>;
   getStuckStaging(): Promise<Record<string, unknown>[]>;
   getPendingFulfillment(): Promise<Record<string, unknown>[]>;
-  // GET /api/inventory-sync/status (read-only): dry-run divergence numbers.
+  // Composed from GET /api/nav/inventory-sync/analytics (last-walk pair count).
   getInventorySyncStatus(): Promise<InventorySyncStatus>;
-  // GET /api/allocator/status (read-only): recent split decisions + window counts
-  // for the Warehouse Split panel (Unit 4). Backed by the middleware SQLite
-  // warehouse_allocation_log; the underlying read is SELECT-only, for example:
-  //   SELECT decided_at, order_ref, channel, sku, qty, rule, location, outcome
-  //     FROM warehouse_allocation_log
-  //     WHERE decided_at >= :windowStart ORDER BY decided_at DESC
-  // with the window aggregates (splits, unallocatable, failed, ATP fallbacks)
-  // computed over the same window. No write path into the middleware (design.md 0).
+  // Composed from GET /api/warehouse/rollout/audit + GET /api/oos-held.
   getAllocatorStatus(): Promise<AllocatorStatus>;
   // --- Unit 3 read-only endpoints ---
   // GET /api/nav/job-queue/health: the already-computed verdict we adopt.
   getJobQueueHealthStatus(): Promise<JobQueueHealthStatus>;
-  // GET /api/price-sync/status (dashboard price_sync feed): last-received/last-run.
+  // Composed from GET /api/nav/price-sync/recent + /settings.
   getPriceSyncStatus(): Promise<PriceSyncStatus>;
-  // GET /api/webhooks/shopify/health: last-received per topic + subscription state.
+  // Composed from GET /api/shopify/webhooks/subscriptions + /events.
   getShopifyWebhookStatus(): Promise<ShopifyWebhookStatus>;
-  // Unit 2. GET /api/back-sync/status (read-only): back-sync watermark, watcher
-  // heartbeat, and 24h counters for the freshness and liveness verdicts.
+  // Unit 2. Composed from GET /api/nav/back-sync/feed.
   getBackSyncStatus(): Promise<BackSyncStatus>;
   // Unit 2. The EXISTING GET /api/back-sync/missed-shipments endpoint, typed. Each
-  // row is a NAV shipment that posted with no shopify_fulfillment_id in
-  // nav_shipment_sync (the fulfillmentCreate never fired). Returns null when the
-  // endpoint has not been queried (stub) so the missed signal reads 'unknown'
-  // rather than a false green. Wholesale shipments are excluded upstream.
+  // row is a NAV shipment that posted with no shopify_fulfillment_id (the
+  // fulfillmentCreate never fired). Returns null when the endpoint has not been
+  // queried (stub) / failed so the missed signal reads 'unknown' rather than a
+  // false green. Wholesale shipments are excluded upstream.
   getMissedShipmentDetail(): Promise<MissedShipment[] | null>;
 }
 
 // ---------------------------------------------------------------------------
 // GET-only paths. Every endpoint the client calls is listed here as a single
 // source of truth. These are the middleware's EXISTING unauthenticated
-// observability routes (dashboard.rs); this service ADDS none of them.
+// observability routes; this service ADDS none of them. Paths reconciled against
+// the middleware warp route table (main.rs) — see issues #36 / #37.
 // ---------------------------------------------------------------------------
 export const MIDDLEWARE_PATHS = {
-  activity: '/api/dashboard/activity',
-  errors: '/api/dashboard/errors',
+  // Issue #36 — direct routes (corrected paths).
+  activity: '/api/activity/recent',
+  errors: '/api/errors',
+  errorsCount: '/api/errors/count',
   jobQueueHealth: '/api/nav/job-queue/health',
   missedShipments: '/api/back-sync/missed-shipments',
   stuckStaging: '/api/nav/stuck-staging',
-  pendingFulfillment: '/api/fulfillment/pending',
-  inventorySyncStatus: '/api/inventory-sync/status',
-  allocatorStatus: '/api/allocator/status',
-  priceSyncStatus: '/api/price-sync/status',
-  shopifyWebhookHealth: '/api/webhooks/shopify/health',
-  backSyncStatus: '/api/back-sync/status',
+  pendingFulfillment: '/api/middleware/pending-fulfillment-requests',
+  // Issue #37 — compose sources (the single per-pipe status endpoints the client
+  // originally assumed do NOT exist; each tile is composed from these).
+  backSyncFeed: '/api/nav/back-sync/feed',
+  inventorySyncAnalytics: '/api/nav/inventory-sync/analytics',
+  priceSyncRecent: '/api/nav/price-sync/recent',
+  priceSyncSettings: '/api/nav/price-sync/settings',
+  webhookSubscriptions: '/api/shopify/webhooks/subscriptions',
+  webhookEvents: '/api/shopify/webhooks/events',
+  allocatorAudit: '/api/warehouse/rollout/audit',
+  oosHeld: '/api/oos-held',
 } as const;
 
 // Default per-request timeout. The dashboard endpoints are cheap reads; a stalled
 // middleware must degrade to 'unknown' quickly, never block the aggregator run.
 export const MIDDLEWARE_TIMEOUT_MS = 5000;
+
+// How many rows to pull from the feed / audit endpoints when composing a tile.
+// The 24h back-sync counters and allocator split-sample are bounded by this
+// window; a healthy install has far fewer rows than this in any 24h window.
+export const MIDDLEWARE_FEED_LIMIT = 200;
 
 // ---------------------------------------------------------------------------
 // PURE HELPERS (no I/O). These are the unit-tested surface: the URL/header
@@ -160,7 +190,7 @@ export const MIDDLEWARE_TIMEOUT_MS = 5000;
 // ---------------------------------------------------------------------------
 
 // A parsed JSON object is a loose bag of field -> value. Field naming on the wire
-// is not yet confirmed (see PR: live validation pending), so mappers accept both
+// is confirmed against the middleware handlers; mappers still accept both
 // camelCase and snake_case variants and coerce defensively.
 export type Row = Record<string, unknown>;
 
@@ -177,6 +207,17 @@ export function assertReadOnlyMethod(method: string): void {
 // slash from the env; paths always start with '/'.
 export function buildUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, '')}${path}`;
+}
+
+// Append a query string to a path (skipping undefined values). Keeps GET-only
+// query construction in one place.
+export function buildPath(path: string, params?: Record<string, string | number | undefined>): string {
+  if (!params) return path;
+  const qs = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join('&');
+  return qs.length > 0 ? `${path}?${qs}` : path;
 }
 
 // Build request headers. Accept JSON always; send Authorization: Bearer ONLY when
@@ -229,23 +270,18 @@ function toIso(v: unknown): string | null {
   return null;
 }
 
-function toBool(v: unknown, fallback: boolean): boolean {
-  if (typeof v === 'boolean') return v;
-  if (typeof v === 'number') return v !== 0;
-  if (typeof v === 'string') {
-    const s = v.trim().toLowerCase();
-    if (s === 'true' || s === '1' || s === 'yes') return true;
-    if (s === 'false' || s === '0' || s === 'no') return false;
-  }
-  return fallback;
-}
+// ---------------------------------------------------------------------------
+// Body coercion. asRecordArray tolerates a bare array or any of the envelope
+// keys the middleware handlers actually use: `rows` (errors, stuck-staging,
+// price-sync recent, allocator audit), `missed` (missed-shipments), `pending`
+// (pending-fulfillment), `events` (webhook events), plus generic items/data.
+// ---------------------------------------------------------------------------
+const ENVELOPE_KEYS = ['items', 'rows', 'data', 'results', 'missed', 'pending', 'events'] as const;
 
-// Coerce a parsed JSON body to an array of records (tolerating a { items: [...] }
-// or { rows: [...] } envelope). Non-array, non-envelope bodies yield [].
 export function asRecordArray(body: unknown): Row[] {
   if (Array.isArray(body)) return body.filter((r): r is Row => typeof r === 'object' && r !== null);
   if (body !== null && typeof body === 'object') {
-    for (const key of ['items', 'rows', 'data', 'results']) {
+    for (const key of ENVELOPE_KEYS) {
       const inner = (body as Row)[key];
       if (Array.isArray(inner)) {
         return inner.filter((r): r is Row => typeof r === 'object' && r !== null);
@@ -260,15 +296,35 @@ export function asRecord(body: unknown): Row {
   return body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Row) : {};
 }
 
+// Newest ISO timestamp among a set of rows for a given set of candidate keys.
+function newestTimestamp(rows: Row[], ...keys: string[]): string | null {
+  let newest: string | null = null;
+  for (const row of rows) {
+    const t = toIso(pick(row, ...keys));
+    if (t !== null && (newest === null || t > newest)) newest = t;
+  }
+  return newest;
+}
+
 // --- Per-endpoint mappers --------------------------------------------------
 
-// GET /api/inventory-sync/status -> InventorySyncStatus (the dry-run divergence).
+// GET /api/nav/inventory-sync/analytics -> InventorySyncStatus. The analytics
+// body flattens InventorySyncAnalytics and adds a `cron` object whose `last_walk`
+// is the last completed catalog walk's progress JSON
+// ({ total_pairs, pushed, completed_at, ... }). That walk is the only READ-ONLY
+// surface for the pair count. The dry-run "would push" preview is POST-triggered
+// with no read-only GET, so dryRunWouldPush / dryRunAt stay null unless a body
+// explicitly carries them (kept for forward-compat / defensiveness).
 export function mapInventorySyncStatus(body: unknown): InventorySyncStatus {
   const r = asRecord(body);
+  const cron = asRecord(pick(r, 'cron'));
+  const lastWalk = asRecord(pick(cron, 'last_walk', 'lastWalk'));
   return {
     dryRunWouldPush: toNum(pick(r, 'dryRunWouldPush', 'dry_run_would_push', 'wouldPush', 'would_push')),
-    dryRunAt: toIso(pick(r, 'dryRunAt', 'dry_run_at', 'dryRunRanAt', 'ranAt', 'at')),
-    totalPairs: toNum(pick(r, 'totalPairs', 'total_pairs', 'pairs')),
+    dryRunAt: toIso(pick(r, 'dryRunAt', 'dry_run_at', 'dryRunRanAt', 'ranAt')),
+    totalPairs:
+      toNum(pick(lastWalk, 'total_pairs', 'totalPairs')) ??
+      toNum(pick(r, 'totalPairs', 'total_pairs', 'pairs')),
   };
 }
 
@@ -291,58 +347,132 @@ function mapOutcome(v: unknown): AllocationOutcome {
     : 'allocated'; // best-effort default for an unrecognised/absent outcome
 }
 
-// One warehouse_allocation_log row -> AllocationDecision.
+// One warehouse_allocation_log row (from /api/warehouse/rollout/audit) ->
+// AllocationDecision. The log row has no `outcome`/`qty`/`channel` columns; its
+// `reason` is the applied rule (rolled / stock_asymmetry / out_of_stock / ...)
+// and `warehouse_assigned` the resolved warehouse. A row whose reason is
+// out_of_stock is surfaced as an unallocatable outcome.
 export function mapAllocationDecision(row: Row): AllocationDecision {
+  const rule = toStr(pick(row, 'rule', 'reason'));
+  const explicitOutcome = pick(row, 'outcome');
+  const derivedOutcome = explicitOutcome ?? (rule === 'out_of_stock' ? 'unallocatable' : null);
   return {
     decided_at: toIso(pick(row, 'decided_at', 'decidedAt', 'at')),
-    order_ref: toStr(pick(row, 'order_ref', 'orderRef', 'order')),
+    order_ref: toStr(pick(row, 'order_ref', 'orderRef', 'order', 'order_id')),
     channel: mapChannel(pick(row, 'channel')),
     sku: toStr(pick(row, 'sku', 'variant')),
     qty: toNum(pick(row, 'qty', 'quantity')),
-    rule: toStr(pick(row, 'rule')),
-    location: toStr(pick(row, 'location', 'warehouse')),
-    outcome: mapOutcome(pick(row, 'outcome')),
+    rule,
+    location: toStr(pick(row, 'location', 'warehouse', 'warehouse_assigned', 'nav_location_code')),
+    outcome: mapOutcome(derivedOutcome),
   };
 }
 
-// GET /api/allocator/status -> AllocatorStatus (window counts + recent decisions).
-export function mapAllocatorStatus(body: unknown): AllocatorStatus {
-  const r = asRecord(body);
-  const decisions = pick(r, 'recentDecisions', 'recent_decisions', 'decisions_list');
+// GET /api/warehouse/rollout/audit + GET /api/oos-held -> AllocatorStatus.
+//   * audit body: { rows: WarehouseAllocationRow[] (decided_at DESC), total }
+//   * oos-held body: OosHeldOrderRow[] (bare array)
+// The audit page is treated as the sample window: windowSeconds is the wall-clock
+// span between the oldest and newest decided_at in the page, decisionsWindow is
+// the row count, and splitCount is the number of orders whose lines span >1
+// warehouse in the page. unallocatableCount is the current OOS-held backlog.
+// failedCount / atpFallbackCount / serviceHeartbeatAt are NOT obtainable
+// read-only (no failed/error outcome column, no distinct atp-fallback reason
+// code, no allocator heartbeat endpoint) and stay null. See issue #37.
+export function mapAllocatorStatus(auditBody: unknown, oosHeldBody: unknown): AllocatorStatus {
+  const rows = asRecordArray(auditBody);
+  const decisions = rows.map(mapAllocationDecision);
+
+  // Sample window bounds from decided_at.
+  let newest: string | null = null;
+  let oldest: string | null = null;
+  for (const d of decisions) {
+    if (d.decided_at === null) continue;
+    if (newest === null || d.decided_at > newest) newest = d.decided_at;
+    if (oldest === null || d.decided_at < oldest) oldest = d.decided_at;
+  }
+  let windowSeconds: number | null = null;
+  if (newest !== null && oldest !== null && newest !== oldest) {
+    const span = (Date.parse(newest) - Date.parse(oldest)) / 1000;
+    windowSeconds = Number.isFinite(span) && span > 0 ? Math.round(span) : null;
+  }
+
+  // Splits: orders whose lines were assigned to >1 distinct warehouse.
+  const warehousesByOrder = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const order = toStr(pick(row, 'order_id', 'order_ref', 'orderRef', 'order'));
+    const wh = toStr(pick(row, 'warehouse_assigned', 'location', 'warehouse', 'nav_location_code'));
+    if (order === null || wh === null) continue;
+    let set = warehousesByOrder.get(order);
+    if (set === undefined) {
+      set = new Set<string>();
+      warehousesByOrder.set(order, set);
+    }
+    set.add(wh);
+  }
+  let splitCount = 0;
+  for (const set of warehousesByOrder.values()) {
+    if (set.size > 1) splitCount += 1;
+  }
+
+  // unallocatable ≈ OOS-held backlog (order-level, current). A bare array (even
+  // empty) is a real count; a non-array (degraded/failed body) leaves it null.
+  const unallocatableCount = Array.isArray(oosHeldBody) ? asRecordArray(oosHeldBody).length : null;
+
+  const hasRows = rows.length > 0;
   return {
-    lastDecisionAt: toIso(pick(r, 'lastDecisionAt', 'last_decision_at')),
-    serviceHeartbeatAt: toIso(pick(r, 'serviceHeartbeatAt', 'service_heartbeat_at', 'heartbeatAt', 'heartbeat_at')),
-    windowSeconds: toNum(pick(r, 'windowSeconds', 'window_seconds')),
-    decisionsWindow: toNum(pick(r, 'decisionsWindow', 'decisions_window')),
-    splitCount: toNum(pick(r, 'splitCount', 'split_count', 'splits')),
-    unallocatableCount: toNum(pick(r, 'unallocatableCount', 'unallocatable_count', 'unallocatable')),
-    failedCount: toNum(pick(r, 'failedCount', 'failed_count', 'failed')),
-    atpFallbackCount: toNum(pick(r, 'atpFallbackCount', 'atp_fallback_count', 'atpFallbacks')),
-    recentDecisions: Array.isArray(decisions)
-      ? decisions.filter((d): d is Row => typeof d === 'object' && d !== null).map(mapAllocationDecision)
-      : [],
+    lastDecisionAt: newest,
+    serviceHeartbeatAt: null,
+    windowSeconds,
+    decisionsWindow: hasRows ? rows.length : null,
+    splitCount: hasRows ? splitCount : null,
+    unallocatableCount,
+    failedCount: null,
+    atpFallbackCount: null,
+    recentDecisions: decisions,
   };
 }
 
-// GET /api/nav/job-queue/health -> JobQueueHealthStatus. verdict is ADOPTED
-// unchanged (design.md 6); never recomputed here.
+// GET /api/nav/job-queue/health -> JobQueueHealthStatus. The real body is
+// { level, summary, last_auto_release, pending_staging, stuck_jobs[], queried_at }.
+// `level` is ADOPTED unchanged as the verdict (design.md 6); never recomputed.
 export function mapJobQueueHealthStatus(body: unknown): JobQueueHealthStatus {
   const r = asRecord(body);
+  const stuckRaw = pick(r, 'stuck_jobs', 'stuckJobs');
+  const jobs = Array.isArray(stuckRaw)
+    ? stuckRaw.filter((j): j is Row => typeof j === 'object' && j !== null)
+    : [];
+
+  // longest running job = max stuck_jobs[].minutes_stuck, converted to seconds.
+  let longestRunningJobS = toNum(pick(r, 'longestRunningJobS', 'longest_running_job_s', 'longestRunningJobSeconds'));
+  if (longestRunningJobS === null && jobs.length > 0) {
+    const mins = jobs
+      .map((j) => toNum(pick(j, 'minutes_stuck', 'minutesStuck')))
+      .filter((n): n is number => n !== null);
+    if (mins.length > 0) longestRunningJobS = Math.max(...mins) * 60;
+  }
+
+  const explicitCount = toNum(pick(r, 'stuck_job_count', 'stuckJobCount'));
+  const stuckJobCount = explicitCount !== null ? explicitCount : Array.isArray(stuckRaw) ? jobs.length : null;
+
   return {
-    verdict: toStr(pick(r, 'verdict', 'status', 'health')),
-    autoReleaseFiredAt: toIso(pick(r, 'autoReleaseFiredAt', 'auto_release_fired_at', 'autoReleaseAt')),
-    longestRunningJobS: toNum(pick(r, 'longestRunningJobS', 'longest_running_job_s', 'longestRunningJobSeconds')),
-    stuckJobCount: toNum(pick(r, 'stuckJobCount', 'stuck_job_count', 'stuckJobs')),
-    checkedAt: toIso(pick(r, 'checkedAt', 'checked_at', 'at')),
+    verdict: toStr(pick(r, 'level', 'verdict', 'status', 'health')),
+    autoReleaseFiredAt: toIso(pick(r, 'last_auto_release', 'autoReleaseFiredAt', 'auto_release_fired_at', 'autoReleaseAt')),
+    longestRunningJobS,
+    stuckJobCount,
+    checkedAt: toIso(pick(r, 'queried_at', 'checkedAt', 'checked_at', 'at')),
   };
 }
 
-// GET /api/price-sync/status -> PriceSyncStatus (last-received + last-run).
-export function mapPriceSyncStatus(body: unknown): PriceSyncStatus {
-  const r = asRecord(body);
+// GET /api/nav/price-sync/recent (rows, synced_at DESC) + GET
+// /api/nav/price-sync/settings (`last_run_at`) -> PriceSyncStatus. lastReceivedAt
+// is the newest recorded price_sync row; lastRunAt is the syncer's last loop
+// completion (which ticks even when a run pushes nothing — the true liveness).
+export function mapPriceSyncStatus(recentBody: unknown, settingsBody: unknown): PriceSyncStatus {
+  const rows = asRecordArray(recentBody);
+  const settings = asRecord(settingsBody);
   return {
-    lastReceivedAt: toIso(pick(r, 'lastReceivedAt', 'last_received_at', 'received_at')),
-    lastRunAt: toIso(pick(r, 'lastRunAt', 'last_run_at', 'run_at')),
+    lastReceivedAt: newestTimestamp(rows, 'synced_at', 'syncedAt', 'received_at', 'receivedAt'),
+    lastRunAt: toIso(pick(settings, 'last_run_at', 'lastRunAt', 'last_received_at')),
   };
 }
 
@@ -354,54 +484,106 @@ export function mapWebhookTopic(row: Row): WebhookTopicStatus {
   return {
     topic: toStr(pick(row, 'topic', 'name')) ?? '',
     lastReceivedAt: toIso(pick(row, 'lastReceivedAt', 'last_received_at', 'received_at')),
-    subscribed: toBool(pick(row, 'subscribed', 'isSubscribed', 'is_subscribed'), true),
+    subscribed: pick(row, 'deactivated_at', 'deactivatedAt') === null,
   };
 }
 
-// GET /api/webhooks/shopify/health -> ShopifyWebhookStatus. Accepts a bare array
-// of topics or a { topics: [...] } envelope.
-export function mapShopifyWebhookStatus(body: unknown): ShopifyWebhookStatus {
-  let topicRows: Row[];
-  if (Array.isArray(body)) {
-    topicRows = body.filter((t): t is Row => typeof t === 'object' && t !== null);
-  } else {
-    const r = asRecord(body);
-    const topics = pick(r, 'topics', 'subscriptions');
-    topicRows = Array.isArray(topics)
-      ? topics.filter((t): t is Row => typeof t === 'object' && t !== null)
-      : [];
+// GET /api/shopify/webhooks/subscriptions (bare ShopifyWebhookSubscription[],
+// active when deactivated_at is null) + GET /api/shopify/webhooks/events
+// ({ events: ShopifyWebhookEvent[], total }) -> ShopifyWebhookStatus. Each topic's
+// last-received is the newest event received_at for that topic; subscribed comes
+// from the subscription row. Topics seen in events but with no subscription row
+// are surfaced as subscribed:false (the removed-subscription failure mode).
+export function mapShopifyWebhookStatus(subscriptionsBody: unknown, eventsBody: unknown): ShopifyWebhookStatus {
+  const subs = asRecordArray(subscriptionsBody);
+  const events = asRecordArray(eventsBody);
+
+  const lastByTopic = new Map<string, string>();
+  for (const ev of events) {
+    const topic = toStr(pick(ev, 'topic', 'name'));
+    if (topic === null) continue;
+    const t = toIso(pick(ev, 'received_at', 'receivedAt', 'triggered_at', 'lastReceivedAt', 'last_received_at'));
+    if (t === null) continue;
+    const prev = lastByTopic.get(topic);
+    if (prev === undefined || t > prev) lastByTopic.set(topic, t);
   }
-  return { topics: topicRows.map(mapWebhookTopic) };
+
+  const topics: WebhookTopicStatus[] = [];
+  const seen = new Set<string>();
+  for (const s of subs) {
+    const topic = toStr(pick(s, 'topic', 'name'));
+    if (topic === null || seen.has(topic)) continue;
+    seen.add(topic);
+    topics.push({
+      topic,
+      lastReceivedAt: lastByTopic.get(topic) ?? null,
+      subscribed: pick(s, 'deactivated_at', 'deactivatedAt') === null,
+    });
+  }
+  // Topics with traffic but no (active) subscription row -> removed subscription.
+  for (const [topic, t] of lastByTopic) {
+    if (seen.has(topic)) continue;
+    seen.add(topic);
+    topics.push({ topic, lastReceivedAt: t, subscribed: false });
+  }
+  return { topics };
 }
 
-// GET /api/back-sync/status -> BackSyncStatus (watermark + heartbeat + 24h counts).
-export function mapBackSyncStatus(body: unknown): BackSyncStatus {
-  const r = asRecord(body);
+// GET /api/nav/back-sync/feed -> BackSyncStatus. Feed rows are recorded_at DESC;
+// each carries shopify_fulfillment_id (null = not yet back-synced) and an
+// optional error. The watermark is the newest row WITH a fulfillment_id; the 24h
+// counters are computed over the returned window (bounded by MIDDLEWARE_FEED_LIMIT).
+// The watcher heartbeat is not exposed read-only, so watcherHeartbeatAt is null.
+export function mapBackSyncStatus(body: unknown, now: number = Date.now()): BackSyncStatus {
+  const rows = asRecordArray(body);
+  const cutoff = now - 24 * 3600 * 1000;
+
+  let lastBackSyncAt: string | null = null;
+  let fulfillmentsLast24h = 0;
+  let errorsLast24h = 0;
+  for (const row of rows) {
+    const hasFulfillment = pick(row, 'shopify_fulfillment_id', 'shopifyFulfillmentId') !== null;
+    const recordedAt = toIso(pick(row, 'recorded_at', 'recordedAt', 'synced_at', 'posted_at'));
+    const hasError = pick(row, 'error') !== null;
+
+    if (hasFulfillment && recordedAt !== null && (lastBackSyncAt === null || recordedAt > lastBackSyncAt)) {
+      lastBackSyncAt = recordedAt;
+    }
+    const ts = recordedAt !== null ? Date.parse(recordedAt) : NaN;
+    if (!Number.isNaN(ts) && ts >= cutoff) {
+      if (hasFulfillment) fulfillmentsLast24h += 1;
+      if (hasError) errorsLast24h += 1;
+    }
+  }
   return {
-    lastBackSyncAt: toIso(pick(r, 'lastBackSyncAt', 'last_back_sync_at')),
-    watcherHeartbeatAt: toIso(pick(r, 'watcherHeartbeatAt', 'watcher_heartbeat_at', 'heartbeatAt', 'heartbeat_at')),
-    fulfillmentsLast24h: toNum(pick(r, 'fulfillmentsLast24h', 'fulfillments_last_24h')),
-    errorsLast24h: toNum(pick(r, 'errorsLast24h', 'errors_last_24h')),
+    lastBackSyncAt,
+    watcherHeartbeatAt: null,
+    fulfillmentsLast24h,
+    errorsLast24h,
   };
 }
 
-// One missed-shipments row -> MissedShipment.
+// One missed-shipments row (from /api/back-sync/missed-shipments) -> MissedShipment.
+// The real row is { nav_shipment_no, sales_order, posting_date, tracking_no,
+// shipping_agent, location_code, status, last_error }. web_id and age_s are not
+// exposed by this endpoint and stay null.
 export function mapMissedShipment(row: Row): MissedShipment {
   return {
-    order_ref: toStr(pick(row, 'order_ref', 'orderRef', 'order')),
+    order_ref: toStr(pick(row, 'sales_order', 'order_ref', 'orderRef', 'order')),
     web_id: toStr(pick(row, 'web_id', 'webId')),
     nav_shipment_no: toStr(pick(row, 'nav_shipment_no', 'navShipmentNo', 'shipmentNo')),
-    carrier: toStr(pick(row, 'carrier')),
-    tracking: toStr(pick(row, 'tracking')),
-    posted_at: toIso(pick(row, 'posted_at', 'postedAt')),
+    carrier: toStr(pick(row, 'shipping_agent', 'carrier')),
+    tracking: toStr(pick(row, 'tracking_no', 'tracking')),
+    posted_at: toIso(pick(row, 'posting_date', 'posted_at', 'postedAt')),
     age_s: toNum(pick(row, 'age_s', 'ageS', 'ageSeconds')),
-    reason: toStr(pick(row, 'reason', 'note')),
+    reason: toStr(pick(row, 'last_error', 'reason', 'note', 'status')),
   };
 }
 
-// GET /api/back-sync/missed-shipments -> MissedShipment[]. An empty array is a
-// legitimate "zero missed" (green); only a failed fetch degrades to null so the
-// signal reads 'unknown' rather than a false green (see the live client).
+// GET /api/back-sync/missed-shipments -> MissedShipment[]. The endpoint wraps the
+// rows in a `{ missed: [...] }` envelope (asRecordArray unwraps it). An empty
+// array is a legitimate "zero missed" (green); only a failed fetch degrades to
+// null so the signal reads 'unknown' rather than a false green (see live client).
 export function mapMissedShipments(body: unknown): MissedShipment[] {
   return asRecordArray(body).map(mapMissedShipment);
 }
@@ -441,11 +623,11 @@ export class MiddlewareClientStub implements MiddlewareClient {
     return [];
   }
   async getInventorySyncStatus(): Promise<InventorySyncStatus> {
-    this.note(MIDDLEWARE_PATHS.inventorySyncStatus);
+    this.note(MIDDLEWARE_PATHS.inventorySyncAnalytics);
     return { dryRunWouldPush: null, dryRunAt: null, totalPairs: null };
   }
   async getAllocatorStatus(): Promise<AllocatorStatus> {
-    this.note(MIDDLEWARE_PATHS.allocatorStatus);
+    this.note(MIDDLEWARE_PATHS.allocatorAudit);
     return {
       lastDecisionAt: null,
       serviceHeartbeatAt: null,
@@ -460,8 +642,8 @@ export class MiddlewareClientStub implements MiddlewareClient {
   }
   async getJobQueueHealthStatus(): Promise<JobQueueHealthStatus> {
     // Real read-only shape: GET /api/nav/job-queue/health returns the middleware's
-    // own {verdict, autoReleaseFiredAt, longestRunningJobS, stuckJobCount,
-    // checkedAt}. We ADOPT verdict unchanged (design.md 6), never recompute it.
+    // own { level, summary, last_auto_release, pending_staging, stuck_jobs[],
+    // queried_at }. We ADOPT `level` unchanged (design.md 6), never recompute it.
     this.note(MIDDLEWARE_PATHS.jobQueueHealth);
     return {
       verdict: null,
@@ -472,19 +654,19 @@ export class MiddlewareClientStub implements MiddlewareClient {
     };
   }
   async getPriceSyncStatus(): Promise<PriceSyncStatus> {
-    // Real read-only shape: newest dashboard price_sync row (last-received) and
-    // the price-sync run/loop timestamp (last-run). GET-only.
-    this.note(MIDDLEWARE_PATHS.priceSyncStatus);
+    // Composed read: newest price-sync row (last-received) + settings.last_run_at
+    // (last-run). GET-only.
+    this.note(MIDDLEWARE_PATHS.priceSyncRecent);
     return { lastReceivedAt: null, lastRunAt: null };
   }
   async getShopifyWebhookStatus(): Promise<ShopifyWebhookStatus> {
-    // Real read-only shape: last shopify_webhook_event per topic joined to the
-    // live webhook subscription list (subscribed=false => removed subscription).
-    this.note(MIDDLEWARE_PATHS.shopifyWebhookHealth);
+    // Composed read: last webhook event per topic joined to the live subscription
+    // list (deactivated_at != null => removed subscription).
+    this.note(MIDDLEWARE_PATHS.webhookSubscriptions);
     return { topics: [] };
   }
   async getBackSyncStatus(): Promise<BackSyncStatus> {
-    this.note(MIDDLEWARE_PATHS.backSyncStatus);
+    this.note(MIDDLEWARE_PATHS.backSyncFeed);
     return {
       lastBackSyncAt: null,
       watcherHeartbeatAt: null,
@@ -501,11 +683,11 @@ export class MiddlewareClientStub implements MiddlewareClient {
 }
 
 // ---------------------------------------------------------------------------
-// LIVE client. Issues read-only GETs to the middleware's existing dashboard.rs
-// endpoints with global fetch (Node 22+). Each request has an AbortController
-// timeout; on any fetch/parse/non-2xx failure it logs once and degrades to the
-// stub's empty shape (verdicts become 'unknown'), so an unreachable middleware
-// never crashes the app or blocks boot. No request is made at import time.
+// LIVE client. Issues read-only GETs to the middleware's existing endpoints with
+// global fetch (Node 22+). Each request has an AbortController timeout; on any
+// fetch/parse/non-2xx failure it logs once and degrades to the stub's empty shape
+// (verdicts become 'unknown'), so an unreachable middleware never crashes the app
+// or blocks boot. No request is made at import time.
 // ---------------------------------------------------------------------------
 class MiddlewareClientLive implements MiddlewareClient {
   private readonly baseUrl: string;
@@ -553,9 +735,9 @@ class MiddlewareClientLive implements MiddlewareClient {
 
   async getActivity(): Promise<Record<string, unknown>[]> {
     try {
-      return asRecordArray(await this.getJson(MIDDLEWARE_PATHS.activity));
+      return asRecordArray(await this.getJson(buildPath(MIDDLEWARE_PATHS.activity, { limit: MIDDLEWARE_FEED_LIMIT })));
     } catch (err) {
-      return this.degrade('dashboard activity', err, this.stub.getActivity());
+      return this.degrade('activity feed', err, this.stub.getActivity());
     }
   }
 
@@ -563,7 +745,7 @@ class MiddlewareClientLive implements MiddlewareClient {
     try {
       return asRecordArray(await this.getJson(MIDDLEWARE_PATHS.errors));
     } catch (err) {
-      return this.degrade('dashboard errors', err, this.stub.getErrors());
+      return this.degrade('errors view', err, this.stub.getErrors());
     }
   }
 
@@ -601,17 +783,21 @@ class MiddlewareClientLive implements MiddlewareClient {
 
   async getInventorySyncStatus(): Promise<InventorySyncStatus> {
     try {
-      return mapInventorySyncStatus(await this.getJson(MIDDLEWARE_PATHS.inventorySyncStatus));
+      return mapInventorySyncStatus(await this.getJson(MIDDLEWARE_PATHS.inventorySyncAnalytics));
     } catch (err) {
-      return this.degrade('inventory-sync status', err, this.stub.getInventorySyncStatus());
+      return this.degrade('inventory-sync analytics', err, this.stub.getInventorySyncStatus());
     }
   }
 
   async getAllocatorStatus(): Promise<AllocatorStatus> {
     try {
-      return mapAllocatorStatus(await this.getJson(MIDDLEWARE_PATHS.allocatorStatus));
+      const [audit, oosHeld] = await Promise.all([
+        this.getJson(buildPath(MIDDLEWARE_PATHS.allocatorAudit, { limit: MIDDLEWARE_FEED_LIMIT })),
+        this.getJson(buildPath(MIDDLEWARE_PATHS.oosHeld, { limit: MIDDLEWARE_FEED_LIMIT })),
+      ]);
+      return mapAllocatorStatus(audit, oosHeld);
     } catch (err) {
-      return this.degrade('allocator status', err, this.stub.getAllocatorStatus());
+      return this.degrade('allocator status (audit + oos-held)', err, this.stub.getAllocatorStatus());
     }
   }
 
@@ -625,25 +811,35 @@ class MiddlewareClientLive implements MiddlewareClient {
 
   async getPriceSyncStatus(): Promise<PriceSyncStatus> {
     try {
-      return mapPriceSyncStatus(await this.getJson(MIDDLEWARE_PATHS.priceSyncStatus));
+      const [recent, settings] = await Promise.all([
+        this.getJson(MIDDLEWARE_PATHS.priceSyncRecent),
+        this.getJson(MIDDLEWARE_PATHS.priceSyncSettings),
+      ]);
+      return mapPriceSyncStatus(recent, settings);
     } catch (err) {
-      return this.degrade('price-sync status', err, this.stub.getPriceSyncStatus());
+      return this.degrade('price-sync status (recent + settings)', err, this.stub.getPriceSyncStatus());
     }
   }
 
   async getShopifyWebhookStatus(): Promise<ShopifyWebhookStatus> {
     try {
-      return mapShopifyWebhookStatus(await this.getJson(MIDDLEWARE_PATHS.shopifyWebhookHealth));
+      const [subs, events] = await Promise.all([
+        this.getJson(MIDDLEWARE_PATHS.webhookSubscriptions),
+        this.getJson(buildPath(MIDDLEWARE_PATHS.webhookEvents, { limit: MIDDLEWARE_FEED_LIMIT })),
+      ]);
+      return mapShopifyWebhookStatus(subs, events);
     } catch (err) {
-      return this.degrade('shopify webhook health', err, this.stub.getShopifyWebhookStatus());
+      return this.degrade('shopify webhook status (subscriptions + events)', err, this.stub.getShopifyWebhookStatus());
     }
   }
 
   async getBackSyncStatus(): Promise<BackSyncStatus> {
     try {
-      return mapBackSyncStatus(await this.getJson(MIDDLEWARE_PATHS.backSyncStatus));
+      return mapBackSyncStatus(
+        await this.getJson(buildPath(MIDDLEWARE_PATHS.backSyncFeed, { limit: MIDDLEWARE_FEED_LIMIT })),
+      );
     } catch (err) {
-      return this.degrade('back-sync status', err, this.stub.getBackSyncStatus());
+      return this.degrade('back-sync status (feed)', err, this.stub.getBackSyncStatus());
     }
   }
 

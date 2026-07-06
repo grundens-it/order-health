@@ -74,7 +74,7 @@ services:
       # no NAV_* / MIDDLEWARE_* creds are set, so nothing live is ever contacted.
       AGGREGATOR_ENABLED: ${AGGREGATOR_ENABLED:-true}
       ORDER_LAYER_CRON: ${ORDER_LAYER_CRON:-*/3 * * * *}
-      INVENTORY_LAYER_CRON: ${INVENTORY_LAYER_CRON:-0 */2 * * *}
+      INVENTORY_LAYER_CRON: ${INVENTORY_LAYER_CRON:-*/5 * * * *}
     ports:
       - "8080:8080"
 

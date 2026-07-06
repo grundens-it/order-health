@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ChannelFilter as ChannelFilterValue,
   LeadershipRollup,
@@ -10,30 +10,52 @@ import { fetchOrders, fetchPipelines, fetchRemediationRegistry, fetchRollup } fr
 import { LeadershipStrip } from './components/LeadershipStrip';
 import { PipelineStrip } from './components/PipelineStrip';
 import { RemediationModal, type RemediationSubject } from './components/RemediationModal';
-import { InventoryPanel } from './components/InventoryPanel';
-import { BackSyncPanel } from './components/BackSyncPanel';
-import { PriceSyncPanel } from './components/PriceSyncPanel';
-import { JobQueuePanel } from './components/JobQueuePanel';
-import { ShopifyWebhookPanel } from './components/ShopifyWebhookPanel';
-import { AllocatorPanel } from './components/AllocatorPanel';
 import { OrderTable } from './components/OrderTable';
 import { ChannelFilter } from './components/ChannelFilter';
+import { AttentionFilter, type AttentionValue } from './components/AttentionFilter';
+import { Toast } from './components/Toast';
 
-// The single route: the two-layer shell (pipeline strip on top, order table
-// below) with a DTC / wholesale / all channel filter and the snapshot as_of.
+// The Order Health tab, ported from demo/order-health-dashboard-demo.html and
+// wired to the live read API: leadership rollup, six pipeline-health cards, and the
+// per-order lifecycle table with stage dots. The other tabs (Inventory Sync,
+// Back-Sync, Warehouse Split, Errors, SQL Console) are middleware deep-links that
+// are inert until a deep-link base URL is configured; the outage replay is a
+// no-op until we retain snapshot history. Neither fabricates data.
+
+const DEEP_LINK_TABS = ['Inventory Sync', 'Back-Sync', 'Warehouse Split', 'Errors', 'SQL Console'];
+
+// Pipe display names for the remediation modal header.
+const PIPE_LABELS: Record<string, string> = {
+  inventory_sync: 'Inventory sync',
+  back_sync: 'Back-sync',
+  price_sync: 'Price sync',
+  nav_job_queue: 'NAV job queue',
+  shopify_webhook: 'Shopify webhooks',
+  allocator: 'Allocator split',
+};
+
 export function App(): JSX.Element {
   const [channel, setChannel] = useState<ChannelFilterValue>('all');
+  const [attention, setAttention] = useState<AttentionValue>('all');
   const [pipelines, setPipelines] = useState<PipelineHealth[]>([]);
   const [orders, setOrders] = useState<OrderHealth[]>([]);
   const [rollup, setRollup] = useState<LeadershipRollup | null>(null);
-  const [rollupAsOf, setRollupAsOf] = useState<string | null>(null);
   const [asOf, setAsOf] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Unit 7: the remediation runbook registry (fetched once) + the subject whose
-  // modal is currently open (null = closed).
   const [registry, setRegistry] = useState<RemediationRegistry | null>(null);
   const [remediationSubject, setRemediationSubject] = useState<RemediationSubject | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<number | undefined>(undefined);
 
+  const flashToast = (msg: string): void => {
+    setToast(msg);
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 2600);
+  };
+  useEffect(() => () => window.clearTimeout(toastTimer.current), []);
+
+  // The remediation registry (re-fetched on refresh alongside the snapshot).
   useEffect(() => {
     let cancelled = false;
     fetchRemediationRegistry()
@@ -43,14 +65,14 @@ export function App(): JSX.Element {
         setRegistry(reg);
       })
       .catch(() => {
-        // The registry is non-critical for the read view; the modal simply shows
-        // "no remediation mapped" if it never loads.
+        // Non-critical: the modal simply shows "no remediation mapped" if it never loads.
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshKey]);
 
+  // The three health endpoints. Re-fetched on channel change and on refresh.
   useEffect(() => {
     let cancelled = false;
     Promise.all([fetchPipelines(), fetchOrders(channel), fetchRollup()])
@@ -58,12 +80,8 @@ export function App(): JSX.Element {
         if (cancelled) return;
         setPipelines(pipeRes.data);
         setOrders(orderRes.data);
-        // The rollup carries as_of inline (single object, not a list); split the
-        // headline fields from the envelope-style as_of for the strip.
-        const { as_of: rollupTime, ...rollupData } = rollupRes;
+        const { as_of: _rollupTime, ...rollupData } = rollupRes;
         setRollup(rollupData);
-        setRollupAsOf(rollupTime);
-        // The order snapshot is the freshest signal for the header as_of.
         setAsOf(orderRes.as_of ?? pipeRes.as_of);
         setError(null);
       })
@@ -74,54 +92,20 @@ export function App(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [channel]);
+  }, [channel, refreshKey]);
 
   const asOfLabel = useMemo(() => {
     if (!asOf) return 'no snapshot yet';
     return `as of ${new Date(asOf).toLocaleString()}`;
   }, [asOf]);
 
-  // The inventory-sync pipe owns the reference expanded panel (Unit 1).
-  const inventoryPipe = useMemo(
-    () => pipelines.find((p) => p.pipe === 'inventory_sync') ?? null,
-    [pipelines],
-  );
+  // Client-side attention filter (needs attention = amber or red) on top of the
+  // server-side channel filter (which is wired to /api/health/orders?channel=).
+  const visibleOrders = useMemo(() => {
+    if (attention === 'all') return orders;
+    return orders.filter((o) => o.order_verdict === 'amber' || o.order_verdict === 'red');
+  }, [orders, attention]);
 
-  // The back-sync pipe owns the missed-shipments panel (Unit 2).
-  const backSyncPipe = useMemo(
-    () => pipelines.find((p) => p.pipe === 'back_sync') ?? null,
-    [pipelines],
-  );
-
-  // Unit 3 pipes: price-sync, NAV job queue, Shopify webhooks.
-  const priceSyncPipe = useMemo(
-    () => pipelines.find((p) => p.pipe === 'price_sync') ?? null,
-    [pipelines],
-  );
-  const jobQueuePipe = useMemo(
-    () => pipelines.find((p) => p.pipe === 'nav_job_queue') ?? null,
-    [pipelines],
-  );
-  const webhookPipe = useMemo(
-    () => pipelines.find((p) => p.pipe === 'shopify_webhook') ?? null,
-    [pipelines],
-  );
-
-  // The allocator pipe owns the Warehouse Split decisions panel (Unit 4).
-  const allocatorPipe = useMemo(
-    () => pipelines.find((p) => p.pipe === 'allocator') ?? null,
-    [pipelines],
-  );
-
-  // Open the remediation modal for a red/amber pipe (Unit 7).
-  const PIPE_LABELS: Record<string, string> = {
-    inventory_sync: 'Inventory sync',
-    back_sync: 'Back-sync',
-    price_sync: 'Price sync',
-    nav_job_queue: 'NAV job queue',
-    shopify_webhook: 'Shopify webhooks',
-    allocator: 'Allocator split',
-  };
   const openPipeRemediation = (pipe: PipelineHealth): void => {
     setRemediationSubject({
       subjectKind: 'pipe',
@@ -130,107 +114,131 @@ export function App(): JSX.Element {
     });
   };
 
+  const refresh = (): void => {
+    setRefreshKey((k) => k + 1);
+    flashToast('Snapshot refreshed');
+  };
+
   return (
     <>
       <div className="band">
         <div className="band-in">
           <div className="logo">
             <span className="mark">G</span>
-            <span>
-              Order Health
-              <small>Grundens observability</small>
-            </span>
+            <div>
+              GRUNDENS
+              <small>Order health observability</small>
+            </div>
           </div>
           <div className="band-spacer" />
+          <div className="controls" style={{ margin: 0 }}>
+            <button
+              className="btn warn"
+              title="Outage replay needs retained snapshot history, which we do not have yet (coming soon)"
+              onClick={() => flashToast('Outage replay is not wired yet (needs snapshot history)')}
+            >
+              Replay outage
+            </button>
+            <button className="btn" onClick={refresh}>
+              Refresh snapshot
+            </button>
+          </div>
           <div className="asof">
             Snapshot <b>{asOfLabel}</b>
             <br />
-            <span>aggregator cadence: order 2 to 5 min, inventory ~2 h</span>
+            <span>aggregator cadence 3 min, inventory layer ~2 h</span>
           </div>
         </div>
       </div>
 
       <div className="demo-note">
-        <b>Remediation runbook layer (Unit 7) live.</b> Click a red or amber pipe verdict for the
-        mapped operator tool. Triggers are operator-only and stubbed (no live call); observability
-        stays read-only against the middleware and NAV.
+        <b>Live read-only view.</b> NAV-sourced signals are graded from the latest snapshot;
+        middleware-sourced signals are stubbed until DevOps provisions them and render as
+        <b> pending source</b>, never as a fabricated number or a false green.
       </div>
 
       <div className="wrap">
+        <div className="tabs">
+          <div className="tab on">Order Health</div>
+          {DEEP_LINK_TABS.map((t) => (
+            <div
+              className="tab"
+              key={t}
+              title="configure middleware deep-link"
+              onClick={() => flashToast('Deep-link base URL is not configured yet')}
+            >
+              {t}
+            </div>
+          ))}
+        </div>
+
         {error && (
           <div className="sec">
             <span className="aux">Backend unreachable: {error}. Start the backend on :8080.</span>
           </div>
         )}
 
-        {/* Leadership rollup: the top-of-page glance layer (Unit 6). */}
-        <LeadershipStrip rollup={rollup} asOf={rollupAsOf} />
+        <div className="sec">
+          <h2>Leadership rollup</h2>
+          <div className="rule" />
+        </div>
+        <LeadershipStrip rollup={rollup} />
 
         <PipelineStrip pipelines={pipelines} onRemediate={openPipeRemediation} />
 
         <div className="sec">
-          <h2>Inventory sync</h2>
+          <h2>Order lifecycle</h2>
           <div className="rule" />
-          <span className="aux">reference monitor: freshness · liveness · push-outcome</span>
-        </div>
-        <InventoryPanel pipe={inventoryPipe} />
-
-        <div className="sec">
-          <h2>Back-sync</h2>
-          <div className="rule" />
-          <span className="aux">NAV shipment to Shopify: freshness · liveness · missed shipments</span>
-        </div>
-        <BackSyncPanel pipe={backSyncPipe} />
-
-        <div className="sec">
-          <h2>Price sync</h2>
-          <div className="rule" />
-          <span className="aux">Unit 3 monitor: received freshness · syncer liveness</span>
-        </div>
-        <PriceSyncPanel pipe={priceSyncPipe} />
-
-        <div className="sec">
-          <h2>NAV job queue</h2>
-          <div className="rule" />
-          <span className="aux">Unit 3 monitor: verdict consumed from middleware, not recomputed</span>
-        </div>
-        <JobQueuePanel pipe={jobQueuePipe} />
-
-        <div className="sec">
-          <h2>Shopify webhooks</h2>
-          <div className="rule" />
-          <span className="aux">Unit 3 monitor: last received per topic · subscription health</span>
-        </div>
-        <ShopifyWebhookPanel pipe={webhookPipe} />
-
-        <div className="sec">
-          <h2>Warehouse split</h2>
-          <div className="rule" />
-          <span className="aux">allocator: decision freshness · liveness · split-sanity</span>
-        </div>
-        <AllocatorPanel pipe={allocatorPipe} />
-
-        <div className="sec">
-          <h2>Order health</h2>
-          <div className="rule" />
-          <span className="aux">
-            per-order lifecycle across both channels; wholesale has no Shopify leg
-          </span>
         </div>
         <div className="controls">
           <ChannelFilter value={channel} onChange={setChannel} />
-          <span className="count">{orders.length} orders</span>
+          <AttentionFilter value={attention} onChange={setAttention} />
+          <span className="count">
+            {visibleOrders.length} order{visibleOrders.length === 1 ? '' : 's'} shown
+          </span>
         </div>
-        <OrderTable orders={orders} />
+        <OrderTable
+          orders={visibleOrders}
+          onRemediate={setRemediationSubject}
+          onInert={(label) => flashToast(`${label}: configure the middleware deep-link base URL first`)}
+        />
+
+        <div className="legend">
+          <span className="li">
+            <span className="dot g" /> On time
+          </span>
+          <span className="li">
+            <span className="dot a" /> In flight, within SLO
+          </span>
+          <span className="li">
+            <span className="dot r" /> Errored / past SLO
+          </span>
+          <span className="li">
+            <span className="dot pending" /> Not started
+          </span>
+          <span className="li">
+            <span className="dot na" /> No leg (wholesale)
+          </span>
+          <span className="li" style={{ marginLeft: 'auto' }}>
+            Shape encodes state too, not color alone.
+          </span>
+        </div>
+
+        <div className="foot-src">
+          Sources unified by the aggregator: <code>inventory_sync</code>, <code>price_sync</code>,{' '}
+          <code>nav_shipment_sync</code>, <code>shopify_webhook_event</code>,{' '}
+          <code>warehouse_allocation_log</code>, NAV staging and shipment tables, the IABC
+          watermark, and the existing NAV codeunit instrumentation. DTC correlates on{' '}
+          <code>[WebId]</code>; wholesale is keyed on NAV order no (no Shopify leg).
+        </div>
       </div>
 
-      {/* Unit 7: error-to-remediation modal. Opens on a red/amber pipe verdict,
-          names the mapped tool, and offers an operator trigger (stubbed). */}
       <RemediationModal
         subject={remediationSubject}
         registry={registry}
         onClose={() => setRemediationSubject(null)}
       />
+      <Toast message={toast} />
     </>
   );
 }

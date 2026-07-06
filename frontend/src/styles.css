@@ -38,6 +38,37 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-size: 14px; lin
 .tab:hover { color: var(--orange); }
 .tab.on { color: var(--ink); background: var(--card); border-color: var(--line); }
 .tab:focus-visible { outline: 2px solid var(--orange); outline-offset: -2px; }
+.tabs button.tab { background: transparent; font: inherit; line-height: 1.5; }
+.tab-sep { flex: 1; min-width: 12px; border: 0; background: none; }
+.tab-ext { color: var(--faint); }
+.tab-ext:hover { color: var(--orange); }
+
+/* Order-lifecycle filter controls. */
+.controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; row-gap: 8px; margin: 0 0 12px; }
+.selctl { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.selctl select { background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: inherit; font-size: 12.5px; }
+.searchctl { background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 12.5px; min-width: 190px; }
+.searchctl:focus-visible, .selctl select:focus-visible { outline: 2px solid var(--orange); outline-offset: -1px; }
+
+/* Clickable order rows -> remediation. */
+tr.clickable { cursor: pointer; }
+tr.clickable:hover { background: var(--sunken); }
+tr.clickable:focus-visible { outline: 2px solid var(--orange); outline-offset: -2px; }
+.ord-action { text-align: right; }
+.resolve { font-size: 12px; font-weight: 600; color: var(--orange); white-space: nowrap; }
+.resolve.muted { color: var(--faint); }
+
+/* Per-order stage traffic-light dots. */
+th.stage { text-align: center; width: 62px; }
+.stagecell { text-align: center; }
+.dot { display: inline-block; width: 13px; height: 13px; border-radius: 50%; box-sizing: border-box; }
+.dot.g { background: var(--green); }
+.dot.a { background: var(--amber); }
+.dot.r { background: var(--red); }
+.dot.na { background: transparent; border: 1.5px dashed var(--dash); }
+.dot.pending { background: transparent; border: 2px solid var(--dash); }
+.legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); margin-top: 12px; align-items: center; }
+.legend .li { display: flex; align-items: center; gap: 6px; }
 
 .sec { margin: 22px 0 10px; display: flex; align-items: center; gap: 10px; }
 .sec h2 { font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; }

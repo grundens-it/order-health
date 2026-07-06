@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type {
   ChannelFilter as ChannelFilterValue,
   LeadershipRollup,
+  LifecycleStage,
   OrderHealth,
   PipelineHealth,
   RemediationRegistry,
@@ -19,9 +20,55 @@ import { AllocatorPanel } from './components/AllocatorPanel';
 import { OrderTable } from './components/OrderTable';
 import { ChannelFilter } from './components/ChannelFilter';
 
-// The single route: the two-layer shell (pipeline strip on top, order table
-// below) with a DTC / wholesale / all channel filter and the snapshot as_of.
+// Tabbed shell, matching the demo: "Order Health" is the primary view (leadership
+// glance + pipeline cards + the filterable order lifecycle table); each pipe has
+// its own deep-dive tab so no single panel buries the rest. Three middleware-only
+// pages (Home, Errors, SQL Console) deep-link out to the live middleware dashboard.
+
+type TabKey =
+  | 'orderhealth'
+  | 'inventory'
+  | 'backsync'
+  | 'pricesync'
+  | 'jobqueue'
+  | 'webhooks'
+  | 'warehouse';
+
+const INTERNAL_TABS: ReadonlyArray<readonly [TabKey, string]> = [
+  ['orderhealth', 'Order Health'],
+  ['inventory', 'Inventory Sync'],
+  ['backsync', 'Back-Sync'],
+  ['pricesync', 'Price Sync'],
+  ['jobqueue', 'Job Queue'],
+  ['webhooks', 'Webhooks'],
+  ['warehouse', 'Warehouse Split'],
+];
+
+// Middleware-only pages (no local panel): deep-link to the live middleware
+// dashboard (reachable read-only from the corporate range).
+const DASH_BASE = 'https://middleware.grundens.com';
+const EXTERNAL_TABS: ReadonlyArray<readonly [string, string]> = [
+  ['Home', '/malibu_dash'],
+  ['Errors', '/malibu_dash/errors'],
+  ['SQL Console', '/malibu_dash/config/sql'],
+];
+
+const STAGE_OPTIONS: ReadonlyArray<readonly [LifecycleStage, string]> = [
+  ['shopify_order', 'Shopify order'],
+  ['allocator_split', 'Allocator split'],
+  ['nav_staging', 'NAV staging'],
+  ['nav_promotion', 'NAV promotion'],
+  ['awaiting_ship', 'Awaiting ship'],
+  ['nav_shipment', 'NAV shipment'],
+  ['back_sync', 'Back-sync'],
+  ['complete', 'Complete'],
+];
+
+type RowCount = 25 | 50 | 100 | 'all';
+const ROW_COUNTS: readonly RowCount[] = [25, 50, 100, 'all'];
+
 export function App(): JSX.Element {
+  const [tab, setTab] = useState<TabKey>('orderhealth');
   const [channel, setChannel] = useState<ChannelFilterValue>('all');
   const [pipelines, setPipelines] = useState<PipelineHealth[]>([]);
   const [orders, setOrders] = useState<OrderHealth[]>([]);
@@ -29,8 +76,14 @@ export function App(): JSX.Element {
   const [rollupAsOf, setRollupAsOf] = useState<string | null>(null);
   const [asOf, setAsOf] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Unit 7: the remediation runbook registry (fetched once) + the subject whose
-  // modal is currently open (null = closed).
+
+  // Order-lifecycle controls (Order Health view).
+  const [attention, setAttention] = useState<'all' | 'attn'>('all');
+  const [stage, setStage] = useState<LifecycleStage | 'all'>('all');
+  const [query, setQuery] = useState('');
+  const [rowCount, setRowCount] = useState<RowCount>(50);
+
+  // Unit 7: remediation registry + the subject whose modal is open (null = closed).
   const [registry, setRegistry] = useState<RemediationRegistry | null>(null);
   const [remediationSubject, setRemediationSubject] = useState<RemediationSubject | null>(null);
 
@@ -43,8 +96,7 @@ export function App(): JSX.Element {
         setRegistry(reg);
       })
       .catch(() => {
-        // The registry is non-critical for the read view; the modal simply shows
-        // "no remediation mapped" if it never loads.
+        // Non-critical for the read view; the modal shows "no remediation mapped".
       });
     return () => {
       cancelled = true;
@@ -58,12 +110,9 @@ export function App(): JSX.Element {
         if (cancelled) return;
         setPipelines(pipeRes.data);
         setOrders(orderRes.data);
-        // The rollup carries as_of inline (single object, not a list); split the
-        // headline fields from the envelope-style as_of for the strip.
         const { as_of: rollupTime, ...rollupData } = rollupRes;
         setRollup(rollupData);
         setRollupAsOf(rollupTime);
-        // The order snapshot is the freshest signal for the header as_of.
         setAsOf(orderRes.as_of ?? pipeRes.as_of);
         setError(null);
       })
@@ -81,39 +130,35 @@ export function App(): JSX.Element {
     return `as of ${new Date(asOf).toLocaleString()}`;
   }, [asOf]);
 
-  // The inventory-sync pipe owns the reference expanded panel (Unit 1).
-  const inventoryPipe = useMemo(
-    () => pipelines.find((p) => p.pipe === 'inventory_sync') ?? null,
-    [pipelines],
+  const pipeByKey = useMemo(() => {
+    const m = new Map<string, PipelineHealth>();
+    for (const p of pipelines) m.set(p.pipe, p);
+    return m;
+  }, [pipelines]);
+
+  // Order lifecycle: apply attention -> stage -> search, then cap the row count.
+  const filteredOrders = useMemo(() => {
+    let list = orders;
+    if (attention === 'attn') {
+      list = list.filter((o) => o.order_verdict === 'red' || o.order_verdict === 'amber');
+    }
+    if (stage !== 'all') list = list.filter((o) => o.current_stage === stage);
+    const q = query.trim().toLowerCase();
+    if (q) {
+      list = list.filter(
+        (o) =>
+          (o.nav_order_no ?? '').toLowerCase().includes(q) ||
+          (o.shopify_order_name ?? '').toLowerCase().includes(q),
+      );
+    }
+    return list;
+  }, [orders, attention, stage, query]);
+
+  const shownOrders = useMemo(
+    () => (rowCount === 'all' ? filteredOrders : filteredOrders.slice(0, rowCount)),
+    [filteredOrders, rowCount],
   );
 
-  // The back-sync pipe owns the missed-shipments panel (Unit 2).
-  const backSyncPipe = useMemo(
-    () => pipelines.find((p) => p.pipe === 'back_sync') ?? null,
-    [pipelines],
-  );
-
-  // Unit 3 pipes: price-sync, NAV job queue, Shopify webhooks.
-  const priceSyncPipe = useMemo(
-    () => pipelines.find((p) => p.pipe === 'price_sync') ?? null,
-    [pipelines],
-  );
-  const jobQueuePipe = useMemo(
-    () => pipelines.find((p) => p.pipe === 'nav_job_queue') ?? null,
-    [pipelines],
-  );
-  const webhookPipe = useMemo(
-    () => pipelines.find((p) => p.pipe === 'shopify_webhook') ?? null,
-    [pipelines],
-  );
-
-  // The allocator pipe owns the Warehouse Split decisions panel (Unit 4).
-  const allocatorPipe = useMemo(
-    () => pipelines.find((p) => p.pipe === 'allocator') ?? null,
-    [pipelines],
-  );
-
-  // Open the remediation modal for a red/amber pipe (Unit 7).
   const PIPE_LABELS: Record<string, string> = {
     inventory_sync: 'Inventory sync',
     back_sync: 'Back-sync',
@@ -130,18 +175,21 @@ export function App(): JSX.Element {
     });
   };
 
-  // The dashboard sits alongside the middleware's own operational tabs. Order
-  // Health is our page; the sibling tabs deep-link out to the live middleware
-  // dashboard (reachable read-only from the corporate range).
-  const dashBase = 'https://middleware.grundens.com';
-  const middlewareTabs: ReadonlyArray<readonly [string, string]> = [
-    ['Home', '/malibu_dash'],
-    ['Inventory Sync', '/malibu_dash/middleware/inventory-sync'],
-    ['Back-Sync', '/malibu_dash/middleware/shipment-back-sync'],
-    ['Warehouse Split', '/malibu_dash/middleware/warehouse-split'],
-    ['Errors', '/malibu_dash/errors'],
-    ['SQL Console', '/malibu_dash/config/sql'],
-  ];
+  // Clicking an order opens its remediation tool. The order-level signal is
+  // derived from the stage it is stuck at (matches the registry's signal keys).
+  const openOrderRemediation = (o: OrderHealth): void => {
+    const signal =
+      o.current_stage === 'back_sync'
+        ? 'missed_back_sync'
+        : o.current_stage === 'nav_staging'
+          ? 'nav_staging_stuck'
+          : o.current_stage;
+    setRemediationSubject({
+      subjectKind: 'order',
+      subjectKey: signal,
+      label: o.nav_order_no ?? o.shopify_order_name ?? o.customer_ref ?? 'order',
+    });
+  };
 
   return (
     <>
@@ -165,28 +213,32 @@ export function App(): JSX.Element {
 
       <nav className="tabnav" aria-label="Dashboard sections">
         <div className="tabs">
-          <span className="tab on" aria-current="page">
-            Order Health
-          </span>
-          {middlewareTabs.map(([label, path]) => (
-            <a
-              key={path}
-              className="tab"
-              href={`${dashBase}${path}`}
-              target="_blank"
-              rel="noopener noreferrer"
+          {INTERNAL_TABS.map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              className={`tab${tab === key ? ' on' : ''}`}
+              aria-current={tab === key ? 'page' : undefined}
+              onClick={() => setTab(key)}
             >
               {label}
+            </button>
+          ))}
+          <span className="tab-sep" aria-hidden="true" />
+          {EXTERNAL_TABS.map(([label, path]) => (
+            <a
+              key={path}
+              className="tab tab-ext"
+              href={`${DASH_BASE}${path}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Opens the middleware dashboard in a new tab"
+            >
+              {label} ↗
             </a>
           ))}
         </div>
       </nav>
-
-      <div className="demo-note">
-        <b>Remediation runbook layer (Unit 7) live.</b> Click a red or amber pipe verdict for the
-        mapped operator tool. Triggers are operator-only and stubbed (no live call); observability
-        stays read-only against the middleware and NAV.
-      </div>
 
       <div className="wrap">
         {error && (
@@ -195,69 +247,143 @@ export function App(): JSX.Element {
           </div>
         )}
 
-        {/* Leadership rollup: the top-of-page glance layer (Unit 6). */}
-        <LeadershipStrip rollup={rollup} asOf={rollupAsOf} />
+        {tab === 'orderhealth' && (
+          <>
+            <LeadershipStrip rollup={rollup} asOf={rollupAsOf} />
+            <PipelineStrip pipelines={pipelines} onRemediate={openPipeRemediation} />
 
-        <PipelineStrip pipelines={pipelines} onRemediate={openPipeRemediation} />
+            <div className="sec">
+              <h2>Order lifecycle</h2>
+              <div className="rule" />
+              <span className="aux">click an order for its remediation tool</span>
+            </div>
+            <div className="controls">
+              <ChannelFilter value={channel} onChange={setChannel} />
+              <div className="seg" role="group" aria-label="Attention filter">
+                <button
+                  type="button"
+                  className={attention === 'all' ? 'on' : ''}
+                  onClick={() => setAttention('all')}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  className={attention === 'attn' ? 'on' : ''}
+                  onClick={() => setAttention('attn')}
+                >
+                  Needs attention
+                </button>
+              </div>
+              <label className="selctl">
+                <span className="selctl-l">Stage</span>
+                <select
+                  value={stage}
+                  onChange={(e) => setStage(e.target.value as LifecycleStage | 'all')}
+                >
+                  <option value="all">All stages</option>
+                  {STAGE_OPTIONS.map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <input
+                className="searchctl"
+                type="search"
+                placeholder="Search order number"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                aria-label="Search by order number"
+              />
+              <div className="seg" role="group" aria-label="Rows shown">
+                {ROW_COUNTS.map((n) => (
+                  <button
+                    key={String(n)}
+                    type="button"
+                    className={rowCount === n ? 'on' : ''}
+                    onClick={() => setRowCount(n)}
+                  >
+                    {n === 'all' ? 'All' : n}
+                  </button>
+                ))}
+              </div>
+              <span className="count">
+                showing {shownOrders.length} of {orders.length} orders
+              </span>
+            </div>
+            <OrderTable orders={shownOrders} onSelect={openOrderRemediation} />
+          </>
+        )}
 
-        <div className="sec">
-          <h2>Inventory sync</h2>
-          <div className="rule" />
-          <span className="aux">reference monitor: freshness · liveness · push-outcome</span>
-        </div>
-        <InventoryPanel pipe={inventoryPipe} />
+        {tab === 'inventory' && (
+          <>
+            <div className="sec">
+              <h2>Inventory sync</h2>
+              <div className="rule" />
+              <span className="aux">reference monitor: freshness · liveness · push-outcome</span>
+            </div>
+            <InventoryPanel pipe={pipeByKey.get('inventory_sync') ?? null} />
+          </>
+        )}
 
-        <div className="sec">
-          <h2>Back-sync</h2>
-          <div className="rule" />
-          <span className="aux">NAV shipment to Shopify: freshness · liveness · missed shipments</span>
-        </div>
-        <BackSyncPanel pipe={backSyncPipe} />
+        {tab === 'backsync' && (
+          <>
+            <div className="sec">
+              <h2>Back-sync</h2>
+              <div className="rule" />
+              <span className="aux">NAV shipment to Shopify: freshness · liveness · missed shipments</span>
+            </div>
+            <BackSyncPanel pipe={pipeByKey.get('back_sync') ?? null} />
+          </>
+        )}
 
-        <div className="sec">
-          <h2>Price sync</h2>
-          <div className="rule" />
-          <span className="aux">Unit 3 monitor: received freshness · syncer liveness</span>
-        </div>
-        <PriceSyncPanel pipe={priceSyncPipe} />
+        {tab === 'pricesync' && (
+          <>
+            <div className="sec">
+              <h2>Price sync</h2>
+              <div className="rule" />
+              <span className="aux">received freshness · syncer liveness</span>
+            </div>
+            <PriceSyncPanel pipe={pipeByKey.get('price_sync') ?? null} />
+          </>
+        )}
 
-        <div className="sec">
-          <h2>NAV job queue</h2>
-          <div className="rule" />
-          <span className="aux">Unit 3 monitor: verdict consumed from middleware, not recomputed</span>
-        </div>
-        <JobQueuePanel pipe={jobQueuePipe} />
+        {tab === 'jobqueue' && (
+          <>
+            <div className="sec">
+              <h2>NAV job queue</h2>
+              <div className="rule" />
+              <span className="aux">verdict consumed from middleware, not recomputed</span>
+            </div>
+            <JobQueuePanel pipe={pipeByKey.get('nav_job_queue') ?? null} />
+          </>
+        )}
 
-        <div className="sec">
-          <h2>Shopify webhooks</h2>
-          <div className="rule" />
-          <span className="aux">Unit 3 monitor: last received per topic · subscription health</span>
-        </div>
-        <ShopifyWebhookPanel pipe={webhookPipe} />
+        {tab === 'webhooks' && (
+          <>
+            <div className="sec">
+              <h2>Shopify webhooks</h2>
+              <div className="rule" />
+              <span className="aux">last received per topic · subscription health</span>
+            </div>
+            <ShopifyWebhookPanel pipe={pipeByKey.get('shopify_webhook') ?? null} />
+          </>
+        )}
 
-        <div className="sec">
-          <h2>Warehouse split</h2>
-          <div className="rule" />
-          <span className="aux">allocator: decision freshness · liveness · split-sanity</span>
-        </div>
-        <AllocatorPanel pipe={allocatorPipe} />
-
-        <div className="sec">
-          <h2>Order health</h2>
-          <div className="rule" />
-          <span className="aux">
-            per-order lifecycle across both channels; wholesale has no Shopify leg
-          </span>
-        </div>
-        <div className="controls">
-          <ChannelFilter value={channel} onChange={setChannel} />
-          <span className="count">{orders.length} orders</span>
-        </div>
-        <OrderTable orders={orders} />
+        {tab === 'warehouse' && (
+          <>
+            <div className="sec">
+              <h2>Warehouse split</h2>
+              <div className="rule" />
+              <span className="aux">allocator: decision freshness · liveness · split-sanity</span>
+            </div>
+            <AllocatorPanel pipe={pipeByKey.get('allocator') ?? null} />
+          </>
+        )}
       </div>
 
-      {/* Unit 7: error-to-remediation modal. Opens on a red/amber pipe verdict,
-          names the mapped tool, and offers an operator trigger (stubbed). */}
       <RemediationModal
         subject={remediationSubject}
         registry={registry}

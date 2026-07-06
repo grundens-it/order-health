@@ -38,6 +38,22 @@ const OUTCOME_VERDICT: Record<string, Verdict> = {
   failed: 'red',
 };
 
+// Human labels for the allocator's decision reasons (allocator.rs AllocationReason).
+const REASON_LABEL: Record<string, string> = {
+  single_location: 'Single location (stock in one DC)',
+  stock_asymmetry: 'Stock asymmetry (>=5x guardrail)',
+  out_of_stock: 'Out of stock (ATP fallback)',
+  sole_warehouse: 'Sole warehouse',
+  order_level_pref: 'Order-level preference',
+  stock_split: 'Stock split across DCs',
+  cached: 'Cached decision',
+  rolled: 'Rollout percentage roll',
+};
+function reasonLabel(rule: string | null): string {
+  if (!rule) return '-';
+  return REASON_LABEL[rule] ?? rule;
+}
+
 function VerdictCard({
   title,
   verdict,
@@ -132,16 +148,15 @@ export function AllocatorPanel({ pipe }: { pipe: PipelineHealth | null }): JSX.E
         {decisions.length === 0 ? (
           <div className="ip-sub">No allocation decisions in the snapshot yet.</div>
         ) : (
+          <>
           <div className="tblwrap">
             <table>
               <thead>
                 <tr>
                   <th>Order</th>
-                  <th>Channel</th>
                   <th>Line (SKU)</th>
-                  <th>Qty</th>
-                  <th>Rule applied</th>
-                  <th>Location</th>
+                  <th>Allocated to</th>
+                  <th>Why</th>
                   <th>Result</th>
                 </tr>
               </thead>
@@ -149,11 +164,9 @@ export function AllocatorPanel({ pipe }: { pipe: PipelineHealth | null }): JSX.E
                 {decisions.map((d, i) => (
                   <tr key={`${d.order_ref ?? 'row'}-${i}`}>
                     <td className="mono">{d.order_ref ?? '-'}</td>
-                    <td>{d.channel ?? '-'}</td>
                     <td>{d.sku ?? '-'}</td>
-                    <td className="mono">{d.qty ?? '-'}</td>
-                    <td>{d.rule ?? '-'}</td>
                     <td className="mono">{d.location ?? '-'}</td>
+                    <td>{reasonLabel(d.rule)}</td>
                     <td>
                       <VerdictChip verdict={OUTCOME_VERDICT[d.outcome] ?? 'unknown'} />
                     </td>
@@ -162,6 +175,12 @@ export function AllocatorPanel({ pipe }: { pipe: PipelineHealth | null }): JSX.E
               </tbody>
             </table>
           </div>
+          <div className="ip-sub" style={{ marginTop: 10 }}>
+            "Allocated to" is the warehouse the line was routed to (NEW / OLD / NAV
+            location). Per-warehouse stock split (% new at decision) and line quantity
+            come from the allocation log + NAV join, wired in with the derived-data pass.
+          </div>
+          </>
         )}
       </div>
     </div>

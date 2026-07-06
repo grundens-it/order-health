@@ -18,11 +18,20 @@ import { ShopifyWebhookPanel } from './components/ShopifyWebhookPanel';
 import { AllocatorPanel } from './components/AllocatorPanel';
 import { OrderTable } from './components/OrderTable';
 import { ChannelFilter } from './components/ChannelFilter';
+import { RowCountControl, type RowCount } from './components/RowCountControl';
+import { StageFilter, type StageFilterValue } from './components/StageFilter';
+import { OrderSearch } from './components/OrderSearch';
 
 // The single route: the two-layer shell (pipeline strip on top, order table
 // below) with a DTC / wholesale / all channel filter and the snapshot as_of.
 export function App(): JSX.Element {
   const [channel, setChannel] = useState<ChannelFilterValue>('all');
+  // Order-lifecycle table controls (client-side, over the fetched snapshot):
+  // a stage filter, an order-number search, and a row-count cap. Default cap is
+  // 50 rows — enough to scan without rendering the whole snapshot at once.
+  const [stage, setStage] = useState<StageFilterValue>('all');
+  const [orderSearch, setOrderSearch] = useState<string>('');
+  const [rowCount, setRowCount] = useState<RowCount>(50);
   const [pipelines, setPipelines] = useState<PipelineHealth[]>([]);
   const [orders, setOrders] = useState<OrderHealth[]>([]);
   const [rollup, setRollup] = useState<LeadershipRollup | null>(null);
@@ -111,6 +120,34 @@ export function App(): JSX.Element {
   const allocatorPipe = useMemo(
     () => pipelines.find((p) => p.pipe === 'allocator') ?? null,
     [pipelines],
+  );
+
+  // Derived order-lifecycle rows. The channel filter is already applied upstream
+  // (fetchOrders(channel) refetches per channel), so here we compose the three
+  // client-side controls in order: stage filter -> order-number search -> row
+  // cap. Search matches nav_order_no OR shopify_order_name as a case-insensitive
+  // trimmed substring; an empty query is a no-op. The cap is applied last so the
+  // count reflects "shown of matched".
+  const filteredOrders = useMemo(() => {
+    const query = orderSearch.trim().toLowerCase();
+    let rows = orders;
+    if (stage !== 'all') {
+      rows = rows.filter((o) => o.current_stage === stage);
+    }
+    if (query) {
+      rows = rows.filter((o) => {
+        const nav = o.nav_order_no?.toLowerCase() ?? '';
+        const shop = o.shopify_order_name?.toLowerCase() ?? '';
+        return nav.includes(query) || shop.includes(query);
+      });
+    }
+    return rows;
+  }, [orders, stage, orderSearch]);
+
+  // Rows actually rendered after the row-count cap ('all' = no cap).
+  const shownOrders = useMemo(
+    () => (rowCount === 'all' ? filteredOrders : filteredOrders.slice(0, rowCount)),
+    [filteredOrders, rowCount],
   );
 
   // Open the remediation modal for a red/amber pipe (Unit 7).
@@ -219,9 +256,14 @@ export function App(): JSX.Element {
         </div>
         <div className="controls">
           <ChannelFilter value={channel} onChange={setChannel} />
-          <span className="count">{orders.length} orders</span>
+          <StageFilter value={stage} onChange={setStage} />
+          <OrderSearch value={orderSearch} onChange={setOrderSearch} />
+          <RowCountControl value={rowCount} onChange={setRowCount} />
+          <span className="count">
+            showing {shownOrders.length} of {orders.length} orders
+          </span>
         </div>
-        <OrderTable orders={orders} />
+        <OrderTable orders={shownOrders} />
       </div>
 
       {/* Unit 7: error-to-remediation modal. Opens on a red/amber pipe verdict,

@@ -115,8 +115,11 @@ Done once, out of band, before the first deploy:
    - `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` (if using the compose
      `db` service),
    - `MIDDLEWARE_BASE_URL` and `MIDDLEWARE_AUTH_TOKEN` (read-only bearer token),
-   - `NAV_HOST` / `NAV_PORT` / `NAV_DATABASE` / `NAV_USER` / `NAV_PASSWORD` /
-     `NAV_ENCRYPT` (read-only NAV login),
+   - `NAV_HOST` / `NAV_PORT` / `NAV_DATABASE` / `NAV_ENCRYPT` plus the Microsoft
+     Entra auth keys `NAV_AUTH_MODE` (aad-default | aad-service-principal |
+     aad-msi), `NAV_AAD_TENANT_ID` / `NAV_AAD_CLIENT_ID` / `NAV_AAD_CLIENT_SECRET`
+     (service-principal only), and `NAV_COMPANY` (GRUS). The NAV box has no SQL
+     user/password; the Entra identity is granted db_datareader only,
    - the cadence knobs (`ORDER_LAYER_CRON`, `INVENTORY_LAYER_CRON`) and any Ops
      threshold overrides,
    - `AGGREGATOR_ENABLED` (see the gate below).

@@ -53,6 +53,7 @@ function dtcComplete(overrides: Partial<OrderInput> = {}): OrderInput {
     shopifyOrderName: '#1024',
     customerRef: 'web-cust',
     webId: 'gid://shopify/Order/5551024',
+    webOrder: 1, // a genuine web order (WebOrder = 1 on the NAV Sales Header)
     hops: [
       hop('shopify_order', ago(9000), ago(9100)),
       hop('allocator_split', ago(8800), ago(9000)),
@@ -232,13 +233,14 @@ test('orphan flag OFF: a DTC order with an empty WebId is NOT flagged and NOT re
   assert.equal(r.order_verdict, 'green');
 });
 
-test('orphan flag ON: a DTC order with an empty WebId is flagged and reded', () => {
+test('orphan flag ON: a DTC WebOrder=1 order with an empty WebId is flagged and reded', () => {
   const input: OrderInput = {
     channel: 'dtc',
     navOrderNo: 'SO-3002',
     shopifyOrderName: '#1031',
     customerRef: 'web-cust',
     webId: '   ', // whitespace counts as empty
+    webOrder: 1, // a web order that lost its WebId => genuine orphan (DATA_SOURCES)
     hops: [
       hop('shopify_order', ago(600), ago(700)),
       hop('allocator_split', null, ago(120)), // otherwise green
@@ -254,6 +256,45 @@ test('orphan flag ON: a DTC order WITH a WebId is not an orphan', () => {
   const r = gradeOrder(dtcComplete({ webId: 'w-present' }), T_ORPHAN, NOW);
   assert.equal(r.is_orphan_suspect, false);
   assert.equal(r.order_verdict, 'green');
+});
+
+test('orphan flag ON: an empty WebId with WebOrder=0 is NEVER an orphan', () => {
+  // WebOrder = 0 => not a web order (wholesale / manual). Even if the row is
+  // labelled dtc and the flag is ON, WebOrder=0 must never be graded an orphan.
+  const input: OrderInput = {
+    channel: 'dtc',
+    navOrderNo: 'SO-3003',
+    shopifyOrderName: '#1032',
+    customerRef: 'web-cust',
+    webId: '', // empty
+    webOrder: 0, // not a web order => never an orphan
+    hops: [
+      hop('shopify_order', ago(600), ago(700)),
+      hop('allocator_split', null, ago(120)), // otherwise green
+    ],
+  };
+  const r = gradeOrder(input, T_ORPHAN, NOW);
+  assert.equal(r.is_orphan_suspect, false);
+  assert.notEqual(r.order_verdict, 'red');
+});
+
+test('orphan flag ON: an empty WebId with WebOrder unset is not an orphan', () => {
+  // Defensive: an undefined WebOrder (source not reporting) is not treated as a
+  // web order, so it cannot be mis-graded an orphan.
+  const input: OrderInput = {
+    channel: 'dtc',
+    navOrderNo: 'SO-3004',
+    shopifyOrderName: '#1033',
+    customerRef: 'web-cust',
+    webId: '',
+    hops: [
+      hop('shopify_order', ago(600), ago(700)),
+      hop('allocator_split', null, ago(120)),
+    ],
+  };
+  const r = gradeOrder(input, T_ORPHAN, NOW);
+  assert.equal(r.is_orphan_suspect, false);
+  assert.notEqual(r.order_verdict, 'red');
 });
 
 // --- Channel filtering (mirrors the read-API SQL WHERE) -------------------

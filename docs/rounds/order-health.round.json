@@ -41,6 +41,6 @@
     { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "done", "pr": 24, "merged": true, "note": "staleness sim, a11y shape-audit, dark-theme parity, visual-status script" },
     { "unit": 9, "issue": 19, "phase": "D", "name": "Local dev (Docker Compose) + CI workflow", "status": "done", "pr": 22, "merged": true, "note": "docker compose up, CI build/test on push+PR" },
     { "unit": 10, "issue": 20, "phase": "D", "name": "ADR-0005 deploy target + CD pipeline", "status": "done", "pr": 25, "merged": true, "note": "ADR-0005 accepted Alternative B; CD workflow (GHCR + SSH to VM, gated by production environment) merged; inert until DevOps provisions VM+VPN+secrets" },
-    { "unit": "1b", "issue": 28, "phase": "P", "name": "Real read-only NAV client (Entra auth) against live NAV", "status": "active", "pr": null, "note": "provisioning realization of Unit 1 NAV reads per docs/DATA_SOURCES.md; Entra auth (az login local), GRUS$ prefixes, WebOrder read; strictly read-only, stub fallback; do NOT merge until validated by az login against sqldb-nav18-grus-prd-01" }
+    { "unit": "1b", "issue": 28, "phase": "P", "name": "Real read-only NAV client (Entra auth) against live NAV", "status": "review", "pr": 29, "note": "provisioning realization of Unit 1 NAV reads per docs/DATA_SOURCES.md; Entra auth (az login local), GRUS$ prefixes, WebOrder read; strictly read-only, stub fallback; do NOT merge until validated by az login against sqldb-nav18-grus-prd-01" }
   ]
 }

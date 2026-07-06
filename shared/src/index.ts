@@ -127,6 +127,125 @@ export interface InventorySyncDetail {
   divergence: InventoryDivergence;
 }
 
+// --- Allocator (Warehouse Split) pipe detail (Unit 4, design.md 3.2 / 5) ------
+// The allocator pipe grades the warehouse-splitter's split decisions
+// (warehouse_allocation_log). Like inventory_sync it carries freshness +
+// liveness in PipelineHealth columns and a typed detail bag here: the recent
+// split decisions (Mari's 4 rules) and the split-sanity signal (rate of
+// un-allocatable / failed splits). Snake_case matches the JSONB convention.
+export type AllocationOutcome = 'allocated' | 'split' | 'unallocatable' | 'failed';
+
+export interface AllocationDecision {
+  decided_at: string | null;      // ISO time the split decision was logged
+  order_ref: string | null;       // Shopify order name or NAV order no
+  channel: Channel | null;        // dtc / wholesale (null when not resolved)
+  sku: string | null;             // variant / item allocated
+  qty: number | null;             // units on the line
+  rule: string | null;            // rule applied ("least-split -> TAC", etc.)
+  location: string | null;        // resolved warehouse (TAC / OLD / NEW / HF1FTZ)
+  outcome: AllocationOutcome;      // allocated | split | unallocatable | failed
+}
+
+export interface AllocatorSplitSanity {
+  decisions_window: number | null;    // total decisions counted in the window
+  split_count: number | null;         // multi-warehouse splits
+  split_rate: number | null;          // split_count / decisions_window
+  unallocatable_count: number | null; // decisions with no ATP anywhere
+  failed_count: number | null;        // errored decisions
+  failed_rate: number | null;         // (unallocatable + failed) / decisions_window
+  atp_fallback_count: number | null;  // inventory-aware fallbacks
+  // green/amber/red by failed_rate bands. Unlike inventory divergence this is
+  // NOT amber-capped: a genuinely high un-allocatable rate is allowed to go RED.
+  sanity_verdict: Verdict;
+}
+
+export interface AllocatorDetail {
+  window_seconds: number | null;      // the window the counts cover
+  last_decision_at: string | null;    // recency driver for freshness
+  recent_decisions: AllocationDecision[]; // most-recent-first
+  sanity: AllocatorSplitSanity;
+}
+
+// --- Unit 3 pipe detail bags (job-queue, price-sync, Shopify webhooks) -----
+// Each pipe carries its own typed detail bag inside PipelineHealth.detail. The
+// backend writes the shape; the panel casts detail to it. Snake_case matches
+// the JSONB column convention.
+
+// nav_job_queue: this pipe CONSUMES the middleware's already-computed job-queue
+// health verdict (design.md 6) and does NOT re-derive it. The detail carries the
+// middleware's supporting numbers (CU 50009 auto-release recency + stuck-job
+// tripwire) purely for context; adopted_verdict is the verdict as surfaced.
+export interface JobQueueDetail {
+  source: 'middleware:job-queue/health';
+  adopted_verdict: Verdict;               // the middleware verdict, surfaced unchanged
+  middleware_verdict_raw: string | null;  // the raw verdict string the endpoint returned
+  auto_release_fired_at: string | null;   // last CU 50009 auto-release firing
+  auto_release_age_s: number | null;      // wall-clock age of that firing
+  longest_running_job_s: number | null;   // age of the oldest running Job Queue Entry
+  stuck_job_count: number | null;         // jobs the middleware flags stuck (> its own threshold)
+  checked_at: string | null;              // when the middleware computed this health
+}
+
+// price_sync: freshness (last price-sync signal received) + liveness (last
+// price-sync run/loop), both cycle-banded like inventory-sync.
+export interface PriceSyncDetail {
+  last_received_at: string | null;    // last price-sync signal received (freshness)
+  last_received_age_s: number | null;
+  last_run_at: string | null;         // last price-sync run/loop completed (liveness)
+  last_run_age_s: number | null;
+}
+
+// shopify_webhook: last-received per topic plus the subscription-removal signal
+// (a removed/absent subscription is the WAF-removal failure mode, amber-or-worse).
+export interface WebhookTopicHealth {
+  topic: string;
+  last_received_at: string | null;
+  last_received_age_s: number | null;
+  subscribed: boolean;            // false = removed/absent subscription (amber-or-worse)
+  verdict: Verdict;               // per-topic freshness verdict (subscription folds into the pipe)
+}
+
+export interface ShopifyWebhookDetail {
+  topics: WebhookTopicHealth[];
+  missing_subscription_count: number; // topics with subscribed === false
+  freshest_received_at: string | null;
+  stalest_received_at: string | null;
+}
+
+// --- Back-sync pipe detail (Unit 2, design.md 3.2 / 5 line "Missed back-sync") -
+// The back-sync pipe (NAV shipment -> Shopify fulfillmentCreate) carries these in
+// PipelineHealth.detail. Backend writes this shape; the BackSyncPanel casts detail
+// to BackSyncDetail to render the missed-shipments count and table. Snake_case
+// matches the JSONB column convention.
+//
+// A missed shipment is a NAV shipment (GRUS$Sales Shipment Header) that posted but
+// has no shopify_fulfillment_id in the middleware's nav_shipment_sync, i.e. the
+// fulfillmentCreate never fired. Wholesale shipments have no Shopify back-sync leg
+// (no WebId) and are excluded upstream, so they never count as missed.
+export interface MissedShipment {
+  order_ref: string | null;        // Shopify order name (SP-319090) or NAV order no
+  web_id: string | null;           // Shopify WebId correlation key (wholesale has none)
+  nav_shipment_no: string | null;  // GRUS$Sales Shipment Header [No_]
+  carrier: string | null;
+  tracking: string | null;
+  posted_at: string | null;        // NAV shipment posting time (ISO)
+  age_s: number | null;            // wall-clock age since posted
+  reason: string | null;           // human note (e.g. escalated after 6h)
+}
+
+// The full typed detail bag for the back_sync pipe. Unlike inventory-sync's
+// divergence (amber-capped), the missed-shipments signal is a real backlog and is
+// allowed to reach RED (design.md 5 "Missed back-sync ... RED").
+export interface BackSyncDetail {
+  last_back_sync_at: string | null;   // watermark: last successful fulfillmentCreate
+  missed_verdict: Verdict;            // count-banded; NOT capped, may be RED
+  missed_count: number;               // NAV shipments lacking a Shopify fulfillment
+  missed_window_days: number;         // lookback window for the count (e.g. 14)
+  fulfillments_last_24h: number | null;
+  errors_last_24h: number | null;
+  missed_shipments: MissedShipment[]; // detail rows for the panel table
+}
+
 export interface HealthTransition {
   subject_kind: 'pipe' | 'signal' | 'order';
   subject_key: string;
@@ -140,3 +259,49 @@ export interface HealthTransition {
 // Response payload types the read API returns (inside a HealthEnvelope).
 export type PipelinesResponse = HealthEnvelope<PipelineHealth[]>;
 export type OrdersResponse = HealthEnvelope<OrderHealth[]>;
+
+// --- Leadership rollup (design.md section 6, Unit 6) -----------------------
+// The top-of-page rollup collapses the two-layer model into a small set of
+// headline verdicts suitable for a leadership glance, with operator detail below
+// the fold. It is derived READ-ONLY from the SAME latest snapshot the pipeline
+// and order endpoints serve (no new external source): the pipeline_health rows
+// and the order_health rows. Nothing here fans out to a live source.
+
+// The three headline buckets. 'stuck' = something is RED (a red pipe or a
+// SLO-breached / immediately-red order); 'at_risk' = something is AMBER but
+// nothing is red; 'healthy' = nothing observed is red or amber.
+export type RollupHeadline = 'healthy' | 'at_risk' | 'stuck';
+
+// Per-verdict tallies for the at-a-glance counts, one set per layer.
+export interface RollupCounts {
+  orders_total: number;
+  orders_green: number;
+  orders_amber: number;
+  orders_red: number;
+  orders_unknown: number;
+  pipes_total: number;
+  pipes_green: number;
+  pipes_amber: number;
+  pipes_red: number;
+  pipes_unknown: number;
+}
+
+export interface LeadershipRollup {
+  headline: RollupHeadline;
+  // The headline mapped onto the shared Verdict so the UI can render it with the
+  // same shape-encoded VerdictChip (green/amber/red/unknown). 'unknown' is the
+  // healthy-empty case: nothing unhealthy observed, but nothing observed yet.
+  headline_verdict: Verdict;
+  // Age of the oldest STUCK (red) order, in seconds; null when no order is red.
+  oldest_stuck_age_s: number | null;
+  // The inventory_sync pipe's freshness: true = fresh (green), false = stale
+  // (amber/red), null = unknown (no inventory_sync row, or its freshness is
+  // unknown / not yet provisioned).
+  inventory_sync_fresh: boolean | null;
+  counts: RollupCounts;
+}
+
+// The rollup endpoint returns the rollup fields flattened alongside as_of. It is
+// a single object (not a list), so as_of rides inline rather than in the
+// HealthEnvelope.data wrapper; as_of is still always present (firm rule).
+export type RollupResponse = { as_of: string } & LeadershipRollup;

@@ -6,13 +6,13 @@ This is a **standalone, read-only** observability service. It is a separate Grun
 
 ## Where to start
 
-- `docs/kickoffs/order-health-observability.md` — the round kickoff brief (self-contained; sequences and builds the design).
-- `docs/architecture/design.md` — the order-health model. Read section 0 (project boundary) and 5A (Inventory Sync Monitor, the reference subsystem) first.
-- `docs/architecture/adr/` — the architecture decisions:
+- `docs/kickoffs/order-health-observability.md`: the round kickoff brief (self-contained; sequences and builds the design).
+- `docs/architecture/design.md`: the order-health model. Read section 0 (project boundary) and 5A (Inventory Sync Monitor, the reference subsystem) first.
+- `docs/architecture/adr/`: the architecture decisions:
   - ADR-0001: standalone read-only service (not an in-app tab in the middleware).
   - ADR-0002: materialized snapshot read-model in this service's own store.
-  - ADR-0004: service implementation stack (pending operator sign-off).
-- `demo/order-health-dashboard-demo.html` — the visual and interaction spec.
+  - ADR-0004: service implementation stack (Accepted: Node + TypeScript backend, React + TypeScript frontend).
+- `demo/order-health-dashboard-demo.html`: the visual and interaction spec.
 
 ## Boundary
 

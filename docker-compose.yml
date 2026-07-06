@@ -1,0 +1,94 @@
+# Order Health Observability: local development stack (Docker Compose v2).
+#
+# One command brings up the whole thing:
+#
+#   docker compose up --build
+#
+# Topology:
+#   db        official Postgres 16, this service's own snapshot store (never NAV,
+#             never the middleware). Healthchecked; data in a named volume.
+#   migrate   one-shot: waits for db healthy, applies db/migrations/0001_init.sql
+#             (idempotent, safe to re-run), then exits. backend waits on it.
+#   backend   Fastify read API + node-cron aggregator, built from backend/Dockerfile.
+#             Source clients (NAV, middleware) stay STUBBED here: no live creds are
+#             set, so it serves empty, as_of-stamped snapshots. Listens on :8080.
+#   frontend  Vite dev server, built from frontend/Dockerfile. Proxies /api to the
+#             backend service. Served on :5173.
+#
+# The values below are LOCAL DEV DEFAULTS, not secrets. They can be overridden by
+# a local (gitignored) .env file in this directory; the committed defaults work
+# out of the box. Never put real NAV / middleware credentials here.
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-order_health}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-order_health}
+      POSTGRES_DB: ${POSTGRES_DB:-order_health}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-order_health} -d ${POSTGRES_DB:-order_health}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: postgres:16
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://order_health:order_health@db:5432/order_health}
+    volumes:
+      - ./db/migrations:/migrations:ro
+    entrypoint: ["/bin/sh", "-c"]
+    # Idempotent: only applies the migration when the schema is not already there,
+    # so re-running the stack does not error on the CREATE TYPE / CREATE TABLE.
+    command:
+      - |
+        set -e
+        if psql "$$DATABASE_URL" -tAc "SELECT to_regclass('public.order_health_snapshot')" | grep -q order_health_snapshot; then
+          echo "migration already applied, skipping"
+        else
+          echo "applying db/migrations/0001_init.sql"
+          psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f /migrations/0001_init.sql
+        fi
+    restart: "no"
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      DATABASE_URL: ${DATABASE_URL:-postgres://order_health:order_health@db:5432/order_health}
+      # Aggregator runs; cadence is overridable. Source clients stay stubbed:
+      # no NAV_* / MIDDLEWARE_* creds are set, so nothing live is ever contacted.
+      AGGREGATOR_ENABLED: ${AGGREGATOR_ENABLED:-true}
+      ORDER_LAYER_CRON: ${ORDER_LAYER_CRON:-*/3 * * * *}
+      INVENTORY_LAYER_CRON: ${INVENTORY_LAYER_CRON:-0 */2 * * *}
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    depends_on:
+      - backend
+    environment:
+      # The Vite dev server proxies /api to the backend service (see vite.config.ts).
+      API_PROXY_TARGET: ${API_PROXY_TARGET:-http://backend:8080}
+    ports:
+      - "5173:5173"
+
+volumes:
+  db_data:

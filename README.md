@@ -54,6 +54,40 @@ npm run dev:backend
 npm run dev:frontend
 ```
 
+## Local development with Docker (WSL2 + Docker)
+
+The whole stack (Postgres, migration, backend, frontend) comes up with one command.
+No live NAV or middleware access is configured, so it serves empty, as_of-stamped
+snapshots. Requires Docker with the Compose v2 plugin (Docker Desktop on WSL2 is fine).
+
+```bash
+# From the repo root: build the images and start the stack.
+docker compose up --build
+```
+
+- Dashboard (UI): http://localhost:5173
+- Read API (backend): http://localhost:8080/api/health/pipelines
+- The Vite dev server proxies the UI's `/api` calls to the `backend` service.
+
+The `migrate` service applies `db/migrations/0001_init.sql` to the local Postgres
+once it is healthy, then exits. It is idempotent, so re-running the stack is safe.
+
+```bash
+# Re-run just the migration (for example after wiping the volume).
+docker compose run --rm migrate
+
+# Tear down the stack.
+docker compose down
+
+# Tear down AND delete the Postgres data volume (start fresh).
+docker compose down -v
+```
+
+Local dev defaults (db name / user / password `order_health`) are baked into
+`docker-compose.yml`. They are non-secret local values; override them with a
+gitignored `.env` in the repo root if needed. Never put real NAV or middleware
+credentials there: the source clients stay stubbed for local dev.
+
 Read endpoints (each returns `{ as_of, data }`):
 
 - `GET /api/health/pipelines`: per-pipe freshness/liveness snapshot.

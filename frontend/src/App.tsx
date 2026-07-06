@@ -130,6 +130,19 @@ export function App(): JSX.Element {
     });
   };
 
+  // The dashboard sits alongside the middleware's own operational tabs. Order
+  // Health is our page; the sibling tabs deep-link out to the live middleware
+  // dashboard (reachable read-only from the corporate range).
+  const dashBase = 'https://middleware.grundens.com';
+  const middlewareTabs: ReadonlyArray<readonly [string, string]> = [
+    ['Home', '/malibu_dash'],
+    ['Inventory Sync', '/malibu_dash/middleware/inventory-sync'],
+    ['Back-Sync', '/malibu_dash/middleware/shipment-back-sync'],
+    ['Warehouse Split', '/malibu_dash/middleware/warehouse-split'],
+    ['Errors', '/malibu_dash/errors'],
+    ['SQL Console', '/malibu_dash/config/sql'],
+  ];
+
   return (
     <>
       <div className="band">
@@ -149,6 +162,25 @@ export function App(): JSX.Element {
           </div>
         </div>
       </div>
+
+      <nav className="tabnav" aria-label="Dashboard sections">
+        <div className="tabs">
+          <span className="tab on" aria-current="page">
+            Order Health
+          </span>
+          {middlewareTabs.map(([label, path]) => (
+            <a
+              key={path}
+              className="tab"
+              href={`${dashBase}${path}`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {label}
+            </a>
+          ))}
+        </div>
+      </nav>
 
       <div className="demo-note">
         <b>Remediation runbook layer (Unit 7) live.</b> Click a red or amber pipe verdict for the

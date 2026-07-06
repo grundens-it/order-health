@@ -30,6 +30,15 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-size: 14px; lin
 .demo-note { background: var(--orange-soft); border-bottom: 1px solid #3a2416; color: #f0a878; font-size: 12px; text-align: center; padding: 6px 12px; }
 .demo-note b { font-weight: 700; }
 
+/* Top tab bar: Order Health is our page (active); siblings deep-link to the
+   middleware's own dashboard tabs. */
+.tabnav { max-width: 1180px; margin: 0 auto; padding: 0 20px; }
+.tabs { display: flex; gap: 2px; margin: 18px 0 0; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+.tab { padding: 8px 14px; font-size: 12.5px; color: var(--muted); border-radius: 8px 8px 0 0; cursor: pointer; font-weight: 600; border: 1px solid transparent; border-bottom: none; position: relative; top: 1px; text-decoration: none; }
+.tab:hover { color: var(--orange); }
+.tab.on { color: var(--ink); background: var(--card); border-color: var(--line); }
+.tab:focus-visible { outline: 2px solid var(--orange); outline-offset: -2px; }
+
 .sec { margin: 22px 0 10px; display: flex; align-items: center; gap: 10px; }
 .sec h2 { font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; }
 .sec .rule { flex: 1; height: 1px; background: var(--line); }

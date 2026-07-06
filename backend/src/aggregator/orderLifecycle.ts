@@ -78,6 +78,11 @@ export interface OrderInput {
   shopifyOrderName: string | null;
   customerRef: string | null;
   webId: string | null; // Shopify correlation key; empty on a DTC orphan (never on wholesale)
+  // [WebOrder] on the NAV Sales Header (DATA_SOURCES.md): 1 => a genuine web/DTC
+  // order, 0 => not a web order (wholesale / manual). An empty WebId is only an
+  // orphan when WebOrder === 1; WebOrder === 0 is never an orphan. Optional so
+  // non-DTC fixtures need not set it (undefined is treated as "not a web order").
+  webOrder?: number | null;
   hops: OrderHop[];
 }
 
@@ -140,9 +145,16 @@ export function gradeOrder(input: OrderInput, t: OrderThresholds, nowMs: number)
     : ageSeconds(input.hops[firstIncompleteIdx]!.enteredAt, nowMs);
 
   // ORPHAN GRADING (behind the flag; wholesale is structurally excluded by the
-  // channel === 'dtc' guard, so it is never mis-graded an orphan).
+  // channel === 'dtc' guard). Per DATA_SOURCES.md an empty WebId is a genuine DTC
+  // orphan ONLY when [WebOrder] === 1 (a web order that lost its correlation);
+  // WebOrder === 0 (or unset) is not a web order and is never an orphan. Flipping
+  // ORDER_ORPHAN_GRADING_ENABLED to true (after Mari confirms) is then the only
+  // change needed to activate the RED grading.
   const orphanSuspect =
-    t.orphanGradingEnabled && input.channel === 'dtc' && isEmptyWebId(input.webId);
+    t.orphanGradingEnabled &&
+    input.channel === 'dtc' &&
+    input.webOrder === 1 &&
+    isEmptyWebId(input.webId);
 
   const verdicts = orphanSuspect ? [...hopVerdicts, 'red' as Verdict] : hopVerdicts;
   const orderVerdict = worstVerdict(verdicts);

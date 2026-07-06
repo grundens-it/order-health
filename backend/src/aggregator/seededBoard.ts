@@ -206,6 +206,7 @@ export function greenDtcOrder(navOrderNo: string, now: number = Date.now()): Nav
     channel: 'dtc',
     navOrderNo,
     webId: `web-${navOrderNo}`,
+    webOrder: 1, // a web order (WebOrder = 1 on the NAV Sales Header)
     shopifyOrderName: `#${navOrderNo}`,
     customerRef: 'CUST-001 Acme',
     shopifyOrderAt: agoIso(9000, now),
@@ -230,6 +231,7 @@ export function greenWholesaleOrder(
     channel: 'wholesale',
     navOrderNo,
     webId: null, // wholesale correctly has no WebId
+    webOrder: 0, // not a web order => never an orphan
     shopifyOrderName: null,
     customerRef: 'WH-2050 Big Box Retail',
     shopifyOrderAt: null,
@@ -253,6 +255,7 @@ export function stuckStagingDtcOrder(
     channel: 'dtc',
     navOrderNo,
     webId: `web-${navOrderNo}`,
+    webOrder: 1, // a web order (WebOrder = 1 on the NAV Sales Header)
     shopifyOrderName: `#${navOrderNo}`,
     customerRef: 'CUST-777 Blocked',
     shopifyOrderAt: agoIso(9000, now),

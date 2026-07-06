@@ -9,6 +9,7 @@ import test from 'node:test';
 import type { InventoryWalk } from '@order-health/shared';
 import {
   capAmberNeverRed,
+  computeDryRunDivergence,
   computeInventorySync,
   type InventorySyncInput,
   type InventorySyncThresholds,
@@ -189,4 +190,40 @@ test('rollup: empty inputs produce unknown, not a false green or red', () => {
   assert.equal(r.livenessVerdict, 'unknown');
   assert.equal(r.divergenceVerdict, 'unknown');
   assert.equal(r.pipeVerdict, 'unknown');
+});
+
+// --- Dry-run "would push" reconstruction (Unit 3b, issue #37) ----------------
+// Rebuilds the middleware's dry-run predicate read-only: current NAV availability
+// vs the last quantity the sync pushed to Shopify per (sku, location).
+test('computeDryRunDivergence counts pairs whose NAV availability differs from the last-synced quantity', () => {
+  const nav = [
+    { sku: 'A', location: 'HF1FTZ', availableQty: 10 }, // matches last-set 10 -> not divergent
+    { sku: 'B', location: 'HF1FTZ', availableQty: 3 },  // NAV 3 vs last-set 5 -> divergent
+    { sku: 'C', location: 'TAC', availableQty: 8 },     // no feed baseline -> excluded
+  ];
+  const feed = [
+    { sku: 'A', location: 'HF1FTZ', shopifySetQuantity: 10, syncedAt: '2026-07-05T11:00:00.000Z', reversed: false, hasError: false },
+    { sku: 'B', location: 'HF1FTZ', shopifySetQuantity: 5, syncedAt: '2026-07-05T10:30:00.000Z', reversed: false, hasError: false },
+  ];
+  const r = computeDryRunDivergence(nav, feed, '2026-07-05T09:00:00.000Z');
+  assert.equal(r.dryRunWouldPush, 1); // only pair B diverged; C had no baseline
+  assert.equal(r.dryRunAt, '2026-07-05T11:00:00.000Z'); // newest synced_at used
+});
+
+test('computeDryRunDivergence uses the newest non-reversed, non-errored row as the baseline', () => {
+  const nav = [{ sku: 'A', location: 'HF1FTZ', availableQty: 12 }];
+  const feed = [
+    { sku: 'A', location: 'HF1FTZ', shopifySetQuantity: 99, syncedAt: '2026-07-05T12:00:00.000Z', reversed: true, hasError: false }, // reversal ignored
+    { sku: 'A', location: 'HF1FTZ', shopifySetQuantity: 7, syncedAt: '2026-07-05T09:00:00.000Z', reversed: false, hasError: true },  // errored ignored
+    { sku: 'A', location: 'HF1FTZ', shopifySetQuantity: 12, syncedAt: '2026-07-05T11:00:00.000Z', reversed: false, hasError: false }, // valid baseline = 12
+  ];
+  const r = computeDryRunDivergence(nav, feed, null);
+  assert.equal(r.dryRunWouldPush, 0); // NAV 12 == valid baseline 12
+  assert.equal(r.dryRunAt, '2026-07-05T11:00:00.000Z');
+});
+
+test('computeDryRunDivergence returns unknown (null) when NAV availability is absent, keeping the fallback as-of', () => {
+  const r = computeDryRunDivergence([], [], '2026-07-05T09:00:00.000Z');
+  assert.equal(r.dryRunWouldPush, null); // NAV genuinely absent -> unknown, not a false zero
+  assert.equal(r.dryRunAt, '2026-07-05T09:00:00.000Z');
 });

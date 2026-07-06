@@ -11,6 +11,7 @@ import type { InventoryWalk, MissedShipment } from '@order-health/shared';
 import type {
   AllocatorStatus,
   BackSyncStatus,
+  InventorySyncFeedRow,
   InventorySyncStatus,
   JobQueueHealthStatus,
   MiddlewareClient,
@@ -19,6 +20,7 @@ import type {
 } from '../sources/middlewareClient';
 import type {
   NavClient,
+  NavInventoryAvailabilityRow,
   NavOrderLifecycleRow,
   NavShipmentHeader,
   NavWatermarkState,
@@ -86,6 +88,11 @@ class SeededNavClient implements NavClient {
   async getRecentShipments(): Promise<NavShipmentHeader[]> {
     return this.seed.backSync?.shipments ?? [];
   }
+  async getInventoryAvailability(): Promise<NavInventoryAvailabilityRow[]> {
+    // Seeded board leaves this empty; the dry-run divergence then falls back to
+    // the seeded InventorySyncStatus.dryRunWouldPush (no live NAV read).
+    return [];
+  }
   async queryReadOnly<T>(): Promise<T[]> {
     return [];
   }
@@ -121,6 +128,10 @@ class SeededMiddlewareClient implements MiddlewareClient {
       totalPairs: 12_218,
       ...this.seed.inventory?.status,
     };
+  }
+  async getInventorySyncFeed(): Promise<InventorySyncFeedRow[]> {
+    // Seeded board leaves the feed empty; see getInventoryAvailability above.
+    return [];
   }
   async getAllocatorStatus(): Promise<AllocatorStatus> {
     return {

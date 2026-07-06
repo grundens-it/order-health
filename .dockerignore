@@ -1,0 +1,25 @@
+# Both images build from the repo root, so this keeps the build context lean.
+node_modules
+**/node_modules
+dist
+build
+frontend/dist
+**/*.tsbuildinfo
+
+# Local env / secrets (never bake into an image)
+.env
+.env.*
+!.env.example
+*.local
+
+# Git / CI / editor
+.git
+.github
+.idea
+.vscode
+
+# Docs, demo, and other non-runtime material
+docs
+demo
+*.log
+tmp

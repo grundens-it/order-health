@@ -1,0 +1,37 @@
+# Order Health Observability: build and test only.
+#
+# This workflow verifies the workspace typechecks and the backend tests pass. It
+# does NOT deploy anything and consumes NO secrets: the deploy target is undecided
+# and gated on a separate DevOps provisioning decision. No live NAV / middleware
+# access is ever configured here; the app runs against stubs.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Node 22: the backend test script uses Node's built-in test runner with a
+      # glob (node --test src/**/*.test.ts), which requires Node 21+. Pin 22 LTS.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm install
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test

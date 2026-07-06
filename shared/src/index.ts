@@ -127,6 +127,40 @@ export interface InventorySyncDetail {
   divergence: InventoryDivergence;
 }
 
+// --- Back-sync pipe detail (Unit 2, design.md 3.2 / 5 line "Missed back-sync") -
+// The back-sync pipe (NAV shipment -> Shopify fulfillmentCreate) carries these in
+// PipelineHealth.detail. Backend writes this shape; the BackSyncPanel casts detail
+// to BackSyncDetail to render the missed-shipments count and table. Snake_case
+// matches the JSONB column convention.
+//
+// A missed shipment is a NAV shipment (GRUS$Sales Shipment Header) that posted but
+// has no shopify_fulfillment_id in the middleware's nav_shipment_sync, i.e. the
+// fulfillmentCreate never fired. Wholesale shipments have no Shopify back-sync leg
+// (no WebId) and are excluded upstream, so they never count as missed.
+export interface MissedShipment {
+  order_ref: string | null;        // Shopify order name (SP-319090) or NAV order no
+  web_id: string | null;           // Shopify WebId correlation key (wholesale has none)
+  nav_shipment_no: string | null;  // GRUS$Sales Shipment Header [No_]
+  carrier: string | null;
+  tracking: string | null;
+  posted_at: string | null;        // NAV shipment posting time (ISO)
+  age_s: number | null;            // wall-clock age since posted
+  reason: string | null;           // human note (e.g. escalated after 6h)
+}
+
+// The full typed detail bag for the back_sync pipe. Unlike inventory-sync's
+// divergence (amber-capped), the missed-shipments signal is a real backlog and is
+// allowed to reach RED (design.md 5 "Missed back-sync ... RED").
+export interface BackSyncDetail {
+  last_back_sync_at: string | null;   // watermark: last successful fulfillmentCreate
+  missed_verdict: Verdict;            // count-banded; NOT capped, may be RED
+  missed_count: number;               // NAV shipments lacking a Shopify fulfillment
+  missed_window_days: number;         // lookback window for the count (e.g. 14)
+  fulfillments_last_24h: number | null;
+  errors_last_24h: number | null;
+  missed_shipments: MissedShipment[]; // detail rows for the panel table
+}
+
 export interface HealthTransition {
   subject_kind: 'pipe' | 'signal' | 'order';
   subject_key: string;

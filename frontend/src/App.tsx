@@ -9,6 +9,7 @@ import { fetchOrders, fetchPipelines, fetchRollup } from './api';
 import { LeadershipStrip } from './components/LeadershipStrip';
 import { PipelineStrip } from './components/PipelineStrip';
 import { InventoryPanel } from './components/InventoryPanel';
+import { BackSyncPanel } from './components/BackSyncPanel';
 import { OrderTable } from './components/OrderTable';
 import { ChannelFilter } from './components/ChannelFilter';
 
@@ -59,6 +60,12 @@ export function App(): JSX.Element {
     [pipelines],
   );
 
+  // The back-sync pipe owns the missed-shipments panel (Unit 2).
+  const backSyncPipe = useMemo(
+    () => pipelines.find((p) => p.pipe === 'back_sync') ?? null,
+    [pipelines],
+  );
+
   return (
     <>
       <div className="band">
@@ -103,6 +110,13 @@ export function App(): JSX.Element {
           <span className="aux">reference monitor: freshness · liveness · push-outcome</span>
         </div>
         <InventoryPanel pipe={inventoryPipe} />
+
+        <div className="sec">
+          <h2>Back-sync</h2>
+          <div className="rule" />
+          <span className="aux">NAV shipment to Shopify: freshness · liveness · missed shipments</span>
+        </div>
+        <BackSyncPanel pipe={backSyncPipe} />
 
         <div className="sec">
           <h2>Order health</h2>

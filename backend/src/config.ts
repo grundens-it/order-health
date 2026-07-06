@@ -56,6 +56,18 @@ export interface Config {
     livenessRedCycles: number;     // heartbeat age >= this many cycles => RED
     divergenceAmberRatio: number;  // (dry-run would-push / trailing live push) above this => AMBER (never RED)
   };
+  // Order-lifecycle grading thresholds (design.md 3.1 / 5). Ops owns the SLO
+  // bands; the orphan flag is gated on a BA clarification (see below).
+  order: {
+    // ORPHAN GRADING GATE. Default FALSE, pending BA open question 1 (orphan vs
+    // wholesale disambiguation, design.md section 9). While false, no DTC order
+    // is flagged an orphan; wholesale is never flagged regardless of this flag.
+    orphanGradingEnabled: boolean;
+    stageAmberSeconds: number;        // in-flight at a staging/promotion hop >= this => AMBER
+    stageRedSeconds: number;          // >= this => RED
+    awaitingShipAmberSeconds: number; // promoted, no shipment >= this => AMBER
+    awaitingShipRedSeconds: number;   // >= this => RED
+  };
   // Allocator (Warehouse Split) monitor thresholds (Unit 4, design.md 3.2 / 5).
   // Freshness + liveness are cycle-banded (multiples of cycleSeconds); the
   // split-sanity signal is ratio-banded. All Ops-tunable, never hardcoded.
@@ -142,6 +154,14 @@ export const config: Config = {
     livenessRedCycles: num('INVENTORY_LIVENESS_RED_CYCLES', 2),
     // 7,245 / 466 ~= 15.5 (the part-1 case) trips amber at 5x; never escalates to red.
     divergenceAmberRatio: num('INVENTORY_DIVERGENCE_AMBER_RATIO', 5),
+  },
+  order: {
+    // OFF until BA question 1 resolves what marks a NAV order as wholesale.
+    orphanGradingEnabled: bool('ORDER_ORPHAN_GRADING_ENABLED', false),
+    stageAmberSeconds: num('ORDER_STAGE_AMBER_SECONDS', 1800),          // 30 min (design.md 5)
+    stageRedSeconds: num('ORDER_STAGE_RED_SECONDS', 3600),             // 60 min
+    awaitingShipAmberSeconds: num('ORDER_AWAITING_SHIP_AMBER_SECONDS', 86400),  // 24h
+    awaitingShipRedSeconds: num('ORDER_AWAITING_SHIP_RED_SECONDS', 259200),     // 72h
   },
   allocator: {
     // Defaults: allocator decides on order intake, so a ~5m window; green under

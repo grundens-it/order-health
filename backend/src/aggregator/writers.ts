@@ -11,8 +11,14 @@ import type { OrderHealth, PipelineHealth } from '@order-health/shared';
 import { config } from '../config';
 import { getPool } from '../db/pool';
 import type { MiddlewareClient } from '../sources/middlewareClient';
-import type { NavClient } from '../sources/navClient';
+import type { NavClient, NavOrderLifecycleRow } from '../sources/navClient';
 import { computeInventorySync, type InventorySyncInput } from './inventorySync';
+import {
+  CHANNEL_STAGES,
+  computeOrderRows,
+  type OrderHop,
+  type OrderInput,
+} from './orderLifecycle';
 import { computeAllocator, type AllocatorInput } from './allocator';
 import { computeJobQueue, type JobQueueInput } from './jobQueue';
 import { computePriceSync, type PriceSyncInput } from './priceSync';
@@ -292,12 +298,78 @@ export async function computePipelines(sources: Sources): Promise<PipelineHealth
   return PIPES.map((p) => real.get(p) ?? placeholderPipe(p));
 }
 
-// Order-layer compute. STUB: returns no orders (the source reads are stubbed).
-// Phase W joins Shopify/NAV per order and grades each stage. Channel stays
-// first-class so wholesale is never mis-graded as an orphan.
+// ---------------------------------------------------------------------------
+// ORDER VERDICT SEAM (the order-layer analogue of the pipe seam above).
+//
+// Read the READ-ONLY sources, assemble a seeded OrderInput per order, and call
+// the pure grader (orderLifecycle.ts). The pure math is unit-tested without live
+// sources; this function is only the I/O glue. Sources are stubbed (return empty)
+// until DevOps provisions NAV + the middleware endpoints, so this currently
+// yields an empty snapshot with no live calls.
+// ---------------------------------------------------------------------------
+
+// Map one read-only NAV lifecycle row to the seeded OrderInput the grader takes.
+// The per-channel chain (CHANNEL_STAGES) decides which hops exist, so wholesale
+// simply has no shopify_order / allocator_split / back_sync hop to grade.
+function buildOrderInput(row: NavOrderLifecycleRow): OrderInput {
+  // Completion timestamp per stage. awaiting_ship completes when the shipment
+  // exists (same signal as nav_shipment), which is what moves a promoted order
+  // off "awaiting ship".
+  const completedAtByStage: Partial<Record<OrderHop['stage'], string | null>> = {
+    shopify_order: row.shopifyOrderAt,
+    allocator_split: row.allocatorSplitAt,
+    nav_staging: row.navStagingAt,
+    nav_promotion: row.navPromotionAt,
+    awaiting_ship: row.navShipmentAt,
+    nav_shipment: row.navShipmentAt,
+    back_sync: row.backSyncAt,
+  };
+
+  const hops: OrderHop[] = [];
+  let prevCompletedAt: string | null = null;
+  for (const stage of CHANNEL_STAGES[row.channel]) {
+    const completedAt = completedAtByStage[stage] ?? null;
+
+    // Latched errors promote a hop straight to RED (design.md 5).
+    let error: string | null = null;
+    if (
+      stage === 'nav_staging' &&
+      row.navStagingStatus !== null &&
+      row.navStagingStatus !== 0 &&
+      row.navPromotionAt === null
+    ) {
+      error = `NAV staging stuck (Status ${row.navStagingStatus})`;
+    }
+    if (stage === 'back_sync' && row.missedBackSync) {
+      error = 'Missed back-sync: NAV shipment exists with no Shopify fulfillment';
+    }
+
+    // The order entered a hop when the previous hop completed.
+    hops.push({ stage, completedAt, enteredAt: prevCompletedAt, error });
+    prevCompletedAt = completedAt;
+  }
+
+  return {
+    channel: row.channel,
+    navOrderNo: row.navOrderNo,
+    shopifyOrderName: row.shopifyOrderName,
+    customerRef: row.customerRef,
+    webId: row.webId,
+    hops,
+  };
+}
+
 export async function computeOrders(sources: Sources): Promise<OrderHealth[]> {
-  await sources.middleware.getErrors();
-  return [];
+  // READ-ONLY source reads (stubbed: NAV returns [] and the middleware errors
+  // view returns [] until DevOps provisions access). No live calls, no writes.
+  const [rows] = await Promise.all([
+    sources.nav.getOrderLifecycleRows(),
+    sources.middleware.getErrors(), // errors view feeds latched hop errors in the live join
+  ]);
+
+  const inputs = rows.map(buildOrderInput);
+  // config.order carries the SLO bands and the orphan-grading flag (default OFF).
+  return computeOrderRows(inputs, config.order, Date.now());
 }
 
 // Persist one order-layer snapshot run, all rows stamped with the same as_of.

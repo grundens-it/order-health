@@ -7,6 +7,7 @@ import type {
 import { fetchOrders, fetchPipelines } from './api';
 import { PipelineStrip } from './components/PipelineStrip';
 import { InventoryPanel } from './components/InventoryPanel';
+import { AllocatorPanel } from './components/AllocatorPanel';
 import { OrderTable } from './components/OrderTable';
 import { ChannelFilter } from './components/ChannelFilter';
 
@@ -47,6 +48,12 @@ export function App(): JSX.Element {
   // The inventory-sync pipe owns the reference expanded panel (Unit 1).
   const inventoryPipe = useMemo(
     () => pipelines.find((p) => p.pipe === 'inventory_sync') ?? null,
+    [pipelines],
+  );
+
+  // The allocator pipe owns the Warehouse Split decisions panel (Unit 4).
+  const allocatorPipe = useMemo(
+    () => pipelines.find((p) => p.pipe === 'allocator') ?? null,
     [pipelines],
   );
 
@@ -91,6 +98,13 @@ export function App(): JSX.Element {
           <span className="aux">reference monitor: freshness · liveness · push-outcome</span>
         </div>
         <InventoryPanel pipe={inventoryPipe} />
+
+        <div className="sec">
+          <h2>Warehouse split</h2>
+          <div className="rule" />
+          <span className="aux">allocator: decision freshness · liveness · split-sanity</span>
+        </div>
+        <AllocatorPanel pipe={allocatorPipe} />
 
         <div className="sec">
           <h2>Order health</h2>

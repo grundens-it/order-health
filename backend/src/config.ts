@@ -56,6 +56,18 @@ export interface Config {
     livenessRedCycles: number;     // heartbeat age >= this many cycles => RED
     divergenceAmberRatio: number;  // (dry-run would-push / trailing live push) above this => AMBER (never RED)
   };
+  // Allocator (Warehouse Split) monitor thresholds (Unit 4, design.md 3.2 / 5).
+  // Freshness + liveness are cycle-banded (multiples of cycleSeconds); the
+  // split-sanity signal is ratio-banded. All Ops-tunable, never hardcoded.
+  allocator: {
+    cycleSeconds: number;          // one allocator decision window (~5m)
+    freshnessAmberCycles: number;  // decision lag >= this many cycles => AMBER
+    freshnessRedCycles: number;    // decision lag >= this many cycles => RED
+    livenessAmberCycles: number;   // heartbeat age >= this many cycles => AMBER
+    livenessRedCycles: number;     // heartbeat age >= this many cycles => RED
+    failedAmberRatio: number;      // (unallocatable + failed) / decisions above this => AMBER
+    failedRedRatio: number;        // ...above this => RED
+  };
 }
 
 export const config: Config = {
@@ -92,6 +104,18 @@ export const config: Config = {
     livenessRedCycles: num('INVENTORY_LIVENESS_RED_CYCLES', 2),
     // 7,245 / 466 ~= 15.5 (the part-1 case) trips amber at 5x; never escalates to red.
     divergenceAmberRatio: num('INVENTORY_DIVERGENCE_AMBER_RATIO', 5),
+  },
+  allocator: {
+    // Defaults: allocator decides on order intake, so a ~5m window; green under
+    // 3 cycles (~15m), amber 3 to 6 cycles, red beyond ~30m (the job-queue SLO).
+    cycleSeconds: num('ALLOCATOR_CYCLE_SECONDS', 300),
+    freshnessAmberCycles: num('ALLOCATOR_FRESHNESS_AMBER_CYCLES', 3),
+    freshnessRedCycles: num('ALLOCATOR_FRESHNESS_RED_CYCLES', 6),
+    livenessAmberCycles: num('ALLOCATOR_LIVENESS_AMBER_CYCLES', 3),
+    livenessRedCycles: num('ALLOCATOR_LIVENESS_RED_CYCLES', 6),
+    // Un-allocatable / failed split share: amber above 5%, red above 15%.
+    failedAmberRatio: num('ALLOCATOR_FAILED_AMBER_RATIO', 0.05),
+    failedRedRatio: num('ALLOCATOR_FAILED_RED_RATIO', 0.15),
   },
 };
 

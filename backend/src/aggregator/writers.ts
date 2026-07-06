@@ -13,6 +13,7 @@ import { getPool } from '../db/pool';
 import type { MiddlewareClient } from '../sources/middlewareClient';
 import type { NavClient } from '../sources/navClient';
 import { computeInventorySync, type InventorySyncInput } from './inventorySync';
+import { computeAllocator, type AllocatorInput } from './allocator';
 
 // The set of pipes the strip renders. Phase W units each own one key.
 export const PIPES = [
@@ -76,6 +77,43 @@ export async function computeInventorySyncPipeline(sources: Sources): Promise<Pi
   };
 }
 
+// Allocator (Warehouse Split) seam (Unit 4). Reads the middleware's read-only
+// allocator status (warehouse_allocation_log), assembles the seeded input, calls
+// the pure computeAllocator, and maps the result to the PipelineHealth row.
+export async function computeAllocatorPipeline(sources: Sources): Promise<PipelineHealth> {
+  // READ-ONLY source read (currently stubbed: returns typed nulls/empties until
+  // DevOps provisions the middleware endpoint). No live calls, no upstream writes.
+  const status = await sources.middleware.getAllocatorStatus();
+
+  const input: AllocatorInput = {
+    lastDecisionAt: status.lastDecisionAt,
+    serviceHeartbeatAt: status.serviceHeartbeatAt,
+    windowSeconds: status.windowSeconds,
+    decisionsWindow: status.decisionsWindow,
+    splitCount: status.splitCount,
+    unallocatableCount: status.unallocatableCount,
+    failedCount: status.failedCount,
+    atpFallbackCount: status.atpFallbackCount,
+    decisions: status.recentDecisions,
+  };
+
+  const r = computeAllocator(input, config.allocator, Date.now());
+
+  return {
+    pipe: 'allocator',
+    pipe_verdict: r.pipeVerdict, // worst of freshness / liveness / split-sanity
+    freshness_verdict: r.freshnessVerdict,
+    watermark_lag_s: r.decisionLagS,
+    last_progress_at: r.lastDecisionAt,
+    liveness_verdict: r.livenessVerdict,
+    heartbeat_at: r.heartbeatAt,
+    heartbeat_age_s: r.heartbeatAgeS,
+    // The split-sanity verdict and all the counts live in the typed detail bag
+    // (AllocatorDetail): recent split decisions + the sanity signal.
+    detail: r.detail as unknown as Record<string, unknown>,
+  };
+}
+
 // A generic placeholder pipe so the strip has a full row set before each Phase W
 // unit lands its real compute. Same PipelineHealth shape as the seam above.
 function placeholderPipe(pipe: string): PipelineHealth {
@@ -96,8 +134,11 @@ function placeholderPipe(pipe: string): PipelineHealth {
 // rest are placeholders until their Phase W unit lands.
 export async function computePipelines(sources: Sources): Promise<PipelineHealth[]> {
   const inventory = await computeInventorySyncPipeline(sources);
-  const rest = PIPES.filter((p) => p !== 'inventory_sync').map(placeholderPipe);
-  return [inventory, ...rest];
+  const allocator = await computeAllocatorPipeline(sources);
+  const seams = [inventory, allocator];
+  const seamPipes = new Set(seams.map((s) => s.pipe));
+  const rest = PIPES.filter((p) => !seamPipes.has(p)).map(placeholderPipe);
+  return [...seams, ...rest];
 }
 
 // Order-layer compute. STUB: returns no orders (the source reads are stubbed).

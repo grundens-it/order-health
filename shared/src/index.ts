@@ -174,3 +174,49 @@ export interface HealthTransition {
 // Response payload types the read API returns (inside a HealthEnvelope).
 export type PipelinesResponse = HealthEnvelope<PipelineHealth[]>;
 export type OrdersResponse = HealthEnvelope<OrderHealth[]>;
+
+// --- Leadership rollup (design.md section 6, Unit 6) -----------------------
+// The top-of-page rollup collapses the two-layer model into a small set of
+// headline verdicts suitable for a leadership glance, with operator detail below
+// the fold. It is derived READ-ONLY from the SAME latest snapshot the pipeline
+// and order endpoints serve (no new external source): the pipeline_health rows
+// and the order_health rows. Nothing here fans out to a live source.
+
+// The three headline buckets. 'stuck' = something is RED (a red pipe or a
+// SLO-breached / immediately-red order); 'at_risk' = something is AMBER but
+// nothing is red; 'healthy' = nothing observed is red or amber.
+export type RollupHeadline = 'healthy' | 'at_risk' | 'stuck';
+
+// Per-verdict tallies for the at-a-glance counts, one set per layer.
+export interface RollupCounts {
+  orders_total: number;
+  orders_green: number;
+  orders_amber: number;
+  orders_red: number;
+  orders_unknown: number;
+  pipes_total: number;
+  pipes_green: number;
+  pipes_amber: number;
+  pipes_red: number;
+  pipes_unknown: number;
+}
+
+export interface LeadershipRollup {
+  headline: RollupHeadline;
+  // The headline mapped onto the shared Verdict so the UI can render it with the
+  // same shape-encoded VerdictChip (green/amber/red/unknown). 'unknown' is the
+  // healthy-empty case: nothing unhealthy observed, but nothing observed yet.
+  headline_verdict: Verdict;
+  // Age of the oldest STUCK (red) order, in seconds; null when no order is red.
+  oldest_stuck_age_s: number | null;
+  // The inventory_sync pipe's freshness: true = fresh (green), false = stale
+  // (amber/red), null = unknown (no inventory_sync row, or its freshness is
+  // unknown / not yet provisioned).
+  inventory_sync_fresh: boolean | null;
+  counts: RollupCounts;
+}
+
+// The rollup endpoint returns the rollup fields flattened alongside as_of. It is
+// a single object (not a list), so as_of rides inline rather than in the
+// HealthEnvelope.data wrapper; as_of is still always present (firm rule).
+export type RollupResponse = { as_of: string } & LeadershipRollup;

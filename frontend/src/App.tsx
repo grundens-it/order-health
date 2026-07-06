@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import type {
   ChannelFilter as ChannelFilterValue,
+  LeadershipRollup,
   OrderHealth,
   PipelineHealth,
 } from '@order-health/shared';
-import { fetchOrders, fetchPipelines } from './api';
+import { fetchOrders, fetchPipelines, fetchRollup } from './api';
+import { LeadershipStrip } from './components/LeadershipStrip';
 import { PipelineStrip } from './components/PipelineStrip';
 import { InventoryPanel } from './components/InventoryPanel';
 import { BackSyncPanel } from './components/BackSyncPanel';
@@ -17,16 +19,23 @@ export function App(): JSX.Element {
   const [channel, setChannel] = useState<ChannelFilterValue>('all');
   const [pipelines, setPipelines] = useState<PipelineHealth[]>([]);
   const [orders, setOrders] = useState<OrderHealth[]>([]);
+  const [rollup, setRollup] = useState<LeadershipRollup | null>(null);
+  const [rollupAsOf, setRollupAsOf] = useState<string | null>(null);
   const [asOf, setAsOf] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchPipelines(), fetchOrders(channel)])
-      .then(([pipeRes, orderRes]) => {
+    Promise.all([fetchPipelines(), fetchOrders(channel), fetchRollup()])
+      .then(([pipeRes, orderRes, rollupRes]) => {
         if (cancelled) return;
         setPipelines(pipeRes.data);
         setOrders(orderRes.data);
+        // The rollup carries as_of inline (single object, not a list); split the
+        // headline fields from the envelope-style as_of for the strip.
+        const { as_of: rollupTime, ...rollupData } = rollupRes;
+        setRollup(rollupData);
+        setRollupAsOf(rollupTime);
         // The order snapshot is the freshest signal for the header as_of.
         setAsOf(orderRes.as_of ?? pipeRes.as_of);
         setError(null);
@@ -89,6 +98,9 @@ export function App(): JSX.Element {
             <span className="aux">Backend unreachable: {error}. Start the backend on :8080.</span>
           </div>
         )}
+
+        {/* Leadership rollup: the top-of-page glance layer (Unit 6). */}
+        <LeadershipStrip rollup={rollup} asOf={rollupAsOf} />
 
         <PipelineStrip pipelines={pipelines} />
 

@@ -72,5 +72,21 @@ export function startAggregator(): cron.ScheduledTask[] {
     });
   });
 
+  // Run each layer once immediately on startup so a freshly booted service has a
+  // snapshot right away, instead of an empty dashboard until the first cron tick.
+  // Without this the inventory layer's ~2h cadence would leave the pipeline strip
+  // empty for hours after boot. In stub mode the initial snapshot grades every
+  // pipe "unknown", which is the honest state until the sources are provisioned.
+  // eslint-disable-next-line no-console
+  console.info('[aggregator] running initial snapshot on startup');
+  void runOrderLayer().catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error('[aggregator] initial order layer run failed', err);
+  });
+  void runInventoryLayer().catch((err: unknown) => {
+    // eslint-disable-next-line no-console
+    console.error('[aggregator] initial inventory layer run failed', err);
+  });
+
   return [orderTask, inventoryTask];
 }

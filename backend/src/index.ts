@@ -6,6 +6,7 @@
 import Fastify from 'fastify';
 import { config } from './config';
 import { registerHealthRoutes } from './api/health';
+import { registerRemediationRoutes } from './api/remediation';
 import { startAggregator } from './aggregator';
 
 async function main(): Promise<void> {
@@ -18,6 +19,7 @@ async function main(): Promise<void> {
   });
 
   await registerHealthRoutes(app);
+  await registerRemediationRoutes(app);
 
   const tasks = startAggregator();
 

@@ -45,6 +45,13 @@ export interface Config {
     orderLayerCron: string;
     inventoryLayerCron: string;
   };
+  // Remediation (Unit 7, design.md 5A.4). OPERATOR-triggered only. The operator
+  // token gates the POST trigger endpoint in THIS service; the actual middleware
+  // call is DevOps-gated and stubbed. When operatorToken is empty (scaffold), the
+  // gate logs and allows so the demo works without provisioning.
+  remediation: {
+    operatorToken: string;
+  };
   // Inventory Sync Monitor thresholds (design.md 5A). Never hardcoded: the three
   // verdict bands (freshness, liveness, dry-run divergence) are all tuned here so
   // Ops owns the numbers. All cycle-based bands are multiples of cycleSeconds.
@@ -144,6 +151,9 @@ export const config: Config = {
     enabled: bool('AGGREGATOR_ENABLED', true),
     orderLayerCron: str('ORDER_LAYER_CRON', '*/3 * * * *'),
     inventoryLayerCron: str('INVENTORY_LAYER_CRON', '0 */2 * * *'),
+  },
+  remediation: {
+    operatorToken: str('REMEDIATION_OPERATOR_TOKEN'),
   },
   inventorySync: {
     // Defaults: green under one cycle, amber one to two cycles, red beyond.

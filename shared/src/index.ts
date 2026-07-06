@@ -305,3 +305,78 @@ export interface LeadershipRollup {
 // a single object (not a list), so as_of rides inline rather than in the
 // HealthEnvelope.data wrapper; as_of is still always present (firm rule).
 export type RollupResponse = { as_of: string } & LeadershipRollup;
+
+// --- Remediation runbook layer (Unit 7, design.md 5A.4 + section 8) --------
+// The runbook maps a red signal / pipe to a NAMED, OPERATOR-TRIGGERED tool.
+// Every tool either calls an EXISTING authenticated middleware endpoint or points
+// at a documented ops runbook. This layer NEVER adds a middleware endpoint, never
+// auto-fires, and never makes NAV anything other than read-only.
+
+// How a tool is carried out. 'middleware_endpoint' hits an endpoint the
+// middleware ALREADY exposes (for example recovery.rs). 'ops_runbook' is a
+// documented ops path (a systemctl restart, a NAV-admin action) with no live
+// call from this service.
+export type RemediationKind = 'middleware_endpoint' | 'ops_runbook';
+
+// The existing authenticated middleware endpoint a tool invokes. Documented as a
+// shape only; the remediationClient is stubbed and never fires a live call.
+export interface RemediationEndpoint {
+  method: 'POST' | 'GET';
+  path: string;   // for example '/api/recovery/fulfillments'
+  source: string; // the middleware function, for example 'recovery.rs :: submit_fulfillment_requests_for_order'
+}
+
+// A documented ops runbook reference (no live call, no middleware endpoint).
+export interface RemediationRunbook {
+  ref: string;         // doc path, for example 'ATOMIC_RESTART_DEPLOYMENT.md'
+  command?: string;    // the operator command, for example 'systemctl restart grundens-middleware'
+  diagnostic?: string; // read-only endpoint used to diagnose first, for example 'GET /api/nav/job-queue/health'
+}
+
+// One named remediation tool. Exactly one of endpoint / runbook is populated.
+export interface RemediationTool {
+  id: string;          // stable key, for example 'recovery_sweep'
+  name: string;        // human name surfaced in the modal
+  description: string; // what running it does, in plain language
+  kind: RemediationKind;
+  endpoint?: RemediationEndpoint; // set when kind === 'middleware_endpoint'
+  runbook?: RemediationRunbook;   // set when kind === 'ops_runbook'
+  writeCapable: boolean; // true = it mutates via an existing ops path; false = read-only / guidance only
+}
+
+// Which subject (pipe / order-level signal) a tool applies to, and the red
+// condition that surfaces it. subjectKey is a pipe key (for example
+// 'inventory_sync') or a named order-level signal (for example 'missed_back_sync').
+export interface RemediationMapping {
+  subjectKind: HealthTransition['subject_kind'];
+  subjectKey: string;
+  appliesWhen: string; // human note of the RED condition it addresses
+  toolId: string;      // references RemediationTool.id
+  primary: boolean;    // the default tool for that subject (first offered in the modal)
+}
+
+// The registry the read API serves so the frontend modal can name the mapped tool
+// for a red signal without re-declaring the runbook.
+export interface RemediationRegistry {
+  tools: RemediationTool[];
+  mappings: RemediationMapping[];
+}
+export type RemediationRegistryResponse = { as_of: string } & RemediationRegistry;
+
+// The typed result of an operator trigger. STUBBED: status is always
+// 'would_trigger'; no live call is made (middleware auth is DevOps-gated). The
+// resolved call shape is echoed so an operator sees exactly what WOULD run.
+export interface RemediationTriggerResult {
+  status: 'would_trigger';
+  as_of: string;
+  toolId: string;
+  toolName: string;
+  kind: RemediationKind;
+  // The authenticated call that WOULD be issued (documented, not fired), or the
+  // ops runbook step to run by hand.
+  wouldCall: string;
+  // Human confirmation line, matching the demo's "done" copy.
+  message: string;
+  // Whether an open health_transition row was resolved as a remediation event.
+  resolvedSubject: { subjectKind: HealthTransition['subject_kind']; subjectKey: string } | null;
+}

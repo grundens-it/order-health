@@ -4,10 +4,12 @@ import type {
   LeadershipRollup,
   OrderHealth,
   PipelineHealth,
+  RemediationRegistry,
 } from '@order-health/shared';
-import { fetchOrders, fetchPipelines, fetchRollup } from './api';
+import { fetchOrders, fetchPipelines, fetchRemediationRegistry, fetchRollup } from './api';
 import { LeadershipStrip } from './components/LeadershipStrip';
 import { PipelineStrip } from './components/PipelineStrip';
+import { RemediationModal, type RemediationSubject } from './components/RemediationModal';
 import { InventoryPanel } from './components/InventoryPanel';
 import { BackSyncPanel } from './components/BackSyncPanel';
 import { PriceSyncPanel } from './components/PriceSyncPanel';
@@ -27,6 +29,27 @@ export function App(): JSX.Element {
   const [rollupAsOf, setRollupAsOf] = useState<string | null>(null);
   const [asOf, setAsOf] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Unit 7: the remediation runbook registry (fetched once) + the subject whose
+  // modal is currently open (null = closed).
+  const [registry, setRegistry] = useState<RemediationRegistry | null>(null);
+  const [remediationSubject, setRemediationSubject] = useState<RemediationSubject | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchRemediationRegistry()
+      .then((res) => {
+        if (cancelled) return;
+        const { as_of: _asOf, ...reg } = res;
+        setRegistry(reg);
+      })
+      .catch(() => {
+        // The registry is non-critical for the read view; the modal simply shows
+        // "no remediation mapped" if it never loads.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,6 +113,23 @@ export function App(): JSX.Element {
     [pipelines],
   );
 
+  // Open the remediation modal for a red/amber pipe (Unit 7).
+  const PIPE_LABELS: Record<string, string> = {
+    inventory_sync: 'Inventory sync',
+    back_sync: 'Back-sync',
+    price_sync: 'Price sync',
+    nav_job_queue: 'NAV job queue',
+    shopify_webhook: 'Shopify webhooks',
+    allocator: 'Allocator split',
+  };
+  const openPipeRemediation = (pipe: PipelineHealth): void => {
+    setRemediationSubject({
+      subjectKind: 'pipe',
+      subjectKey: pipe.pipe,
+      label: PIPE_LABELS[pipe.pipe] ?? pipe.pipe,
+    });
+  };
+
   return (
     <>
       <div className="band">
@@ -111,9 +151,9 @@ export function App(): JSX.Element {
       </div>
 
       <div className="demo-note">
-        <b>Inventory Sync Monitor (Unit 1) live.</b> Other pipeline cards and order rows are
-        placeholders populated by later Phase W units. Read-only service: no changes to the
-        middleware or NAV.
+        <b>Remediation runbook layer (Unit 7) live.</b> Click a red or amber pipe verdict for the
+        mapped operator tool. Triggers are operator-only and stubbed (no live call); observability
+        stays read-only against the middleware and NAV.
       </div>
 
       <div className="wrap">
@@ -126,7 +166,7 @@ export function App(): JSX.Element {
         {/* Leadership rollup: the top-of-page glance layer (Unit 6). */}
         <LeadershipStrip rollup={rollup} asOf={rollupAsOf} />
 
-        <PipelineStrip pipelines={pipelines} />
+        <PipelineStrip pipelines={pipelines} onRemediate={openPipeRemediation} />
 
         <div className="sec">
           <h2>Inventory sync</h2>
@@ -183,6 +223,14 @@ export function App(): JSX.Element {
         </div>
         <OrderTable orders={orders} />
       </div>
+
+      {/* Unit 7: error-to-remediation modal. Opens on a red/amber pipe verdict,
+          names the mapped tool, and offers an operator trigger (stubbed). */}
+      <RemediationModal
+        subject={remediationSubject}
+        registry={registry}
+        onClose={() => setRemediationSubject(null)}
+      />
     </>
   );
 }

@@ -25,6 +25,12 @@ import { computePriceSync, type PriceSyncInput } from './priceSync';
 import { computeShopifyWebhook, type ShopifyWebhookInput } from './shopifyWebhook';
 import { computeBackSync, type BackSyncInput } from './backSync';
 import type { MissedShipment } from '@order-health/shared';
+import { diffTransitions, type VerdictSubject } from './transitions';
+import {
+  applyTransitionActions,
+  getOpenTransitions,
+  getPreviousVerdicts,
+} from '../repo/transitionRepo';
 
 // The set of pipes the strip renders. Phase W units each own one key.
 export const PIPES = [
@@ -394,6 +400,47 @@ export async function writeOrderSnapshot(asOf: string, orders: OrderHealth[]): P
       ],
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// health_transition WIRING (Unit 7, design.md 8).
+//
+// The snapshot writer is the single evaluation point. On each run we read the
+// PREVIOUS snapshot's verdicts and the currently-open transition rows, run the
+// PURE diff (transitions.ts) against the newly-computed subjects, and append /
+// resolve rows. This is I/O glue ONLY: the verdict-change decision is the pure,
+// unit-tested diff. It writes ONLY this service's own health_transition table and
+// NEVER invokes remediation (no import of the remediation client here).
+// ---------------------------------------------------------------------------
+
+// Map an order snapshot row to its transition subject key (channel-agnostic).
+function orderSubjectKey(o: OrderHealth): string | null {
+  return o.nav_order_no ?? o.shopify_order_name ?? o.shopify_order_id ?? o.customer_ref ?? null;
+}
+
+// Record verdict transitions for the pipeline layer. Reads previous verdicts +
+// open rows BEFORE the diff (the new snapshot is already written by the caller).
+export async function recordPipelineTransitions(asOf: string, pipes: PipelineHealth[]): Promise<void> {
+  const [previous, open] = await Promise.all([getPreviousVerdicts(), getOpenTransitions()]);
+  const current: VerdictSubject[] = pipes.map((p) => ({
+    subjectKind: 'pipe',
+    subjectKey: p.pipe,
+    verdict: p.pipe_verdict,
+  }));
+  const actions = diffTransitions(previous, current, open, asOf);
+  await applyTransitionActions(actions);
+}
+
+// Record verdict transitions for the order layer, keyed by the order's stable ref.
+export async function recordOrderTransitions(asOf: string, orders: OrderHealth[]): Promise<void> {
+  const [previous, open] = await Promise.all([getPreviousVerdicts(), getOpenTransitions()]);
+  const current: VerdictSubject[] = [];
+  for (const o of orders) {
+    const key = orderSubjectKey(o);
+    if (key !== null) current.push({ subjectKind: 'order', subjectKey: key, verdict: o.order_verdict });
+  }
+  const actions = diffTransitions(previous, current, open, asOf);
+  await applyTransitionActions(actions);
 }
 
 // Persist one pipeline-layer snapshot run, all rows stamped with the same as_of.

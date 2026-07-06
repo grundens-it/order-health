@@ -34,9 +34,18 @@ export interface Config {
     host: string;
     port: number;
     database: string;
-    user: string;
-    password: string;
     encrypt: boolean;
+    // Microsoft Entra (Azure AD) auth. The NAV box has NO SQL user/password.
+    // authMode selects the mssql/tedious authentication type (DATA_SOURCES.md):
+    //   aad-default | aad-service-principal | aad-msi
+    authMode: string;
+    aadTenantId: string;   // service-principal only
+    aadClientId: string;   // service-principal only
+    aadClientSecret: string; // service-principal only
+    // Company code for the multi-company NAV DB. Every table is prefixed
+    // `${company}$` (GRUS = Grundens US) so we never read another company's data.
+    company: string;
+    orderIngestLimit: number;
   };
   aggregator: {
     enabled: boolean;
@@ -143,9 +152,18 @@ export const config: Config = {
     host: str('NAV_HOST'),
     port: Number(str('NAV_PORT', '1433')),
     database: str('NAV_DATABASE'),
-    user: str('NAV_USER'),
-    password: str('NAV_PASSWORD'),
     encrypt: bool('NAV_ENCRYPT', true),
+    // Entra auth (no SQL user/password on this server). Default to aad-default
+    // so local dev works after `az login`.
+    authMode: str('NAV_AUTH_MODE', 'aad-default'),
+    aadTenantId: str('NAV_AAD_TENANT_ID'),
+    aadClientId: str('NAV_AAD_CLIENT_ID'),
+    aadClientSecret: str('NAV_AAD_CLIENT_SECRET'),
+    company: str('NAV_COMPANY', 'GRUS'),
+    // How many most-recent orders the aggregator ingests from NAV into the
+    // snapshot. The UI defaults to showing 100 and lets the operator raise the
+    // displayed count up to this cap, so ingest at least that many.
+    orderIngestLimit: num('NAV_ORDER_INGEST_LIMIT', 1000),
   },
   aggregator: {
     enabled: bool('AGGREGATOR_ENABLED', true),

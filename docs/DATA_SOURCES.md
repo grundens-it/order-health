@@ -59,14 +59,14 @@ Confirmed to exist, with the columns the design relies on:
 - `[GRUS$Sales Header]` has `WebId` (nvarchar), `WebOrder` (tinyint), `WebSite` (nvarchar), plus `No_`, `Sell-to Customer No_`, `Order Date`.
 - `[GRUS$Sales Header Staging]` (the stuck-staging `Status` source).
 - `[GRUS$Sales Shipment Header]` (posted 3PL shipments; carrier / tracking / posting date).
-- `[GRUS$Job Queue Log Entry]` has `Entry No_` (int), `Object ID to Run` (int), `Status` (int), `Start Date_Time`, `End Date_Time`.
+- `[GRUS$Job Queue Log Entry]` has `Entry No_` (int), `Object ID to Run` (int), `Status` (int), `Start Date_Time`, `End Date_Time`. `Status` is an option: **0 = Success, 1 = In Process, 2 = Error** (confirmed live: Status 0 has thousands of rows completing continuously, Status 2 only a dozen last seen in 2022). A completed run is `Status = 0`. In-process rows carry the `1753-01-01` sentinel in `End Date_Time`; treat that as null.
 
 The stub SQL in `navClient.ts` wrote several tables unprefixed (`[Sales Header]`, `[Job Queue Log Entry]`). Add the `GRUS$` prefix to every table. Example, the IABC watermark:
 
 ```sql
 SELECT MAX([Entry No_])
 FROM [GRUS$Job Queue Log Entry]
-WHERE [Object ID to Run] = 50007 AND [Status] = 2;   -- newest CU 50007 (IABC) completion
+WHERE [Object ID to Run] = 50007 AND [Status] = 0;   -- newest CU 50007 (IABC) completion
 ```
 
 ### Likely resolution for BA open question 1 (orphan vs wholesale)

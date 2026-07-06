@@ -45,6 +45,7 @@ export interface Config {
     // Company code for the multi-company NAV DB. Every table is prefixed
     // `${company}$` (GRUS = Grundens US) so we never read another company's data.
     company: string;
+    orderIngestLimit: number;
   };
   aggregator: {
     enabled: boolean;
@@ -159,6 +160,10 @@ export const config: Config = {
     aadClientId: str('NAV_AAD_CLIENT_ID'),
     aadClientSecret: str('NAV_AAD_CLIENT_SECRET'),
     company: str('NAV_COMPANY', 'GRUS'),
+    // How many most-recent orders the aggregator ingests from NAV into the
+    // snapshot. The UI defaults to showing 100 and lets the operator raise the
+    // displayed count up to this cap, so ingest at least that many.
+    orderIngestLimit: num('NAV_ORDER_INGEST_LIMIT', 1000),
   },
   aggregator: {
     enabled: bool('AGGREGATOR_ENABLED', true),

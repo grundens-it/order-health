@@ -83,12 +83,12 @@ export interface NavClient {
 // ---------------------------------------------------------------------------
 
 // Newest completed IABC (Inventory Availability by Channel) job runs as NAV
-// Codeunit 50007; a completed Job Queue Log Entry carries [Status] = 2.
+// Codeunit 50007. NAV Job Queue Log Entry [Status] is an option: 0 = Success,
+// 1 = In Process, 2 = Error. Confirmed live: Status 0 has 8,866 rows with the
+// newest completing minutes ago, Status 2 has 12 rows last seen in 2022. So a
+// completed run is Status = 0 (DATA_SOURCES.md originally said 2, which is Error).
 export const NAV_IABC_OBJECT_ID = 50007;
-export const NAV_JOB_STATUS_SUCCESS = 2;
-// Sales Header holds only open/active orders (NAV deletes fully posted ones), but
-// bound the lifecycle read anyway so a busy period cannot pull an unbounded set.
-export const NAV_ORDER_LIFECYCLE_LIMIT = 500;
+export const NAV_JOB_STATUS_SUCCESS = 0;
 
 // Bracketed, company-prefixed table name: navTable('GRUS', 'Sales Header') =>
 // "[GRUS$Sales Header]". Centralising this is what guarantees no query can read
@@ -445,7 +445,7 @@ class NavClientLive implements NavClient {
   async getOrderLifecycleRows(): Promise<NavOrderLifecycleRow[]> {
     try {
       const rows = await this.select(this.queries.orderLifecycle, {
-        limit: NAV_ORDER_LIFECYCLE_LIMIT,
+        limit: config.nav.orderIngestLimit,
       });
       return rows.map(mapOrderLifecycleRow);
     } catch (err) {

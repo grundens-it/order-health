@@ -60,10 +60,11 @@ test('a non-default company code re-prefixes every table', () => {
   assert.ok(!q.orderLifecycle.includes('[GRUS$'));
 });
 
-test('IABC watermark query targets CU 50007 completions (Object 50007, Status 2)', () => {
+test('IABC watermark query targets CU 50007 completions (Object 50007, Status 0 = Success)', () => {
   const q = buildQueries('GRUS');
   assert.equal(NAV_IABC_OBJECT_ID, 50007);
-  assert.equal(NAV_JOB_STATUS_SUCCESS, 2);
+  // NAV Job Queue Log Entry Status: 0 = Success, 1 = In Process, 2 = Error.
+  assert.equal(NAV_JOB_STATUS_SUCCESS, 0);
   assert.match(q.iabcWatermark, /\[GRUS\$Job Queue Log Entry\]/);
   assert.match(q.iabcWatermark, /\[Object ID to Run\] = @iabcObjectId/);
   assert.match(q.iabcWatermark, /\[Status\] = @successStatus/);

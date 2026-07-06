@@ -1,10 +1,14 @@
 // Health aggregator scaffold + scheduled-writer skeleton.
 //
 // On a cadence it reads the sources (stubbed), computes the two-layer model,
-// stamps a single as_of per run, and writes the snapshot tables. The order
-// layer and inventory layer run on independent, conservative cadences
-// (ADR-0002): order layer every 2 to 5 minutes, inventory layer aligned to the
-// ~2h IABC cycle. Cadences come from config.
+// stamps a single as_of per run, and writes the snapshot tables. Both cadences
+// are EVALUATION intervals (how often we re-check and write a snapshot so a
+// stall or a stuck order is caught promptly), NOT data intervals: the order
+// layer covers orders (default every 3 min) and the inventory layer covers all
+// six pipes (default every 5 min). The inventory-sync pipe still bands its
+// freshness verdict in ~2h IABC cycles (INVENTORY_CYCLE_SECONDS), so a fast
+// evaluation cadence catches a stalled watermark within minutes, not hours.
+// Cadences come from config.
 import cron from 'node-cron';
 import { config } from '../config';
 import { createMiddlewareClient } from '../sources/middlewareClient';

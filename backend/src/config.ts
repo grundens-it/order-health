@@ -150,7 +150,7 @@ export const config: Config = {
   aggregator: {
     enabled: bool('AGGREGATOR_ENABLED', true),
     orderLayerCron: str('ORDER_LAYER_CRON', '*/3 * * * *'),
-    inventoryLayerCron: str('INVENTORY_LAYER_CRON', '0 */2 * * *'),
+    inventoryLayerCron: str('INVENTORY_LAYER_CRON', '*/5 * * * *'),
   },
   remediation: {
     operatorToken: str('REMEDIATION_OPERATOR_TOKEN'),

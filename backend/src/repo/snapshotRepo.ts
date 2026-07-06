@@ -5,10 +5,12 @@
 import type {
   Channel,
   ChannelFilter,
+  LeadershipRollup,
   OrderHealth,
   PipelineHealth,
 } from '@order-health/shared';
 import { hasDatabase } from '../config';
+import { computeRollup } from '../aggregator/rollup';
 import { getPool, query } from '../db/pool';
 
 export interface Snapshot<T> {
@@ -67,4 +69,14 @@ export async function latestOrders(filter: ChannelFilter): Promise<Snapshot<Orde
     params,
   );
   return { asOf: asOf.toISOString(), rows };
+}
+
+// Latest leadership rollup. READ-ONLY: it reuses the two latest-snapshot reads
+// above (all pipes + all orders) and folds them with the pure computeRollup. No
+// new source, no live call. The rollup's as_of is the OLDER of the two layer
+// snapshots so it never claims to be fresher than its stalest input.
+export async function latestRollup(): Promise<{ asOf: string; rollup: LeadershipRollup }> {
+  const [pipes, orders] = await Promise.all([latestPipelines(), latestOrders('all')]);
+  const asOf = pipes.asOf < orders.asOf ? pipes.asOf : orders.asOf;
+  return { asOf, rollup: computeRollup(pipes.rows, orders.rows) };
 }

@@ -18,12 +18,14 @@
     "devops_provisioning": "pending: read-only NAV path + middleware endpoint base URL and auth, before the aggregator runs against real sources",
     "ba_orphan_disambiguation": "open: blocks Unit 5 orphan grading only; ship table with orphan grading behind a flag",
     "ba_nav_codeunit_schema": "open: blocks any unit reading it; ship additively without that source",
-    "ux_signoff": "signed off on the Unit 1 reference panel (2026-07-06); panels replicate that template"
+    "ux_signoff": "signed off on the Unit 1 reference panel (2026-07-06); panels replicate that template",
+    "deploy_target": "pending Steve decision: drives ADR-0005 and the CD pipeline (Unit 10). Local dev + CI (Unit 9) do not need it."
   },
   "phases": {
     "F": "foundation, sequential, one context, must land first",
     "W": "fan-out wave, independent subagents, after Unit 0",
-    "C": "convergence, sequential, after the wave"
+    "C": "convergence, sequential, after the wave",
+    "D": "delivery track (added 2026-07-06): local dev + CI now, deploy pipeline gated on target decision"
   },
   "units": [
     { "unit": 0, "issue": 3, "phase": "F", "name": "Foundation scaffold", "status": "done", "pr": 12, "merged": true },
@@ -34,6 +36,8 @@
     { "unit": 5, "issue": 8, "phase": "W", "name": "Order lifecycle table + channel dimension", "status": "done", "pr": 18, "merged": true, "note": "orphan grading behind a flag pending BA question 1" },
     { "unit": 6, "issue": 9, "phase": "W", "name": "Leadership rollup strip", "status": "done", "pr": 15, "merged": true },
     { "unit": 7, "issue": 10, "phase": "C", "name": "Remediation runbook + health_transition wiring", "status": "active", "pr": null },
-    { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "blocked_on_unit_7", "pr": null }
+    { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "blocked_on_unit_7", "pr": null },
+    { "unit": 9, "issue": 19, "phase": "D", "name": "Local dev (Docker Compose) + CI workflow", "status": "active", "pr": null, "note": "unblocked; runs on stub data" },
+    { "unit": 10, "issue": 20, "phase": "D", "name": "ADR-0005 deploy target + CD pipeline", "status": "gated", "pr": null, "note": "gated on Steve deploy-target decision" }
   ]
 }

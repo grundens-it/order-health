@@ -79,8 +79,8 @@ export function InventoryPanel({ pipe }: { pipe: PipelineHealth | null }): JSX.E
           metric={`lag ${humanAge(pipe.watermark_lag_s)}`}
           sub={
             detail
-              ? `watermark entry ${detail.watermark_entry_no ?? '—'} · newest IABC ${
-                  detail.nav_newest_iabc_entry_no ?? '—'
+              ? `watermark entry ${detail.watermark_entry_no ?? '-'} · newest IABC ${
+                  detail.nav_newest_iabc_entry_no ?? '-'
                 }${detail.watermark_entry_gap ? ` (gap ${detail.watermark_entry_gap})` : ''}`
               : 'newest IABC entry vs watermark'
           }
@@ -102,8 +102,8 @@ export function InventoryPanel({ pipe }: { pipe: PipelineHealth | null }): JSX.E
           sub={
             wouldPush === null
               ? 'last dry-run would-push vs trailing live push'
-              : `live push trailing ${liveTrailing ?? '—'} · ratio ${
-                  divRatio === null || divRatio === undefined ? '—' : divRatio.toFixed(1)
+              : `live push trailing ${liveTrailing ?? '-'} · ratio ${
+                  divRatio === null || divRatio === undefined ? '-' : divRatio.toFixed(1)
                 }x`
           }
         />
@@ -137,7 +137,7 @@ export function InventoryPanel({ pipe }: { pipe: PipelineHealth | null }): JSX.E
                     style={{ height: `${Math.max(8, maxPushed > 0 ? (w.pushed / maxPushed) * 100 : 8)}%` }}
                     title={`${w.walk_at ?? ''}: pushed ${w.pushed}`}
                   >
-                    <span>{w.walk_at ? new Date(w.walk_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</span>
+                    <span>{w.walk_at ? new Date(w.walk_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-'}</span>
                   </div>
                 ))}
             </div>
@@ -156,7 +156,7 @@ export function InventoryPanel({ pipe }: { pipe: PipelineHealth | null }): JSX.E
                   {walks.map((w, i) => (
                     <tr key={w.walk_at ?? i}>
                       <td className="mono">
-                        {w.walk_at ? new Date(w.walk_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
+                        {w.walk_at ? new Date(w.walk_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-'}
                       </td>
                       <td className="mono">{w.processed.toLocaleString()}</td>
                       <td className="mono">{w.pushed.toLocaleString()}</td>

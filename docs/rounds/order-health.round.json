@@ -2,7 +2,7 @@
   "round": "order-health-observability",
   "repo": "grundens-it/order-health",
   "brief": "docs/kickoffs/order-health-observability.md",
-  "updated": "2026-07-06",
+  "updated": "2026-07-06 (Unit 1 merged, Phase W fanned out)",
   "umbrella_issue": 2,
   "kickoff_pr": 1,
   "stack": {
@@ -18,7 +18,7 @@
     "devops_provisioning": "pending: read-only NAV path + middleware endpoint base URL and auth, before the aggregator runs against real sources",
     "ba_orphan_disambiguation": "open: blocks Unit 5 orphan grading only; ship table with orphan grading behind a flag",
     "ba_nav_codeunit_schema": "open: blocks any unit reading it; ship additively without that source",
-    "ux_signoff": "pending: panels and the leadership strip"
+    "ux_signoff": "signed off on the Unit 1 reference panel (2026-07-06); panels replicate that template"
   },
   "phases": {
     "F": "foundation, sequential, one context, must land first",
@@ -27,12 +27,12 @@
   },
   "units": [
     { "unit": 0, "issue": 3, "phase": "F", "name": "Foundation scaffold", "status": "done", "pr": 12, "merged": true },
-    { "unit": 1, "issue": 4, "phase": "W", "name": "Inventory Sync Monitor (reference subsystem)", "status": "ready", "pr": null },
-    { "unit": 2, "issue": 5, "phase": "W", "name": "Back-sync monitor + missed-shipments panel", "status": "ready", "pr": null },
-    { "unit": 3, "issue": 6, "phase": "W", "name": "NAV job-queue + price-sync + Shopify-webhook monitors", "status": "ready", "pr": null },
-    { "unit": 4, "issue": 7, "phase": "W", "name": "Allocator monitor + Warehouse Split decisions panel", "status": "ready", "pr": null },
-    { "unit": 5, "issue": 8, "phase": "W", "name": "Order lifecycle table + channel dimension", "status": "ready", "pr": null, "note": "orphan grading behind a flag pending BA question 1" },
-    { "unit": 6, "issue": 9, "phase": "W", "name": "Leadership rollup strip", "status": "blocked_on_unit_0", "pr": null },
+    { "unit": 1, "issue": 4, "phase": "W", "name": "Inventory Sync Monitor (reference subsystem)", "status": "done", "pr": 13, "merged": true },
+    { "unit": 2, "issue": 5, "phase": "W", "name": "Back-sync monitor + missed-shipments panel", "status": "active", "pr": null },
+    { "unit": 3, "issue": 6, "phase": "W", "name": "NAV job-queue + price-sync + Shopify-webhook monitors", "status": "active", "pr": null },
+    { "unit": 4, "issue": 7, "phase": "W", "name": "Allocator monitor + Warehouse Split decisions panel", "status": "active", "pr": null },
+    { "unit": 5, "issue": 8, "phase": "W", "name": "Order lifecycle table + channel dimension", "status": "active", "pr": null, "note": "orphan grading behind a flag pending BA question 1" },
+    { "unit": 6, "issue": 9, "phase": "W", "name": "Leadership rollup strip", "status": "active", "pr": null },
     { "unit": 7, "issue": 10, "phase": "C", "name": "Remediation runbook + health_transition wiring", "status": "blocked_on_wave", "pr": null },
     { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "blocked_on_wave", "pr": null }
   ]

@@ -4,6 +4,7 @@ import type {
   ChannelFilter,
   OrdersResponse,
   PipelinesResponse,
+  RollupResponse,
 } from '@order-health/shared';
 
 async function getJson<T>(url: string): Promise<T> {
@@ -20,4 +21,8 @@ export function fetchPipelines(): Promise<PipelinesResponse> {
 
 export function fetchOrders(channel: ChannelFilter): Promise<OrdersResponse> {
   return getJson<OrdersResponse>(`/api/health/orders?channel=${channel}`);
+}
+
+export function fetchRollup(): Promise<RollupResponse> {
+  return getJson<RollupResponse>('/api/health/rollup');
 }

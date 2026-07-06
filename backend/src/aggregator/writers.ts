@@ -16,6 +16,8 @@ import { computeInventorySync, type InventorySyncInput } from './inventorySync';
 import { computeJobQueue, type JobQueueInput } from './jobQueue';
 import { computePriceSync, type PriceSyncInput } from './priceSync';
 import { computeShopifyWebhook, type ShopifyWebhookInput } from './shopifyWebhook';
+import { computeBackSync, type BackSyncInput } from './backSync';
+import type { MissedShipment } from '@order-health/shared';
 
 // The set of pipes the strip renders. Phase W units each own one key.
 export const PIPES = [
@@ -166,6 +168,60 @@ export async function computeShopifyWebhookPipeline(sources: Sources): Promise<P
   };
 }
 
+// Back-sync pipe seam (Unit 2). Reads the middleware's read-only back-sync status
+// and its EXISTING missed-shipments endpoint, enriches missed rows with NAV shipment
+// detail (GRUS$Sales Shipment Header, read-only), assembles the seeded input, calls
+// the pure computeBackSync, and maps the result to the PipelineHealth row. All reads
+// are currently stubbed (typed nulls/empties) until DevOps provisions the sources.
+export async function computeBackSyncPipeline(sources: Sources): Promise<PipelineHealth> {
+  const [status, missed, shipments] = await Promise.all([
+    sources.middleware.getBackSyncStatus(),
+    sources.middleware.getMissedShipmentDetail(),
+    sources.nav.getRecentShipments(50),
+  ]);
+
+  // Enrich each missed row with NAV shipment header detail (carrier / tracking /
+  // posted time) keyed by NAV shipment number, when the middleware row lacks it.
+  const byShipmentNo = new Map(shipments.map((s) => [s.navShipmentNo, s]));
+  const enriched: MissedShipment[] | null =
+    missed === null
+      ? null
+      : missed.map((m) => {
+          const nav = m.nav_shipment_no !== null ? byShipmentNo.get(m.nav_shipment_no) : undefined;
+          return {
+            ...m,
+            carrier: m.carrier ?? nav?.carrier ?? null,
+            tracking: m.tracking ?? nav?.tracking ?? null,
+            posted_at: m.posted_at ?? nav?.postedAt ?? null,
+            web_id: m.web_id ?? nav?.webId ?? null,
+          };
+        });
+
+  const input: BackSyncInput = {
+    lastBackSyncAt: status.lastBackSyncAt,
+    watcherHeartbeatAt: status.watcherHeartbeatAt,
+    fulfillmentsLast24h: status.fulfillmentsLast24h,
+    errorsLast24h: status.errorsLast24h,
+    missedShipments: enriched,
+  };
+
+  const r = computeBackSync(input, config.backSync, Date.now());
+
+  return {
+    pipe: 'back_sync',
+    pipe_verdict: r.pipeVerdict, // worst of freshness / liveness / missed
+    freshness_verdict: r.freshnessVerdict,
+    watermark_lag_s: r.watermarkLagS,
+    last_progress_at: r.lastProgressAt,
+    liveness_verdict: r.livenessVerdict,
+    heartbeat_at: r.heartbeatAt,
+    heartbeat_age_s: r.heartbeatAgeS,
+    // The missed-shipments sub-verdict, counters, and detail rows for the panel
+    // table live in the typed detail bag (BackSyncDetail).
+    detail: r.detail as unknown as Record<string, unknown>,
+  };
+}
+
 // A generic placeholder pipe so the strip has a full row set before each Phase W
 // unit lands its real compute. Same PipelineHealth shape as the seam above.
 function placeholderPipe(pipe: string): PipelineHealth {
@@ -188,8 +244,9 @@ function placeholderPipe(pipe: string): PipelineHealth {
 export async function computePipelines(sources: Sources): Promise<PipelineHealth[]> {
   const landed = await Promise.all([
     computeInventorySyncPipeline(sources),
-    computePriceSyncPipeline(sources),   // Unit 3
-    computeJobQueuePipeline(sources),    // Unit 3
+    computeBackSyncPipeline(sources),       // Unit 2
+    computePriceSyncPipeline(sources),      // Unit 3
+    computeJobQueuePipeline(sources),       // Unit 3
     computeShopifyWebhookPipeline(sources), // Unit 3
   ]);
   const real = new Map<string, PipelineHealth>(landed.map((p) => [p.pipe, p]));

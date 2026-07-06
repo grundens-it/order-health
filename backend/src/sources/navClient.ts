@@ -17,6 +17,18 @@ export interface NavWatermarkState {
   watcherHeartbeatAt: string | null;
 }
 
+// Unit 2 (back-sync). A row from GRUS$Sales Shipment Header: a posted NAV shipment
+// used to enrich the missed-shipments detail (carrier / tracking / posted time)
+// the middleware endpoint does not fully expose. Read-only (SELECT only).
+export interface NavShipmentHeader {
+  navShipmentNo: string | null;   // [No_]
+  webId: string | null;           // [WebId] (null => wholesale, no Shopify leg)
+  orderRef: string | null;        // originating order (Shopify name or NAV order no)
+  carrier: string | null;         // [Shipping Agent Code]
+  tracking: string | null;        // [Package Tracking No_]
+  postedAt: string | null;        // [Posting Date] / posting time
+}
+
 export interface NavClient {
   // IABC watermark + watcher heartbeat for the inventory-sync three-verdict
   // contract (design.md 5A.2). Unit 1 turns this into a real verdict.
@@ -31,6 +43,17 @@ export interface NavClient {
   // Job Queue Log, most-recent-first. Feeds the push-outcome verdict, the recent-
   // walks bar chart, and the walks table. Read-only.
   getRecentInventoryWalks(limit: number): Promise<InventoryWalk[]>;
+  // Unit 2 (back-sync). Recently posted NAV shipments from GRUS$Sales Shipment
+  // Header, most-recent-first, to enrich missed-shipments detail. Read-only.
+  //
+  // Real read-only shape (design.md section 4, the existing missed-shipments query):
+  //   SELECT sh.[No_], sh.[WebId], sh.[Shipping Agent Code],
+  //          sh.[Package Tracking No_], sh.[Posting Date]
+  //     FROM [GRUS$Sales Shipment Header] sh
+  //     LEFT JOIN nav_shipment_sync s ON s.nav_shipment = sh.[No_]
+  //    WHERE s.shopify_fulfillment_id IS NULL AND sh.[WebId] <> ''  -- DTC only
+  // SELECT-only: no write path into NAV (design.md 7).
+  getRecentShipments(limit: number): Promise<NavShipmentHeader[]>;
   // Read-only SQL passthrough for curated templates (design.md section 2).
   queryReadOnly<T>(templateName: string, params?: Record<string, unknown>): Promise<T[]>;
 }
@@ -51,6 +74,10 @@ class NavClientStub implements NavClient {
   }
   async getRecentInventoryWalks(limit: number): Promise<InventoryWalk[]> {
     this.note(`recent inventory walks (limit ${limit})`);
+    return [];
+  }
+  async getRecentShipments(limit: number): Promise<NavShipmentHeader[]> {
+    this.note(`recent NAV shipments (limit ${limit})`);
     return [];
   }
   async queryReadOnly<T>(templateName: string): Promise<T[]> {

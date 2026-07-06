@@ -79,6 +79,21 @@ export interface Config {
     freshnessAmberCycles: number;
     freshnessRedCycles: number;
   };
+  // Back-sync monitor thresholds (Unit 2, design.md 3.2 / 5 "Missed back-sync").
+  // Freshness = age of the last successful fulfillmentCreate; liveness = back-sync
+  // watcher heartbeat age; both cycle-banded. The missed-shipments signal is
+  // count-banded and, unlike inventory divergence, may reach RED. Ops owns all
+  // numbers; nothing is hardcoded.
+  backSync: {
+    cycleSeconds: number;          // one back-sync cycle in seconds
+    freshnessAmberCycles: number;  // watermark lag >= this many cycles => AMBER
+    freshnessRedCycles: number;    // watermark lag >= this many cycles => RED
+    livenessAmberCycles: number;   // heartbeat age >= this many cycles => AMBER
+    livenessRedCycles: number;     // heartbeat age >= this many cycles => RED
+    missedWindowDays: number;      // lookback window for the missed-shipments count
+    missedAmberCount: number;      // missed count >= this => AMBER
+    missedRedCount: number;        // missed count >= this => RED (real backlog)
+  };
 }
 
 export const config: Config = {
@@ -135,6 +150,20 @@ export const config: Config = {
     cycleSeconds: num('WEBHOOK_CYCLE_SECONDS', 3600),
     freshnessAmberCycles: num('WEBHOOK_FRESHNESS_AMBER_CYCLES', 1),
     freshnessRedCycles: num('WEBHOOK_FRESHNESS_RED_CYCLES', 4),
+  },
+  backSync: {
+    // Defaults: back-sync runs far more often than the ~2h IABC cycle, so one
+    // cycle is 1h; green under one cycle, amber one to two, red beyond.
+    cycleSeconds: num('BACK_SYNC_CYCLE_SECONDS', 3600),
+    freshnessAmberCycles: num('BACK_SYNC_FRESHNESS_AMBER_CYCLES', 1),
+    freshnessRedCycles: num('BACK_SYNC_FRESHNESS_RED_CYCLES', 2),
+    livenessAmberCycles: num('BACK_SYNC_LIVENESS_AMBER_CYCLES', 1),
+    livenessRedCycles: num('BACK_SYNC_LIVENESS_RED_CYCLES', 2),
+    // One missed shipment in the window is AMBER (the demo's "Missed 14d: 1"); a
+    // cluster (>= 5) is a real backlog and reds the pipe.
+    missedWindowDays: num('BACK_SYNC_MISSED_WINDOW_DAYS', 14),
+    missedAmberCount: num('BACK_SYNC_MISSED_AMBER_COUNT', 1),
+    missedRedCount: num('BACK_SYNC_MISSED_RED_COUNT', 5),
   },
 };
 

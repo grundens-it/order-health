@@ -173,6 +173,40 @@ export interface ShopifyWebhookDetail {
   stalest_received_at: string | null;
 }
 
+// --- Back-sync pipe detail (Unit 2, design.md 3.2 / 5 line "Missed back-sync") -
+// The back-sync pipe (NAV shipment -> Shopify fulfillmentCreate) carries these in
+// PipelineHealth.detail. Backend writes this shape; the BackSyncPanel casts detail
+// to BackSyncDetail to render the missed-shipments count and table. Snake_case
+// matches the JSONB column convention.
+//
+// A missed shipment is a NAV shipment (GRUS$Sales Shipment Header) that posted but
+// has no shopify_fulfillment_id in the middleware's nav_shipment_sync, i.e. the
+// fulfillmentCreate never fired. Wholesale shipments have no Shopify back-sync leg
+// (no WebId) and are excluded upstream, so they never count as missed.
+export interface MissedShipment {
+  order_ref: string | null;        // Shopify order name (SP-319090) or NAV order no
+  web_id: string | null;           // Shopify WebId correlation key (wholesale has none)
+  nav_shipment_no: string | null;  // GRUS$Sales Shipment Header [No_]
+  carrier: string | null;
+  tracking: string | null;
+  posted_at: string | null;        // NAV shipment posting time (ISO)
+  age_s: number | null;            // wall-clock age since posted
+  reason: string | null;           // human note (e.g. escalated after 6h)
+}
+
+// The full typed detail bag for the back_sync pipe. Unlike inventory-sync's
+// divergence (amber-capped), the missed-shipments signal is a real backlog and is
+// allowed to reach RED (design.md 5 "Missed back-sync ... RED").
+export interface BackSyncDetail {
+  last_back_sync_at: string | null;   // watermark: last successful fulfillmentCreate
+  missed_verdict: Verdict;            // count-banded; NOT capped, may be RED
+  missed_count: number;               // NAV shipments lacking a Shopify fulfillment
+  missed_window_days: number;         // lookback window for the count (e.g. 14)
+  fulfillments_last_24h: number | null;
+  errors_last_24h: number | null;
+  missed_shipments: MissedShipment[]; // detail rows for the panel table
+}
+
 export interface HealthTransition {
   subject_kind: 'pipe' | 'signal' | 'order';
   subject_key: string;
@@ -186,3 +220,49 @@ export interface HealthTransition {
 // Response payload types the read API returns (inside a HealthEnvelope).
 export type PipelinesResponse = HealthEnvelope<PipelineHealth[]>;
 export type OrdersResponse = HealthEnvelope<OrderHealth[]>;
+
+// --- Leadership rollup (design.md section 6, Unit 6) -----------------------
+// The top-of-page rollup collapses the two-layer model into a small set of
+// headline verdicts suitable for a leadership glance, with operator detail below
+// the fold. It is derived READ-ONLY from the SAME latest snapshot the pipeline
+// and order endpoints serve (no new external source): the pipeline_health rows
+// and the order_health rows. Nothing here fans out to a live source.
+
+// The three headline buckets. 'stuck' = something is RED (a red pipe or a
+// SLO-breached / immediately-red order); 'at_risk' = something is AMBER but
+// nothing is red; 'healthy' = nothing observed is red or amber.
+export type RollupHeadline = 'healthy' | 'at_risk' | 'stuck';
+
+// Per-verdict tallies for the at-a-glance counts, one set per layer.
+export interface RollupCounts {
+  orders_total: number;
+  orders_green: number;
+  orders_amber: number;
+  orders_red: number;
+  orders_unknown: number;
+  pipes_total: number;
+  pipes_green: number;
+  pipes_amber: number;
+  pipes_red: number;
+  pipes_unknown: number;
+}
+
+export interface LeadershipRollup {
+  headline: RollupHeadline;
+  // The headline mapped onto the shared Verdict so the UI can render it with the
+  // same shape-encoded VerdictChip (green/amber/red/unknown). 'unknown' is the
+  // healthy-empty case: nothing unhealthy observed, but nothing observed yet.
+  headline_verdict: Verdict;
+  // Age of the oldest STUCK (red) order, in seconds; null when no order is red.
+  oldest_stuck_age_s: number | null;
+  // The inventory_sync pipe's freshness: true = fresh (green), false = stale
+  // (amber/red), null = unknown (no inventory_sync row, or its freshness is
+  // unknown / not yet provisioned).
+  inventory_sync_fresh: boolean | null;
+  counts: RollupCounts;
+}
+
+// The rollup endpoint returns the rollup fields flattened alongside as_of. It is
+// a single object (not a list), so as_of rides inline rather than in the
+// HealthEnvelope.data wrapper; as_of is still always present (firm rule).
+export type RollupResponse = { as_of: string } & LeadershipRollup;

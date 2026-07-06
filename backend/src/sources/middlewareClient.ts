@@ -9,6 +9,7 @@
 // STUB STATUS: the interface below is the real contract Phase W will consume,
 // but the implementation returns empty placeholder data because live source
 // access is gated on DevOps provisioning (read-only token + base URL).
+import type { MissedShipment } from '@order-health/shared';
 import { config } from '../config';
 
 // The middleware's inventory-sync status endpoint exposes the last dry-run's
@@ -50,6 +51,17 @@ export interface ShopifyWebhookStatus {
   topics: WebhookTopicStatus[];
 }
 
+// Unit 2 (back-sync). The middleware's back-sync status endpoint exposes the
+// back-sync watermark (last successful fulfillmentCreate), the back-sync watcher
+// heartbeat, and the 24h fulfillment/error counters. These feed the freshness and
+// liveness verdicts. Read-only.
+export interface BackSyncStatus {
+  lastBackSyncAt: string | null;      // watermark: last successful fulfillmentCreate
+  watcherHeartbeatAt: string | null;  // back-sync watcher last loop
+  fulfillmentsLast24h: number | null; // fulfillmentCreate calls sent in the last 24h
+  errorsLast24h: number | null;       // back-sync errors in the last 24h
+}
+
 // Shapes are intentionally loose (Record) at the scaffold stage; Phase W units
 // tighten each endpoint's response type as they wire it in.
 export interface MiddlewareClient {
@@ -70,6 +82,15 @@ export interface MiddlewareClient {
   getPriceSyncStatus(): Promise<PriceSyncStatus>;
   // GET /api/webhooks/shopify/health: last-received per topic + subscription state.
   getShopifyWebhookStatus(): Promise<ShopifyWebhookStatus>;
+  // Unit 2. GET /api/back-sync/status (read-only): back-sync watermark, watcher
+  // heartbeat, and 24h counters for the freshness and liveness verdicts.
+  getBackSyncStatus(): Promise<BackSyncStatus>;
+  // Unit 2. The EXISTING GET /api/back-sync/missed-shipments endpoint, typed. Each
+  // row is a NAV shipment that posted with no shopify_fulfillment_id in
+  // nav_shipment_sync (the fulfillmentCreate never fired). Returns null when the
+  // endpoint has not been queried (stub) so the missed signal reads 'unknown'
+  // rather than a false green. Wholesale shipments are excluded upstream.
+  getMissedShipmentDetail(): Promise<MissedShipment[] | null>;
 }
 
 // Clearly-marked stub. Every method returns empty/placeholder data and logs a
@@ -132,6 +153,21 @@ class MiddlewareClientStub implements MiddlewareClient {
     // live webhook subscription list (subscribed=false => removed subscription).
     this.note('GET /api/webhooks/shopify/health');
     return { topics: [] };
+  }
+  async getBackSyncStatus(): Promise<BackSyncStatus> {
+    this.note('GET /api/back-sync/status');
+    return {
+      lastBackSyncAt: null,
+      watcherHeartbeatAt: null,
+      fulfillmentsLast24h: null,
+      errorsLast24h: null,
+    };
+  }
+  async getMissedShipmentDetail(): Promise<MissedShipment[] | null> {
+    this.note('GET /api/back-sync/missed-shipments');
+    // null (not empty) so the missed-shipments signal reads 'unknown' until the
+    // endpoint is live; an empty array would falsely read as green (zero missed).
+    return null;
   }
 }
 

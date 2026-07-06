@@ -94,3 +94,38 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .ip-cards-2 { grid-template-columns: repeat(2, 1fr); }
 .ip-metric.mono-sm { font-size: 15px; }
 @media (max-width: 900px) { .ip-cards-2 { grid-template-columns: 1fr; } }
+/* --- Leadership rollup strip (Unit 6, design.md section 6) -----------------
+   Top-of-page glance layer. Reuses the dark-theme tokens; verdicts stay
+   shape-encoded via the shared VerdictChip. */
+.lead { margin: 18px 0 6px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+.lead-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.lead-hd h2 { font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; }
+.lead-asof { font-size: 12px; color: var(--faint); }
+.lead-asof b { color: var(--ink); font-weight: 600; }
+.lead-tiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+.lead-tile { background: var(--sunken); border: 1px solid var(--line2); border-radius: 8px; padding: 11px 12px; display: flex; flex-direction: column; gap: 6px; }
+.lead-k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--faint); font-weight: 700; }
+.lead-v { display: flex; align-items: center; min-height: 24px; }
+.lead-metric { font-size: 20px; font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.lead-warn { color: var(--red); }
+.lead-sub { font-size: 11px; color: var(--faint); }
+.lead-counts { display: flex; flex-wrap: wrap; gap: 5px 10px; }
+.lead-c { font-size: 12.5px; font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.lead-c.g { color: var(--green); }
+.lead-c.a { color: var(--amber); }
+.lead-c.r { color: var(--red); }
+.lead-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 20px; border: 1px solid var(--slate-bg); background: var(--slate-bg); color: var(--slate); }
+.lead-pill .lead-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.lead-pill.g { background: var(--green-bg); border-color: var(--green-bd); color: var(--green); }
+.lead-pill.r { background: var(--red-bg); border-color: var(--red-bd); color: var(--red); }
+.lead-pill.r .lead-dot { border-radius: 0; transform: rotate(45deg); }
+.lead-pill.u { background: var(--slate-bg); border-color: var(--slate-bg); color: var(--slate); }
+.lead-empty .lead-note { font-size: 12.5px; color: var(--faint); }
+@media (max-width: 900px) { .lead-tiles { grid-template-columns: 1fr 1fr; } }
+/* --- Back-sync Monitor panel (Unit 2) -------------------------------------- */
+/* Reuses the .ip* panel tokens; adds the table utilities the panels reference
+   and a RED note variant (the missed-shipments signal may reach red, unlike the
+   amber-capped inventory divergence). */
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+.oid { font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.ip-note.r { background: var(--red-bg); border-color: var(--red-bd); color: #f0a49c; }

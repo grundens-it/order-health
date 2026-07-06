@@ -95,7 +95,9 @@ export function App(): JSX.Element {
         <div className="sec">
           <h2>Order health</h2>
           <div className="rule" />
-          <span className="aux">populated by Phase W units</span>
+          <span className="aux">
+            per-order lifecycle across both channels; wholesale has no Shopify leg
+          </span>
         </div>
         <div className="controls">
           <ChannelFilter value={channel} onChange={setChannel} />

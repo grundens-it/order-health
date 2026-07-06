@@ -7,7 +7,7 @@
 //
 // STUB STATUS: typed interface is the real contract; the implementation returns
 // placeholder data because the read-only NAV connection is DevOps-gated.
-import type { InventoryWalk } from '@order-health/shared';
+import type { Channel, InventoryWalk } from '@order-health/shared';
 import { config } from '../config';
 
 export interface NavWatermarkState {
@@ -15,6 +15,31 @@ export interface NavWatermarkState {
   watermarkEntryNo: number | null;
   lastWalkAt: string | null;
   watcherHeartbeatAt: string | null;
+}
+
+// One order's lifecycle timestamps as read from NAV (the Shopify-to-NAV join,
+// design.md 4). DTC correlates on [WebId] on GRUS$Sales Header; wholesale is
+// keyed on the NAV order number + customer and has an empty WebId with no
+// Shopify leg. The order-layer compute (orderLifecycle.ts) turns this row into a
+// per-order verdict. All columns are SELECT-only.
+export interface NavOrderLifecycleRow {
+  // Channel is derived by the query. NOTE: the wholesale-vs-orphan derivation
+  // (customer type / order source / series code) is BA open question 1; until it
+  // resolves the orphan grading stays behind ORDER_ORPHAN_GRADING_ENABLED.
+  channel: Channel;
+  navOrderNo: string | null;
+  webId: string | null;            // [WebId] on GRUS$Sales Header; empty => DTC orphan candidate OR wholesale
+  shopifyOrderName: string | null; // human label, for example "#1024" (DTC)
+  customerRef: string | null;      // Sell-to Customer No_ + name (wholesale keying)
+  // Per-stage handoff timestamps (null until the handoff happens).
+  shopifyOrderAt: string | null;   // DTC: Shopify order received
+  allocatorSplitAt: string | null; // DTC: warehouse-splitter allocation decision
+  navStagingAt: string | null;     // staged into Sales Header Staging
+  navStagingStatus: number | null; // Sales Header Staging [Status]; nonzero + unpromoted => stuck (RED)
+  navPromotionAt: string | null;   // promoted to a live NAV order
+  navShipmentAt: string | null;    // GRUS$Sales Shipment Header exists (3PL shipped)
+  backSyncAt: string | null;       // DTC only: shopify_fulfillment_id present in nav_shipment_sync
+  missedBackSync: boolean;         // DTC only: NAV shipment exists, no fulfillment id => RED (design.md 5)
 }
 
 export interface NavClient {
@@ -31,6 +56,19 @@ export interface NavClient {
   // Job Queue Log, most-recent-first. Feeds the push-outcome verdict, the recent-
   // walks bar chart, and the walks table. Read-only.
   getRecentInventoryWalks(limit: number): Promise<InventoryWalk[]>;
+  // Per-order lifecycle rows for the order layer (design.md 3.1 / 4). Read-only.
+  //
+  // Real read-only shape (the Shopify-to-NAV join, all SELECT):
+  //   SELECT h.[No_] AS navOrderNo, h.[WebId] AS webId, h.[External Document No_],
+  //          h.[Sell-to Customer No_] AS customerRef, h.[Order Date],
+  //          st.[Status] AS navStagingStatus, sh.[Posting Date] AS navShipmentAt
+  //     FROM [GRUS$Sales Header] h
+  //     LEFT JOIN [GRUS$Sales Header Staging] st ON st.[No_] = h.[No_]
+  //     LEFT JOIN [GRUS$Sales Shipment Header] sh ON sh.[Order No_] = h.[No_]
+  //   -- channel derived from WebId presence + customer type (BA open question 1).
+  // The back-sync leg (backSyncAt / missedBackSync) is joined from the middleware
+  // nav_shipment_sync view. No write path into NAV (design.md 7).
+  getOrderLifecycleRows(): Promise<NavOrderLifecycleRow[]>;
   // Read-only SQL passthrough for curated templates (design.md section 2).
   queryReadOnly<T>(templateName: string, params?: Record<string, unknown>): Promise<T[]>;
 }
@@ -51,6 +89,10 @@ class NavClientStub implements NavClient {
   }
   async getRecentInventoryWalks(limit: number): Promise<InventoryWalk[]> {
     this.note(`recent inventory walks (limit ${limit})`);
+    return [];
+  }
+  async getOrderLifecycleRows(): Promise<NavOrderLifecycleRow[]> {
+    this.note('order lifecycle rows (sales header join)');
     return [];
   }
   async queryReadOnly<T>(templateName: string): Promise<T[]> {

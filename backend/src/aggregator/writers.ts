@@ -7,11 +7,12 @@
 // STUB STATUS: the verdict computation is stubbed (returns 'unknown' with empty
 // source reads) because live sources are DevOps-gated. The SHAPE is real so
 // Phase W units drop a real verdict computation into the marked seams.
-import type { OrderHealth, PipelineHealth, Verdict } from '@order-health/shared';
-import { worstVerdict } from '@order-health/shared';
+import type { OrderHealth, PipelineHealth } from '@order-health/shared';
+import { config } from '../config';
 import { getPool } from '../db/pool';
 import type { MiddlewareClient } from '../sources/middlewareClient';
 import type { NavClient } from '../sources/navClient';
+import { computeInventorySync, type InventorySyncInput } from './inventorySync';
 
 // The set of pipes the strip renders. Phase W units each own one key.
 export const PIPES = [
@@ -29,39 +30,49 @@ export interface Sources {
 }
 
 // ---------------------------------------------------------------------------
-// PIPELINE VERDICT SEAM (the pattern Unit 1 copies).
+// PIPELINE VERDICT SEAM (the pattern Units 2 to 6 copy).
 //
-// Each pipe has one function that reads its sources and returns a PipelineHealth
-// with real freshness + liveness sub-verdicts. The rollup pipe_verdict is
-// worstVerdict([...]). Unit 1 (inventory monitor) replaces the body of
-// computeInventorySyncPipeline with the real three-verdict compute from
-// design.md 5A.2; the other pipes follow the identical shape.
+// Each pipe has one function that reads its READ-ONLY sources and returns a
+// PipelineHealth. The pure verdict math lives in its own module (inventorySync.ts)
+// so it is unit-testable without live sources; this function is only the I/O glue:
+// read sources -> assemble a seeded input -> call the pure compute -> map to the
+// PipelineHealth row shape. See docs/phase-w-adding-a-pipe.md.
 // ---------------------------------------------------------------------------
 export async function computeInventorySyncPipeline(sources: Sources): Promise<PipelineHealth> {
-  // STUB: read the (stubbed) watermark state. Unit 1 turns these into verdicts:
-  //   freshness_verdict from watermark_lag vs one IABC cycle (~2h),
-  //   liveness_verdict  from heartbeat_age vs N cycles,
-  //   plus a push-outcome / dry-run divergence sub-verdict in detail.
-  const state = await sources.nav.getInventoryWatermarkState();
+  // READ-ONLY source reads (currently stubbed: they return typed nulls/empties
+  // until DevOps provisions NAV + the middleware endpoint). No live calls, no
+  // writes anywhere upstream.
+  const [state, walks, status] = await Promise.all([
+    sources.nav.getInventoryWatermarkState(),
+    sources.nav.getRecentInventoryWalks(8),
+    sources.middleware.getInventorySyncStatus(),
+  ]);
 
-  const freshness_verdict: Verdict = 'unknown';
-  const liveness_verdict: Verdict = 'unknown';
+  const input: InventorySyncInput = {
+    navNewestIabcEntryNo: state.navNewestIabcEntryNo,
+    watermarkEntryNo: state.watermarkEntryNo,
+    lastWalkAt: state.lastWalkAt,
+    watcherHeartbeatAt: state.watcherHeartbeatAt,
+    walks,
+    dryRunWouldPush: status.dryRunWouldPush,
+    dryRunAt: status.dryRunAt,
+    totalPairs: status.totalPairs,
+  };
+
+  const r = computeInventorySync(input, config.inventorySync, Date.now());
 
   return {
     pipe: 'inventory_sync',
-    // Rollup = worst of the sub-verdicts. This line stays; only the inputs change.
-    pipe_verdict: worstVerdict([freshness_verdict, liveness_verdict]),
-    freshness_verdict,
-    watermark_lag_s: null,
-    last_progress_at: state.lastWalkAt,
-    liveness_verdict,
-    heartbeat_at: state.watcherHeartbeatAt,
-    heartbeat_age_s: null,
-    detail: {
-      note: 'stub: populated by Unit 1 (inventory monitor)',
-      nav_newest_iabc_entry_no: state.navNewestIabcEntryNo,
-      watermark_entry_no: state.watermarkEntryNo,
-    },
+    pipe_verdict: r.pipeVerdict, // worst of the three, with the dry-run amber cap enforced
+    freshness_verdict: r.freshnessVerdict,
+    watermark_lag_s: r.watermarkLagS,
+    last_progress_at: r.lastProgressAt,
+    liveness_verdict: r.livenessVerdict,
+    heartbeat_at: r.heartbeatAt,
+    heartbeat_age_s: r.heartbeatAgeS,
+    // The third (push-outcome) verdict and all the numbers live in the typed
+    // detail bag (InventorySyncDetail): divergence + recent-walk stats.
+    detail: r.detail as unknown as Record<string, unknown>,
   };
 }
 

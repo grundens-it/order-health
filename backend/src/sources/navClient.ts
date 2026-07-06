@@ -7,6 +7,7 @@
 //
 // STUB STATUS: typed interface is the real contract; the implementation returns
 // placeholder data because the read-only NAV connection is DevOps-gated.
+import type { InventoryWalk } from '@order-health/shared';
 import { config } from '../config';
 
 export interface NavWatermarkState {
@@ -19,7 +20,17 @@ export interface NavWatermarkState {
 export interface NavClient {
   // IABC watermark + watcher heartbeat for the inventory-sync three-verdict
   // contract (design.md 5A.2). Unit 1 turns this into a real verdict.
+  //
+  // Real read-only shape (from the demo SQL console, design.md section 2):
+  //   SELECT MAX([Entry No_]) FROM [Job Queue Log Entry]
+  //     WHERE [Object ID to Run] = 50007 AND [Status] = 2   -- newest IABC completion
+  // plus the middleware's inventory_sync.last_iabc_job_entry_no watermark and the
+  // watcher heartbeat row. All SELECT-only: no write path into NAV (design.md 7).
   getInventoryWatermarkState(): Promise<NavWatermarkState>;
+  // Recent catalog walks (processed / pushed / skipped / untracked) from the NAV
+  // Job Queue Log, most-recent-first. Feeds the push-outcome verdict, the recent-
+  // walks bar chart, and the walks table. Read-only.
+  getRecentInventoryWalks(limit: number): Promise<InventoryWalk[]>;
   // Read-only SQL passthrough for curated templates (design.md section 2).
   queryReadOnly<T>(templateName: string, params?: Record<string, unknown>): Promise<T[]>;
 }
@@ -37,6 +48,10 @@ class NavClientStub implements NavClient {
       lastWalkAt: null,
       watcherHeartbeatAt: null,
     };
+  }
+  async getRecentInventoryWalks(limit: number): Promise<InventoryWalk[]> {
+    this.note(`recent inventory walks (limit ${limit})`);
+    return [];
   }
   async queryReadOnly<T>(templateName: string): Promise<T[]> {
     this.note(`read-only template ${templateName}`);

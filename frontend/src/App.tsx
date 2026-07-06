@@ -6,6 +6,7 @@ import type {
 } from '@order-health/shared';
 import { fetchOrders, fetchPipelines } from './api';
 import { PipelineStrip } from './components/PipelineStrip';
+import { InventoryPanel } from './components/InventoryPanel';
 import { OrderTable } from './components/OrderTable';
 import { ChannelFilter } from './components/ChannelFilter';
 
@@ -43,6 +44,12 @@ export function App(): JSX.Element {
     return `as of ${new Date(asOf).toLocaleString()}`;
   }, [asOf]);
 
+  // The inventory-sync pipe owns the reference expanded panel (Unit 1).
+  const inventoryPipe = useMemo(
+    () => pipelines.find((p) => p.pipe === 'inventory_sync') ?? null,
+    [pipelines],
+  );
+
   return (
     <>
       <div className="band">
@@ -64,8 +71,9 @@ export function App(): JSX.Element {
       </div>
 
       <div className="demo-note">
-        <b>Foundation shell.</b> Pipeline cards and order rows are placeholders populated by Phase W
-        units. Read-only service: no changes to the middleware or NAV.
+        <b>Inventory Sync Monitor (Unit 1) live.</b> Other pipeline cards and order rows are
+        placeholders populated by later Phase W units. Read-only service: no changes to the
+        middleware or NAV.
       </div>
 
       <div className="wrap">
@@ -76,6 +84,13 @@ export function App(): JSX.Element {
         )}
 
         <PipelineStrip pipelines={pipelines} />
+
+        <div className="sec">
+          <h2>Inventory sync</h2>
+          <div className="rule" />
+          <span className="aux">reference monitor: freshness · liveness · push-outcome</span>
+        </div>
+        <InventoryPanel pipe={inventoryPipe} />
 
         <div className="sec">
           <h2>Order health</h2>

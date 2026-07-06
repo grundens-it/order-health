@@ -28,14 +28,17 @@ const VERDICT_SEVERITY: Record<Verdict, number> = {
 };
 
 // Roll a set of sub-verdicts up to the worst one. Empty set is 'unknown'.
+// Seeded with 'green' (the best) so an all-green rollup is green; 'unknown' is
+// worse than green (severity table) and still wins when a sub-verdict is unknown.
 export function worstVerdict(verdicts: readonly Verdict[]): Verdict {
-  let worst: Verdict = 'unknown';
+  if (verdicts.length === 0) return 'unknown';
+  let worst: Verdict = 'green';
   for (const v of verdicts) {
     if (VERDICT_SEVERITY[v] > VERDICT_SEVERITY[worst]) {
       worst = v;
     }
   }
-  return verdicts.length === 0 ? 'unknown' : worst;
+  return worst;
 }
 
 // --- Lifecycle stages -----------------------------------------------------
@@ -87,6 +90,41 @@ export interface PipelineHealth {
   heartbeat_at: string | null;
   heartbeat_age_s: number | null;
   detail: Record<string, unknown>;
+}
+
+// --- Inventory-sync pipe detail (design.md 5A.2) --------------------------
+// The inventory-sync pipe carries a typed detail bag inside PipelineHealth.detail
+// (which is a loose Record on the wire). Backend writes this shape; the frontend
+// panel casts detail to InventorySyncDetail to render the third (push-outcome)
+// verdict, the recent-walks bar chart, and the walks table. Snake_case matches
+// the JSONB column convention.
+export interface InventoryWalk {
+  walk_at: string | null;     // ISO time the catalog walk completed
+  processed: number;          // variant-location pairs examined
+  pushed: number;             // pairs pushed to Shopify this walk
+  skipped: number;            // pairs unchanged / skipped
+  untracked_filtered: number; // pairs dropped for "track quantity off" (onboarding signal)
+}
+
+export interface InventoryDivergence {
+  dryrun_would_push: number | null;  // last dry-run "would push" count
+  dryrun_at: string | null;          // when that dry-run ran
+  total_pairs: number | null;        // denominator ("of 12,218")
+  live_push_trailing: number | null; // trailing MAX pushed across recent live walks
+  ratio: number | null;              // dryrun_would_push / max(live_push_trailing, 1)
+  // AMBER-capped, never RED (design.md 5A.3). A large divergence caps at amber.
+  divergence_verdict: Verdict;
+}
+
+// The full typed detail bag for the inventory_sync pipe.
+export interface InventorySyncDetail {
+  trigger_mode: 'job_queue';
+  watermark_entry_no: number | null;
+  nav_newest_iabc_entry_no: number | null;
+  watermark_entry_gap: number | null; // newest IABC entry minus watermark entry
+  last_walk: InventoryWalk | null;
+  recent_walks: InventoryWalk[];      // most-recent-first
+  divergence: InventoryDivergence;
 }
 
 export interface HealthTransition {

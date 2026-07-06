@@ -9,6 +9,7 @@
 // STUB STATUS: the interface below is the real contract Phase W will consume,
 // but the implementation returns empty placeholder data because live source
 // access is gated on DevOps provisioning (read-only token + base URL).
+import type { AllocationDecision } from '@order-health/shared';
 import type { MissedShipment } from '@order-health/shared';
 import { config } from '../config';
 
@@ -19,6 +20,22 @@ export interface InventorySyncStatus {
   dryRunWouldPush: number | null; // last dry-run "would push" count (the 7,245)
   dryRunAt: string | null;        // when that dry-run ran
   totalPairs: number | null;      // denominator (the 12,218)
+}
+
+// The middleware's allocator status endpoint (Unit 4) exposes the recent split
+// decisions (warehouse_allocation_log) plus the window counts that drive the
+// split-sanity signal. Read-only: this is the middleware's SQLite allocation log
+// surfaced over an existing GET endpoint; we never write it.
+export interface AllocatorStatus {
+  lastDecisionAt: string | null;      // recency of the newest split decision
+  serviceHeartbeatAt: string | null;  // allocator loop heartbeat
+  windowSeconds: number | null;       // window the counts below cover
+  decisionsWindow: number | null;     // total decisions in the window
+  splitCount: number | null;          // multi-warehouse splits
+  unallocatableCount: number | null;  // decisions with no ATP anywhere
+  failedCount: number | null;         // errored decisions
+  atpFallbackCount: number | null;    // inventory-aware fallbacks
+  recentDecisions: AllocationDecision[]; // most-recent-first
 }
 
 // --- Unit 3 typed read shapes ---------------------------------------------
@@ -75,6 +92,15 @@ export interface MiddlewareClient {
   getPendingFulfillment(): Promise<Record<string, unknown>[]>;
   // GET /api/inventory-sync/status (read-only): dry-run divergence numbers.
   getInventorySyncStatus(): Promise<InventorySyncStatus>;
+  // GET /api/allocator/status (read-only): recent split decisions + window counts
+  // for the Warehouse Split panel (Unit 4). Backed by the middleware SQLite
+  // warehouse_allocation_log; the underlying read is SELECT-only, for example:
+  //   SELECT decided_at, order_ref, channel, sku, qty, rule, location, outcome
+  //     FROM warehouse_allocation_log
+  //     WHERE decided_at >= :windowStart ORDER BY decided_at DESC
+  // with the window aggregates (splits, unallocatable, failed, ATP fallbacks)
+  // computed over the same window. No write path into the middleware (design.md 0).
+  getAllocatorStatus(): Promise<AllocatorStatus>;
   // --- Unit 3 read-only endpoints ---
   // GET /api/nav/job-queue/health: the already-computed verdict we adopt.
   getJobQueueHealthStatus(): Promise<JobQueueHealthStatus>;
@@ -127,6 +153,20 @@ class MiddlewareClientStub implements MiddlewareClient {
   async getInventorySyncStatus(): Promise<InventorySyncStatus> {
     this.note('GET /api/inventory-sync/status');
     return { dryRunWouldPush: null, dryRunAt: null, totalPairs: null };
+  }
+  async getAllocatorStatus(): Promise<AllocatorStatus> {
+    this.note('GET /api/allocator/status');
+    return {
+      lastDecisionAt: null,
+      serviceHeartbeatAt: null,
+      windowSeconds: null,
+      decisionsWindow: null,
+      splitCount: null,
+      unallocatableCount: null,
+      failedCount: null,
+      atpFallbackCount: null,
+      recentDecisions: [],
+    };
   }
   // --- Unit 3 stubs: typed empty reads, no live calls (DevOps-gated) ---
   async getJobQueueHealthStatus(): Promise<JobQueueHealthStatus> {

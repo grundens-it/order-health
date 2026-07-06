@@ -127,6 +127,45 @@ export interface InventorySyncDetail {
   divergence: InventoryDivergence;
 }
 
+// --- Allocator (Warehouse Split) pipe detail (Unit 4, design.md 3.2 / 5) ------
+// The allocator pipe grades the warehouse-splitter's split decisions
+// (warehouse_allocation_log). Like inventory_sync it carries freshness +
+// liveness in PipelineHealth columns and a typed detail bag here: the recent
+// split decisions (Mari's 4 rules) and the split-sanity signal (rate of
+// un-allocatable / failed splits). Snake_case matches the JSONB convention.
+export type AllocationOutcome = 'allocated' | 'split' | 'unallocatable' | 'failed';
+
+export interface AllocationDecision {
+  decided_at: string | null;      // ISO time the split decision was logged
+  order_ref: string | null;       // Shopify order name or NAV order no
+  channel: Channel | null;        // dtc / wholesale (null when not resolved)
+  sku: string | null;             // variant / item allocated
+  qty: number | null;             // units on the line
+  rule: string | null;            // rule applied ("least-split -> TAC", etc.)
+  location: string | null;        // resolved warehouse (TAC / OLD / NEW / HF1FTZ)
+  outcome: AllocationOutcome;      // allocated | split | unallocatable | failed
+}
+
+export interface AllocatorSplitSanity {
+  decisions_window: number | null;    // total decisions counted in the window
+  split_count: number | null;         // multi-warehouse splits
+  split_rate: number | null;          // split_count / decisions_window
+  unallocatable_count: number | null; // decisions with no ATP anywhere
+  failed_count: number | null;        // errored decisions
+  failed_rate: number | null;         // (unallocatable + failed) / decisions_window
+  atp_fallback_count: number | null;  // inventory-aware fallbacks
+  // green/amber/red by failed_rate bands. Unlike inventory divergence this is
+  // NOT amber-capped: a genuinely high un-allocatable rate is allowed to go RED.
+  sanity_verdict: Verdict;
+}
+
+export interface AllocatorDetail {
+  window_seconds: number | null;      // the window the counts cover
+  last_decision_at: string | null;    // recency driver for freshness
+  recent_decisions: AllocationDecision[]; // most-recent-first
+  sanity: AllocatorSplitSanity;
+}
+
 // --- Unit 3 pipe detail bags (job-queue, price-sync, Shopify webhooks) -----
 // Each pipe carries its own typed detail bag inside PipelineHealth.detail. The
 // backend writes the shape; the panel casts detail to it. Snake_case matches

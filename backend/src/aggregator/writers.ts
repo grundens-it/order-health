@@ -13,6 +13,7 @@ import { getPool } from '../db/pool';
 import type { MiddlewareClient } from '../sources/middlewareClient';
 import type { NavClient } from '../sources/navClient';
 import { computeInventorySync, type InventorySyncInput } from './inventorySync';
+import { computeAllocator, type AllocatorInput } from './allocator';
 import { computeJobQueue, type JobQueueInput } from './jobQueue';
 import { computePriceSync, type PriceSyncInput } from './priceSync';
 import { computeShopifyWebhook, type ShopifyWebhookInput } from './shopifyWebhook';
@@ -77,6 +78,43 @@ export async function computeInventorySyncPipeline(sources: Sources): Promise<Pi
     heartbeat_age_s: r.heartbeatAgeS,
     // The third (push-outcome) verdict and all the numbers live in the typed
     // detail bag (InventorySyncDetail): divergence + recent-walk stats.
+    detail: r.detail as unknown as Record<string, unknown>,
+  };
+}
+
+// Allocator (Warehouse Split) seam (Unit 4). Reads the middleware's read-only
+// allocator status (warehouse_allocation_log), assembles the seeded input, calls
+// the pure computeAllocator, and maps the result to the PipelineHealth row.
+export async function computeAllocatorPipeline(sources: Sources): Promise<PipelineHealth> {
+  // READ-ONLY source read (currently stubbed: returns typed nulls/empties until
+  // DevOps provisions the middleware endpoint). No live calls, no upstream writes.
+  const status = await sources.middleware.getAllocatorStatus();
+
+  const input: AllocatorInput = {
+    lastDecisionAt: status.lastDecisionAt,
+    serviceHeartbeatAt: status.serviceHeartbeatAt,
+    windowSeconds: status.windowSeconds,
+    decisionsWindow: status.decisionsWindow,
+    splitCount: status.splitCount,
+    unallocatableCount: status.unallocatableCount,
+    failedCount: status.failedCount,
+    atpFallbackCount: status.atpFallbackCount,
+    decisions: status.recentDecisions,
+  };
+
+  const r = computeAllocator(input, config.allocator, Date.now());
+
+  return {
+    pipe: 'allocator',
+    pipe_verdict: r.pipeVerdict, // worst of freshness / liveness / split-sanity
+    freshness_verdict: r.freshnessVerdict,
+    watermark_lag_s: r.decisionLagS,
+    last_progress_at: r.lastDecisionAt,
+    liveness_verdict: r.livenessVerdict,
+    heartbeat_at: r.heartbeatAt,
+    heartbeat_age_s: r.heartbeatAgeS,
+    // The split-sanity verdict and all the counts live in the typed detail bag
+    // (AllocatorDetail): recent split decisions + the sanity signal.
     detail: r.detail as unknown as Record<string, unknown>,
   };
 }
@@ -248,6 +286,7 @@ export async function computePipelines(sources: Sources): Promise<PipelineHealth
     computePriceSyncPipeline(sources),      // Unit 3
     computeJobQueuePipeline(sources),       // Unit 3
     computeShopifyWebhookPipeline(sources), // Unit 3
+    computeAllocatorPipeline(sources),      // Unit 4
   ]);
   const real = new Map<string, PipelineHealth>(landed.map((p) => [p.pipe, p]));
   return PIPES.map((p) => real.get(p) ?? placeholderPipe(p));

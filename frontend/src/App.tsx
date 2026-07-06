@@ -13,6 +13,7 @@ import { BackSyncPanel } from './components/BackSyncPanel';
 import { PriceSyncPanel } from './components/PriceSyncPanel';
 import { JobQueuePanel } from './components/JobQueuePanel';
 import { ShopifyWebhookPanel } from './components/ShopifyWebhookPanel';
+import { AllocatorPanel } from './components/AllocatorPanel';
 import { OrderTable } from './components/OrderTable';
 import { ChannelFilter } from './components/ChannelFilter';
 
@@ -80,6 +81,12 @@ export function App(): JSX.Element {
   );
   const webhookPipe = useMemo(
     () => pipelines.find((p) => p.pipe === 'shopify_webhook') ?? null,
+    [pipelines],
+  );
+
+  // The allocator pipe owns the Warehouse Split decisions panel (Unit 4).
+  const allocatorPipe = useMemo(
+    () => pipelines.find((p) => p.pipe === 'allocator') ?? null,
     [pipelines],
   );
 
@@ -155,6 +162,13 @@ export function App(): JSX.Element {
           <span className="aux">Unit 3 monitor: last received per topic · subscription health</span>
         </div>
         <ShopifyWebhookPanel pipe={webhookPipe} />
+
+        <div className="sec">
+          <h2>Warehouse split</h2>
+          <div className="rule" />
+          <span className="aux">allocator: decision freshness · liveness · split-sanity</span>
+        </div>
+        <AllocatorPanel pipe={allocatorPipe} />
 
         <div className="sec">
           <h2>Order health</h2>

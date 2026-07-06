@@ -7,8 +7,9 @@ import { VerdictChip } from './VerdictChip';
 // rows render with an explicit "no Shopify leg" cell rather than as an error, and
 // are never shown as orphans. Reads ONLY the snapshot rows it is handed.
 
-// Human labels for the canonical lifecycle stages.
-const STAGE_LABEL: Record<LifecycleStage, string> = {
+// Human labels for the canonical lifecycle stages. Exported so the stage filter
+// can label its options from the same source of truth as the table cells.
+export const STAGE_LABEL: Record<LifecycleStage, string> = {
   shopify_order: 'Shopify order',
   allocator_split: 'Allocator split',
   nav_staging: 'NAV staging',

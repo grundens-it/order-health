@@ -56,6 +56,29 @@ export interface Config {
     livenessRedCycles: number;     // heartbeat age >= this many cycles => RED
     divergenceAmberRatio: number;  // (dry-run would-push / trailing live push) above this => AMBER (never RED)
   };
+  // Unit 3 thresholds. Ops owns the numbers; the code reads them.
+  // price_sync (design.md 3): freshness (last received) + liveness (last run),
+  // both cycle-banded like inventory-sync.
+  priceSync: {
+    cycleSeconds: number;
+    freshnessAmberCycles: number;
+    freshnessRedCycles: number;
+    livenessAmberCycles: number;
+    livenessRedCycles: number;
+  };
+  // nav_job_queue (design.md 6): verdict is CONSUMED from the middleware, never
+  // recomputed. This knob only documents the middleware's own stuck-job age so
+  // the panel can label the supporting number; it does not gate any verdict.
+  jobQueue: {
+    stuckJobWarnSeconds: number;
+  };
+  // shopify_webhook (design.md 5): per-topic last-received freshness bands. A
+  // removed subscription is amber-or-worse by rule (not a tunable band).
+  shopifyWebhook: {
+    cycleSeconds: number;
+    freshnessAmberCycles: number;
+    freshnessRedCycles: number;
+  };
 }
 
 export const config: Config = {
@@ -92,6 +115,26 @@ export const config: Config = {
     livenessRedCycles: num('INVENTORY_LIVENESS_RED_CYCLES', 2),
     // 7,245 / 466 ~= 15.5 (the part-1 case) trips amber at 5x; never escalates to red.
     divergenceAmberRatio: num('INVENTORY_DIVERGENCE_AMBER_RATIO', 5),
+  },
+  // Unit 3: price_sync. Default cycle 1h; green under 1 cycle, amber 1 to 2, red beyond.
+  priceSync: {
+    cycleSeconds: num('PRICE_SYNC_CYCLE_SECONDS', 3600),
+    freshnessAmberCycles: num('PRICE_SYNC_FRESHNESS_AMBER_CYCLES', 1),
+    freshnessRedCycles: num('PRICE_SYNC_FRESHNESS_RED_CYCLES', 2),
+    livenessAmberCycles: num('PRICE_SYNC_LIVENESS_AMBER_CYCLES', 1),
+    livenessRedCycles: num('PRICE_SYNC_LIVENESS_RED_CYCLES', 2),
+  },
+  // Unit 3: nav_job_queue. Verdict consumed from the middleware; this only labels
+  // the supporting stuck-job number (matches the existing 30-min tripwire).
+  jobQueue: {
+    stuckJobWarnSeconds: num('JOB_QUEUE_STUCK_JOB_WARN_SECONDS', 1800),
+  },
+  // Unit 3: shopify_webhook. Default expected-delivery window 1h; a removed
+  // subscription is amber-or-worse regardless of these bands.
+  shopifyWebhook: {
+    cycleSeconds: num('WEBHOOK_CYCLE_SECONDS', 3600),
+    freshnessAmberCycles: num('WEBHOOK_FRESHNESS_AMBER_CYCLES', 1),
+    freshnessRedCycles: num('WEBHOOK_FRESHNESS_RED_CYCLES', 4),
   },
 };
 

@@ -7,6 +7,9 @@ import type {
 import { fetchOrders, fetchPipelines } from './api';
 import { PipelineStrip } from './components/PipelineStrip';
 import { InventoryPanel } from './components/InventoryPanel';
+import { PriceSyncPanel } from './components/PriceSyncPanel';
+import { JobQueuePanel } from './components/JobQueuePanel';
+import { ShopifyWebhookPanel } from './components/ShopifyWebhookPanel';
 import { OrderTable } from './components/OrderTable';
 import { ChannelFilter } from './components/ChannelFilter';
 
@@ -47,6 +50,20 @@ export function App(): JSX.Element {
   // The inventory-sync pipe owns the reference expanded panel (Unit 1).
   const inventoryPipe = useMemo(
     () => pipelines.find((p) => p.pipe === 'inventory_sync') ?? null,
+    [pipelines],
+  );
+
+  // Unit 3 pipes: price-sync, NAV job queue, Shopify webhooks.
+  const priceSyncPipe = useMemo(
+    () => pipelines.find((p) => p.pipe === 'price_sync') ?? null,
+    [pipelines],
+  );
+  const jobQueuePipe = useMemo(
+    () => pipelines.find((p) => p.pipe === 'nav_job_queue') ?? null,
+    [pipelines],
+  );
+  const webhookPipe = useMemo(
+    () => pipelines.find((p) => p.pipe === 'shopify_webhook') ?? null,
     [pipelines],
   );
 
@@ -91,6 +108,27 @@ export function App(): JSX.Element {
           <span className="aux">reference monitor: freshness · liveness · push-outcome</span>
         </div>
         <InventoryPanel pipe={inventoryPipe} />
+
+        <div className="sec">
+          <h2>Price sync</h2>
+          <div className="rule" />
+          <span className="aux">Unit 3 monitor: received freshness · syncer liveness</span>
+        </div>
+        <PriceSyncPanel pipe={priceSyncPipe} />
+
+        <div className="sec">
+          <h2>NAV job queue</h2>
+          <div className="rule" />
+          <span className="aux">Unit 3 monitor: verdict consumed from middleware, not recomputed</span>
+        </div>
+        <JobQueuePanel pipe={jobQueuePipe} />
+
+        <div className="sec">
+          <h2>Shopify webhooks</h2>
+          <div className="rule" />
+          <span className="aux">Unit 3 monitor: last received per topic · subscription health</span>
+        </div>
+        <ShopifyWebhookPanel pipe={webhookPipe} />
 
         <div className="sec">
           <h2>Order health</h2>

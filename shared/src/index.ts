@@ -127,6 +127,52 @@ export interface InventorySyncDetail {
   divergence: InventoryDivergence;
 }
 
+// --- Unit 3 pipe detail bags (job-queue, price-sync, Shopify webhooks) -----
+// Each pipe carries its own typed detail bag inside PipelineHealth.detail. The
+// backend writes the shape; the panel casts detail to it. Snake_case matches
+// the JSONB column convention.
+
+// nav_job_queue: this pipe CONSUMES the middleware's already-computed job-queue
+// health verdict (design.md 6) and does NOT re-derive it. The detail carries the
+// middleware's supporting numbers (CU 50009 auto-release recency + stuck-job
+// tripwire) purely for context; adopted_verdict is the verdict as surfaced.
+export interface JobQueueDetail {
+  source: 'middleware:job-queue/health';
+  adopted_verdict: Verdict;               // the middleware verdict, surfaced unchanged
+  middleware_verdict_raw: string | null;  // the raw verdict string the endpoint returned
+  auto_release_fired_at: string | null;   // last CU 50009 auto-release firing
+  auto_release_age_s: number | null;      // wall-clock age of that firing
+  longest_running_job_s: number | null;   // age of the oldest running Job Queue Entry
+  stuck_job_count: number | null;         // jobs the middleware flags stuck (> its own threshold)
+  checked_at: string | null;              // when the middleware computed this health
+}
+
+// price_sync: freshness (last price-sync signal received) + liveness (last
+// price-sync run/loop), both cycle-banded like inventory-sync.
+export interface PriceSyncDetail {
+  last_received_at: string | null;    // last price-sync signal received (freshness)
+  last_received_age_s: number | null;
+  last_run_at: string | null;         // last price-sync run/loop completed (liveness)
+  last_run_age_s: number | null;
+}
+
+// shopify_webhook: last-received per topic plus the subscription-removal signal
+// (a removed/absent subscription is the WAF-removal failure mode, amber-or-worse).
+export interface WebhookTopicHealth {
+  topic: string;
+  last_received_at: string | null;
+  last_received_age_s: number | null;
+  subscribed: boolean;            // false = removed/absent subscription (amber-or-worse)
+  verdict: Verdict;               // per-topic freshness verdict (subscription folds into the pipe)
+}
+
+export interface ShopifyWebhookDetail {
+  topics: WebhookTopicHealth[];
+  missing_subscription_count: number; // topics with subscribed === false
+  freshest_received_at: string | null;
+  stalest_received_at: string | null;
+}
+
 export interface HealthTransition {
   subject_kind: 'pipe' | 'signal' | 'order';
   subject_key: string;

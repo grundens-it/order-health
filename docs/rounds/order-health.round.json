@@ -2,7 +2,7 @@
   "round": "order-health-observability",
   "repo": "grundens-it/order-health",
   "brief": "docs/kickoffs/order-health-observability.md",
-  "updated": "2026-07-06 (round build-complete: all 11 units 0-10 merged; only DevOps provisioning remains)",
+  "updated": "2026-07-06 (post-round: real read-only NAV client build, Entra auth, off DATA_SOURCES.md; data path corrected from NAV login to Azure SQL + Entra)",
   "umbrella_issue": 2,
   "kickoff_pr": 1,
   "stack": {
@@ -15,8 +15,8 @@
   },
   "gates": {
     "stack_signoff": "done",
-    "devops_provisioning": "pending: read-only NAV path + middleware endpoint base URL and auth, before the aggregator runs against real sources",
-    "ba_orphan_disambiguation": "open: blocks Unit 5 orphan grading only; ship table with orphan grading behind a flag",
+    "devops_provisioning": "clarified 2026-07-06 via docs/DATA_SOURCES.md: NAV is Azure SQL (sql-grus-prd-01, db sqldb-nav18-grus-prd-01), Entra auth (no passwords). Ask: grant the dashboard a read-only Entra identity (managed identity or service principal) with db_datareader. Local dev already works via az login. Middleware base URL (middleware.grundens.com, Cloudflare-fronted, dashboard.rs endpoints unauthenticated) still to confirm for reachability.",
+    "ba_orphan_disambiguation": "likely resolved, pending Mari: GRUS$Sales Header.WebOrder (tinyint) disambiguates (WebOrder=1 + empty WebId = orphan; WebOrder=0 = never orphan). Client wired to read WebOrder; ORDER_ORPHAN_GRADING_ENABLED stays off until Mari confirms, then it is a config flip.",
     "ba_nav_codeunit_schema": "open: blocks any unit reading it; ship additively without that source",
     "ux_signoff": "signed off on the Unit 1 reference panel (2026-07-06); panels replicate that template",
     "deploy_target": "decided 2026-07-06: ADR-0005 accepted Alternative B (cloud VM + owned monitored VPN); CD pipeline built (Unit 10). Fallback A if the VPN cannot be made reliable.",
@@ -26,7 +26,8 @@
     "F": "foundation, sequential, one context, must land first",
     "W": "fan-out wave, independent subagents, after Unit 0",
     "C": "convergence, sequential, after the wave",
-    "D": "delivery track (added 2026-07-06): local dev + CI now, deploy pipeline gated on target decision"
+    "D": "delivery track (added 2026-07-06): local dev + CI now, deploy pipeline gated on target decision",
+    "P": "provisioning realization (post-round): real read-only source clients against live systems, do not merge until validated"
   },
   "units": [
     { "unit": 0, "issue": 3, "phase": "F", "name": "Foundation scaffold", "status": "done", "pr": 12, "merged": true },
@@ -39,6 +40,7 @@
     { "unit": 7, "issue": 10, "phase": "C", "name": "Remediation runbook + health_transition wiring", "status": "done", "pr": 21, "merged": true },
     { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "done", "pr": 24, "merged": true, "note": "staleness sim, a11y shape-audit, dark-theme parity, visual-status script" },
     { "unit": 9, "issue": 19, "phase": "D", "name": "Local dev (Docker Compose) + CI workflow", "status": "done", "pr": 22, "merged": true, "note": "docker compose up, CI build/test on push+PR" },
-    { "unit": 10, "issue": 20, "phase": "D", "name": "ADR-0005 deploy target + CD pipeline", "status": "done", "pr": 25, "merged": true, "note": "ADR-0005 accepted Alternative B; CD workflow (GHCR + SSH to VM, gated by production environment) merged; inert until DevOps provisions VM+VPN+secrets" }
+    { "unit": 10, "issue": 20, "phase": "D", "name": "ADR-0005 deploy target + CD pipeline", "status": "done", "pr": 25, "merged": true, "note": "ADR-0005 accepted Alternative B; CD workflow (GHCR + SSH to VM, gated by production environment) merged; inert until DevOps provisions VM+VPN+secrets" },
+    { "unit": "1b", "issue": 28, "phase": "P", "name": "Real read-only NAV client (Entra auth) against live NAV", "status": "review", "pr": 29, "note": "provisioning realization of Unit 1 NAV reads per docs/DATA_SOURCES.md; Entra auth (az login local), GRUS$ prefixes, WebOrder read; strictly read-only, stub fallback; do NOT merge until validated by az login against sqldb-nav18-grus-prd-01" }
   ]
 }

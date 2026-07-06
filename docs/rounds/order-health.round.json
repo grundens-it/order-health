@@ -2,7 +2,7 @@
   "round": "order-health-observability",
   "repo": "grundens-it/order-health",
   "brief": "docs/kickoffs/order-health-observability.md",
-  "updated": "2026-07-06 (round complete: Units 0-9 merged, ADR-0005 accepted Option B, CD pending)",
+  "updated": "2026-07-06 (round build-complete: all 11 units 0-10 merged; only DevOps provisioning remains)",
   "umbrella_issue": 2,
   "kickoff_pr": 1,
   "stack": {
@@ -19,7 +19,8 @@
     "ba_orphan_disambiguation": "open: blocks Unit 5 orphan grading only; ship table with orphan grading behind a flag",
     "ba_nav_codeunit_schema": "open: blocks any unit reading it; ship additively without that source",
     "ux_signoff": "signed off on the Unit 1 reference panel (2026-07-06); panels replicate that template",
-    "deploy_target": "pending Steve decision: drives ADR-0005 and the CD pipeline (Unit 10). Local dev + CI (Unit 9) do not need it."
+    "deploy_target": "decided 2026-07-06: ADR-0005 accepted Alternative B (cloud VM + owned monitored VPN); CD pipeline built (Unit 10). Fallback A if the VPN cannot be made reliable.",
+    "remaining_after_round": "DevOps provisioning is the only open work: stand up the cloud VM, the owned VPN with line-of-sight to internal NAV + middleware, create the GitHub production environment with required reviewers, and set the DEPLOY_SSH_* + DATABASE_URL + MIDDLEWARE_* + NAV_* secrets. Then set AGGREGATOR_ENABLED=true to run against real sources. BA questions (orphan grading, NAV codeunit schema) remain open and are shipped additively."
   },
   "phases": {
     "F": "foundation, sequential, one context, must land first",
@@ -38,6 +39,6 @@
     { "unit": 7, "issue": 10, "phase": "C", "name": "Remediation runbook + health_transition wiring", "status": "done", "pr": 21, "merged": true },
     { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "done", "pr": 24, "merged": true, "note": "staleness sim, a11y shape-audit, dark-theme parity, visual-status script" },
     { "unit": 9, "issue": 19, "phase": "D", "name": "Local dev (Docker Compose) + CI workflow", "status": "done", "pr": 22, "merged": true, "note": "docker compose up, CI build/test on push+PR" },
-    { "unit": 10, "issue": 20, "phase": "D", "name": "ADR-0005 deploy target + CD pipeline", "status": "cd_build", "pr": 23, "note": "ADR-0005 accepted Alternative B (cloud VM + owned VPN); CD workflow building; concrete VM+VPN+secrets are DevOps provisioning" }
+    { "unit": 10, "issue": 20, "phase": "D", "name": "ADR-0005 deploy target + CD pipeline", "status": "done", "pr": 25, "merged": true, "note": "ADR-0005 accepted Alternative B; CD workflow (GHCR + SSH to VM, gated by production environment) merged; inert until DevOps provisions VM+VPN+secrets" }
   ]
 }

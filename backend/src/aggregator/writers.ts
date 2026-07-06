@@ -361,6 +361,8 @@ function buildOrderInput(row: NavOrderLifecycleRow): OrderInput {
     shopifyOrderName: row.shopifyOrderName,
     customerRef: row.customerRef,
     webId: row.webId,
+    // Carry [WebOrder] through so the orphan predicate can gate on it (DATA_SOURCES).
+    webOrder: row.webOrder,
     hops,
   };
 }

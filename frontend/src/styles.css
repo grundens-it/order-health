@@ -1,0 +1,69 @@
+/* Dark theme, palette lifted from demo/order-health-dashboard-demo.html so the
+   shell matches the interaction spec. Phase W units populate the panels. */
+:root {
+  --ink: #e7e9ec; --muted: #9aa2ad; --faint: #6c7480;
+  --line: #2a2f37; --line2: #22262d;
+  --bg: #0f1216; --card: #171b21; --band: #0b0e12; --band2: #232a33;
+  --orange: #f2751f; --orange-soft: #241408;
+  --green: #3ecb7f; --green-bg: #12271b; --green-bd: #204a32;
+  --amber: #e3a838; --amber-bg: #2a2110; --amber-bd: #4d3c18;
+  --red: #ef6a60; --red-bg: #2c1614; --red-bd: #5a2824;
+  --slate: #aab2bd; --slate-bg: #232a33;
+  --hover: #1c2128; --sunken: #12151a; --dash: #3a424c;
+  --radius: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+html { color-scheme: dark; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-size: 14px; line-height: 1.5; }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 20px 60px; }
+
+.band { background: var(--band); color: #fff; }
+.band-in { max-width: 1180px; margin: 0 auto; padding: 16px 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.logo { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .02em; }
+.logo .mark { width: 26px; height: 26px; border-radius: 6px; background: var(--orange); display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 15px; }
+.logo small { display: block; font-weight: 400; color: #aeb6c0; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+.band-spacer { flex: 1; }
+.asof { font-size: 12px; color: #c6cdd6; text-align: right; line-height: 1.35; }
+.asof b { color: #fff; font-weight: 600; }
+
+.demo-note { background: var(--orange-soft); border-bottom: 1px solid #3a2416; color: #f0a878; font-size: 12px; text-align: center; padding: 6px 12px; }
+.demo-note b { font-weight: 700; }
+
+.sec { margin: 22px 0 10px; display: flex; align-items: center; gap: 10px; }
+.sec h2 { font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; }
+.sec .rule { flex: 1; height: 1px; background: var(--line); }
+.sec .aux { font-size: 12px; color: var(--muted); }
+
+.pipes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.pipe { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 13px 14px; }
+.pipe .hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pipe .nm { font-weight: 700; font-size: 13.5px; }
+.pipe .placeholder { margin-top: 10px; font-size: 12px; color: var(--faint); }
+
+.controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 12px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--card); }
+.seg button { border: 0; background: transparent; padding: 7px 13px; font-size: 12.5px; font-weight: 600; color: var(--muted); cursor: pointer; }
+.seg button.on { background: var(--orange); color: #fff; }
+.controls .count { font-size: 12.5px; color: var(--muted); margin-left: auto; }
+
+.tblwrap { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+table { width: 100%; border-collapse: collapse; }
+thead th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--faint); font-weight: 700; text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--sunken); white-space: nowrap; }
+tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-align: middle; }
+.empty { padding: 28px 12px; text-align: center; color: var(--faint); font-size: 12.5px; }
+
+/* Verdict chip: encoded by SHAPE as well as color (accessibility, per design).
+   green = circle, amber = rounded square, red = rotated diamond. */
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 20px; border: 1px solid var(--slate-bg); background: var(--slate-bg); color: var(--slate); white-space: nowrap; }
+.chip .ic { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.chip.g { background: var(--green-bg); border-color: var(--green-bd); color: var(--green); }
+.chip.a { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
+.chip.r { background: var(--red-bg); border-color: var(--red-bd); color: var(--red); }
+.chip.g .ic { border-radius: 50%; }
+.chip.a .ic { border-radius: 2px; }
+.chip.r .ic { border-radius: 0; transform: rotate(45deg); }
+
+.badge { font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 5px; letter-spacing: .03em; }
+.badge.dtc { background: #17324e; color: #7fb3ff; }
+.badge.wholesale { background: #2a2140; color: #c2a6f0; }

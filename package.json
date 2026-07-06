@@ -1,0 +1,20 @@
+{
+  "name": "order-health",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Grundens Order Health Observability: standalone read-only service (monorepo root).",
+  "workspaces": [
+    "shared",
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspace shared && npm run typecheck --workspace backend && npm run typecheck --workspace frontend",
+    "build": "npm run build --workspace shared && npm run build --workspace backend && npm run build --workspace frontend",
+    "dev:backend": "npm run dev --workspace backend",
+    "dev:frontend": "npm run dev --workspace frontend"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

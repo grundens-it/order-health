@@ -10,7 +10,16 @@ Thumbs.db
 .env
 .env.*
 *.local
+# ...but the documented template is committed.
+!.env.example
 
 # Logs and temp
 *.log
 tmp/
+
+# Node / build output
+node_modules/
+dist/
+build/
+frontend/dist/
+*.tsbuildinfo

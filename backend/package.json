@@ -1,0 +1,28 @@
+{
+  "name": "@order-health/backend",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Order Health backend: read API off the snapshot plus the scheduled health aggregator.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@order-health/shared": "*",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.28.1",
+    "node-cron": "^3.0.3",
+    "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.4"
+  }
+}

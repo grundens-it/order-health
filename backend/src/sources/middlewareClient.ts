@@ -37,33 +37,55 @@ import type { MissedShipment } from '@order-health/shared';
 import { config } from '../config';
 
 // Composed from the inventory-sync analytics endpoint's last completed catalog
-// walk (design.md 5A.2 / 5A.3). NOTE: the dry-run "would push" PREVIEW is only
-// produced by POST /api/nav/inventory-sync/dry-run (async) + GET
-// /dry-run/:id — there is no read-only GET for the latest dry-run, so
-// dryRunWouldPush / dryRunAt stay null here (honest 'unknown'). totalPairs is the
-// real catalog pair count from the last walk. See issue #37.
+// walk (design.md 5A.2 / 5A.3). totalPairs is the real catalog pair count from
+// the last walk. dryRunAt here is the "as-of" of that pair universe (the last
+// walk's completion time); dryRunWouldPush is REBUILT in the aggregator from NAV
+// availability + the inventory-sync feed (see computeDryRunDivergence in
+// aggregator/inventorySync.ts) rather than left null — there is no read-only GET
+// for the POST-triggered dry-run preview, so we reconstruct its predicate
+// ourselves. See issue #37.
 export interface InventorySyncStatus {
-  dryRunWouldPush: number | null; // last dry-run "would push" count — NOT read-only (null)
-  dryRunAt: string | null;        // when that dry-run ran — NOT read-only (null)
+  dryRunWouldPush: number | null; // (rebuilt downstream from NAV avail vs last-synced qty)
+  dryRunAt: string | null;        // as-of of the pair universe (last-walk completion)
   totalPairs: number | null;      // denominator (the 12,218) from analytics.cron.last_walk
 }
 
+// One row of GET /api/nav/inventory-sync/recent (the middleware's InventorySyncRow:
+// { sku, location_code, nav_quantity, shopify_previous_quantity, shopify_set_quantity,
+//   synced_at, error, reversed_at, ... }, synced_at DESC). We keep only what the
+// dry-run reconstruction needs: the last quantity the sync WROTE to Shopify per
+// (sku, location), which — because our fulfillment-service location is written
+// ONLY by this sync — is a faithful read-only proxy for Shopify's current set
+// quantity for that pair.
+export interface InventorySyncFeedRow {
+  sku: string | null;
+  location: string | null;           // NAV location_code
+  shopifySetQuantity: number | null; // shopify_set_quantity (what was pushed)
+  syncedAt: string | null;
+  reversed: boolean;                 // reversal rows don't reflect a live push
+  hasError: boolean;                 // errored rows never actually set Shopify
+}
+
 // Composed from GET /api/warehouse/rollout/audit (the warehouse_allocation_log
-// recent page) plus GET /api/oos-held. Read-only: these are the middleware's
-// SQLite allocation log + OOS-held backlog surfaced over existing GET endpoints;
-// we never write them. Several counts are NOT obtainable read-only (see issue
-// #37) and stay null: failedCount (the log has no failed/error outcome column),
-// atpFallbackCount (no distinct fallback reason code exposed) and
-// serviceHeartbeatAt (no allocator loop heartbeat endpoint).
+// recent page) + GET /api/oos-held + GET /api/errors. Read-only: these are the
+// middleware's SQLite allocation log + OOS-held backlog + error feed surfaced over
+// existing GET endpoints; we never write them. The four fields a prior pass left
+// null are now REBUILT read-only (issue #37):
+//   * serviceHeartbeatAt — liveness proxy: recency of the newest allocation
+//     decision (decided_at). If the allocator is emitting rows, it is alive.
+//   * failedCount — count of allocation-attributable rows in the error feed
+//     (the orders/updated webhook is the allocator's entry point).
+//   * atpFallbackCount — allocation-log rows whose `reason` is an inventory-aware
+//     (ATP) fallback: `single_location` or `out_of_stock` (allocator Rule 4).
 export interface AllocatorStatus {
   lastDecisionAt: string | null;      // recency of the newest split decision
-  serviceHeartbeatAt: string | null;  // allocator loop heartbeat — NOT exposed (null)
+  serviceHeartbeatAt: string | null;  // allocator loop heartbeat proxy (== lastDecisionAt)
   windowSeconds: number | null;       // wall-clock span the returned sample covers
   decisionsWindow: number | null;     // decisions in the returned audit sample
   splitCount: number | null;          // multi-warehouse splits in that sample
   unallocatableCount: number | null;  // OOS-held backlog (order-level) from /api/oos-held
-  failedCount: number | null;         // errored decisions — NOT exposed (null)
-  atpFallbackCount: number | null;    // inventory-aware fallbacks — NOT exposed (null)
+  failedCount: number | null;         // allocation-attributable errors in /api/errors
+  atpFallbackCount: number | null;    // Rule-4 inventory-aware (ATP) fallbacks in the log
   recentDecisions: AllocationDecision[]; // most-recent-first
 }
 
@@ -103,12 +125,13 @@ export interface ShopifyWebhookStatus {
 
 // Unit 2 (back-sync). Composed from GET /api/nav/back-sync/feed. The watermark
 // (lastBackSyncAt) is the newest feed row that carries a shopify_fulfillment_id;
-// the 24h counters are derived from the returned feed window. The back-sync
-// WATCHER heartbeat is not exposed read-only, so watcherHeartbeatAt stays null
-// (see issue #37).
+// the 24h counters are derived from the returned feed window. There is no
+// dedicated watcher-heartbeat endpoint, so watcherHeartbeatAt is REBUILT as a
+// liveness proxy: the recency of the newest back-sync row (recorded_at) of ANY
+// kind. If the watcher is writing rows, it is alive (issue #37).
 export interface BackSyncStatus {
   lastBackSyncAt: string | null;      // watermark: newest row with a shopify_fulfillment_id
-  watcherHeartbeatAt: string | null;  // back-sync watcher last loop — NOT exposed (null)
+  watcherHeartbeatAt: string | null;  // liveness proxy: newest recorded_at of any feed row
   fulfillmentsLast24h: number | null; // feed rows w/ fulfillment_id recorded in last 24h
   errorsLast24h: number | null;       // feed rows w/ error recorded in last 24h
 }
@@ -127,7 +150,10 @@ export interface MiddlewareClient {
   getPendingFulfillment(): Promise<Record<string, unknown>[]>;
   // Composed from GET /api/nav/inventory-sync/analytics (last-walk pair count).
   getInventorySyncStatus(): Promise<InventorySyncStatus>;
-  // Composed from GET /api/warehouse/rollout/audit + GET /api/oos-held.
+  // GET /api/nav/inventory-sync/recent — the last-synced quantity per (sku,
+  // location). Feeds the inventory dry-run reconstruction (divergence vs NAV).
+  getInventorySyncFeed(): Promise<InventorySyncFeedRow[]>;
+  // Composed from GET /api/warehouse/rollout/audit + /api/oos-held + /api/errors.
   getAllocatorStatus(): Promise<AllocatorStatus>;
   // --- Unit 3 read-only endpoints ---
   // GET /api/nav/job-queue/health: the already-computed verdict we adopt.
@@ -165,6 +191,7 @@ export const MIDDLEWARE_PATHS = {
   // originally assumed do NOT exist; each tile is composed from these).
   backSyncFeed: '/api/nav/back-sync/feed',
   inventorySyncAnalytics: '/api/nav/inventory-sync/analytics',
+  inventorySyncRecent: '/api/nav/inventory-sync/recent',
   priceSyncRecent: '/api/nav/price-sync/recent',
   priceSyncSettings: '/api/nav/price-sync/settings',
   webhookSubscriptions: '/api/shopify/webhooks/subscriptions',
@@ -311,21 +338,48 @@ function newestTimestamp(rows: Row[], ...keys: string[]): string | null {
 // GET /api/nav/inventory-sync/analytics -> InventorySyncStatus. The analytics
 // body flattens InventorySyncAnalytics and adds a `cron` object whose `last_walk`
 // is the last completed catalog walk's progress JSON
-// ({ total_pairs, pushed, completed_at, ... }). That walk is the only READ-ONLY
-// surface for the pair count. The dry-run "would push" preview is POST-triggered
-// with no read-only GET, so dryRunWouldPush / dryRunAt stay null unless a body
-// explicitly carries them (kept for forward-compat / defensiveness).
+// ({ total_pairs, pushed, completed_at, ... }). That walk is the READ-ONLY surface
+// for the pair count and for the "as-of" of the pair universe. dryRunWouldPush is
+// NOT set here — it is rebuilt downstream from NAV availability vs the last-synced
+// feed (computeDryRunDivergence); we only carry an explicit body value if one is
+// present (forward-compat). dryRunAt is the last-walk completion time (the pair
+// universe's as-of), used as the fallback timestamp for the rebuilt divergence.
 export function mapInventorySyncStatus(body: unknown): InventorySyncStatus {
   const r = asRecord(body);
   const cron = asRecord(pick(r, 'cron'));
   const lastWalk = asRecord(pick(cron, 'last_walk', 'lastWalk'));
   return {
     dryRunWouldPush: toNum(pick(r, 'dryRunWouldPush', 'dry_run_would_push', 'wouldPush', 'would_push')),
-    dryRunAt: toIso(pick(r, 'dryRunAt', 'dry_run_at', 'dryRunRanAt', 'ranAt')),
+    dryRunAt:
+      toIso(pick(r, 'dryRunAt', 'dry_run_at', 'dryRunRanAt', 'ranAt')) ??
+      toIso(pick(lastWalk, 'completed_at', 'completedAt')) ??
+      toIso(pick(cron, 'last_run_at', 'lastRunAt')),
     totalPairs:
       toNum(pick(lastWalk, 'total_pairs', 'totalPairs')) ??
       toNum(pick(r, 'totalPairs', 'total_pairs', 'pairs')),
   };
+}
+
+// One GET /api/nav/inventory-sync/recent row -> InventorySyncFeedRow. The wire
+// row is the middleware's InventorySyncRow. We keep the pair key + the quantity it
+// pushed to Shopify, and flag reversal / error rows so the reconstruction can skip
+// pushes that never took effect.
+export function mapInventorySyncFeedRow(row: Row): InventorySyncFeedRow {
+  return {
+    sku: toStr(pick(row, 'sku')),
+    location: toStr(pick(row, 'location_code', 'location', 'locationCode')),
+    shopifySetQuantity: toNum(pick(row, 'shopify_set_quantity', 'shopifySetQuantity')),
+    syncedAt: toIso(pick(row, 'synced_at', 'syncedAt')),
+    reversed: pick(row, 'reversed_at', 'reversedAt') !== null,
+    hasError: pick(row, 'error') !== null,
+  };
+}
+
+// GET /api/nav/inventory-sync/recent -> InventorySyncFeedRow[]. Body is
+// { days, page, page_size, total, rows: InventorySyncRow[] } (synced_at DESC);
+// asRecordArray unwraps `rows`.
+export function mapInventorySyncFeed(body: unknown): InventorySyncFeedRow[] {
+  return asRecordArray(body).map(mapInventorySyncFeedRow);
 }
 
 function mapChannel(v: unknown): Channel | null {
@@ -368,17 +422,76 @@ export function mapAllocationDecision(row: Row): AllocationDecision {
   };
 }
 
-// GET /api/warehouse/rollout/audit + GET /api/oos-held -> AllocatorStatus.
+// The allocation-log `reason` codes (allocator.rs AllocationReason::as_str) that
+// represent an inventory-aware (available-to-promise) FALLBACK — i.e. the routing
+// was forced by stock availability, not by the rollout throttle / order-level
+// preference. These are the allocator's Rule 4 outcomes (allocator.rs doc: "if
+// stock at the chosen warehouse is insufficient, try the other; if neither has
+// stock, the line is marked OutOfStock"):
+//   * single_location — only one of OLD/NEW had stock; the line fell back to it.
+//   * out_of_stock    — neither had stock; the fallback found nothing (hard fail).
+// `stock_asymmetry` is deliberately EXCLUDED: it is Rule 1, a proactive stock-ratio
+// guardrail (a >=5x override), not a fallback triggered by insufficient ATP.
+export const ATP_FALLBACK_REASONS: ReadonlySet<string> = new Set(['single_location', 'out_of_stock']);
+
+// Count allocation-log rows whose reason is an inventory-aware ATP fallback.
+export function countAtpFallbacks(rows: Row[]): number {
+  let n = 0;
+  for (const row of rows) {
+    const reason = toStr(pick(row, 'reason', 'rule'));
+    if (reason !== null && ATP_FALLBACK_REASONS.has(reason)) n += 1;
+  }
+  return n;
+}
+
+// Is this /api/errors row attributable to the allocator? The allocator has no
+// route_hint of its own in the error feed; it runs inside the `orders/updated`
+// webhook (webhook_handlers/orders_updated.rs), and its failures surface as
+// shopify_event_log rows (event_type `webhook_orders_updated` — kind:"event") or
+// shopify_webhook_event rows for the orders topics (kind:"webhook"). We therefore
+// classify a row as allocation-related when its route_hint names the allocator OR
+// its kind/summary ties it to the orders webhook / allocation path. This is a
+// faithful reconstruction of "failed allocation decisions": these are exactly the
+// error rows the allocator's own entry point produced.
+export function isAllocationErrorRow(row: Row): boolean {
+  const hint = (toStr(pick(row, 'route_hint', 'routeHint')) ?? '').toLowerCase();
+  if (/allocat|warehouse|split/.test(hint)) return true;
+  const kind = (toStr(pick(row, 'kind')) ?? '').toLowerCase();
+  const summary = (toStr(pick(row, 'summary', 'event_type', 'eventType')) ?? '').toLowerCase();
+  if (kind === 'event' || kind === 'webhook') {
+    return /orders[_/](updated|create)|allocat|warehouse|split|staging/.test(summary);
+  }
+  return false;
+}
+
+// Count of failed/errored allocation decisions from the error feed. /api/errors
+// is already an errors-only view, so every allocation-attributable row is a
+// failure. A parsed (even empty) errors body is a real count; `undefined`
+// (endpoint not queried) leaves failedCount null so it reads 'unknown'.
+export function deriveAllocatorFailedCount(errorsBody: unknown): number | null {
+  if (errorsBody === undefined) return null;
+  return asRecordArray(errorsBody).filter(isAllocationErrorRow).length;
+}
+
+// GET /api/warehouse/rollout/audit + GET /api/oos-held + GET /api/errors ->
+// AllocatorStatus.
 //   * audit body: { rows: WarehouseAllocationRow[] (decided_at DESC), total }
 //   * oos-held body: OosHeldOrderRow[] (bare array)
+//   * errors body: { rows: ActivityItem[], ... } (errors-only feed)
 // The audit page is treated as the sample window: windowSeconds is the wall-clock
 // span between the oldest and newest decided_at in the page, decisionsWindow is
 // the row count, and splitCount is the number of orders whose lines span >1
-// warehouse in the page. unallocatableCount is the current OOS-held backlog.
-// failedCount / atpFallbackCount / serviceHeartbeatAt are NOT obtainable
-// read-only (no failed/error outcome column, no distinct atp-fallback reason
-// code, no allocator heartbeat endpoint) and stay null. See issue #37.
-export function mapAllocatorStatus(auditBody: unknown, oosHeldBody: unknown): AllocatorStatus {
+// warehouse in the page. unallocatableCount is the current OOS-held backlog. The
+// four fields a prior pass left null are rebuilt read-only:
+//   * serviceHeartbeatAt = newest decided_at (liveness proxy — the allocator is
+//     alive iff it is still emitting decisions).
+//   * atpFallbackCount = allocation-log rows with an ATP-fallback reason.
+//   * failedCount = allocation-attributable rows in the error feed.
+export function mapAllocatorStatus(
+  auditBody: unknown,
+  oosHeldBody: unknown,
+  errorsBody?: unknown,
+): AllocatorStatus {
   const rows = asRecordArray(auditBody);
   const decisions = rows.map(mapAllocationDecision);
 
@@ -421,13 +534,17 @@ export function mapAllocatorStatus(auditBody: unknown, oosHeldBody: unknown): Al
   const hasRows = rows.length > 0;
   return {
     lastDecisionAt: newest,
-    serviceHeartbeatAt: null,
+    // Liveness proxy: the allocator has no heartbeat endpoint, so the recency of
+    // its newest decision IS its heartbeat — a subsystem emitting rows is alive.
+    serviceHeartbeatAt: newest,
     windowSeconds,
     decisionsWindow: hasRows ? rows.length : null,
     splitCount: hasRows ? splitCount : null,
     unallocatableCount,
-    failedCount: null,
-    atpFallbackCount: null,
+    failedCount: deriveAllocatorFailedCount(errorsBody),
+    // Only a real count when the audit page carried rows; an empty page is
+    // 'unknown' (no sample to classify), not a false zero.
+    atpFallbackCount: hasRows ? countAtpFallbacks(rows) : null,
     recentDecisions: decisions,
   };
 }
@@ -533,12 +650,16 @@ export function mapShopifyWebhookStatus(subscriptionsBody: unknown, eventsBody: 
 // each carries shopify_fulfillment_id (null = not yet back-synced) and an
 // optional error. The watermark is the newest row WITH a fulfillment_id; the 24h
 // counters are computed over the returned window (bounded by MIDDLEWARE_FEED_LIMIT).
-// The watcher heartbeat is not exposed read-only, so watcherHeartbeatAt is null.
+// There is no watcher-heartbeat endpoint, so watcherHeartbeatAt is REBUILT as a
+// liveness proxy: the newest recorded_at of ANY row (fulfilled, pending, or
+// errored). The watcher writes a feed row every tick it processes a shipment, so
+// "newest row age" is a faithful stand-in for "watcher last alive".
 export function mapBackSyncStatus(body: unknown, now: number = Date.now()): BackSyncStatus {
   const rows = asRecordArray(body);
   const cutoff = now - 24 * 3600 * 1000;
 
   let lastBackSyncAt: string | null = null;
+  let watcherHeartbeatAt: string | null = null;
   let fulfillmentsLast24h = 0;
   let errorsLast24h = 0;
   for (const row of rows) {
@@ -549,6 +670,10 @@ export function mapBackSyncStatus(body: unknown, now: number = Date.now()): Back
     if (hasFulfillment && recordedAt !== null && (lastBackSyncAt === null || recordedAt > lastBackSyncAt)) {
       lastBackSyncAt = recordedAt;
     }
+    // Liveness: any row the watcher produced counts, regardless of outcome.
+    if (recordedAt !== null && (watcherHeartbeatAt === null || recordedAt > watcherHeartbeatAt)) {
+      watcherHeartbeatAt = recordedAt;
+    }
     const ts = recordedAt !== null ? Date.parse(recordedAt) : NaN;
     if (!Number.isNaN(ts) && ts >= cutoff) {
       if (hasFulfillment) fulfillmentsLast24h += 1;
@@ -557,7 +682,7 @@ export function mapBackSyncStatus(body: unknown, now: number = Date.now()): Back
   }
   return {
     lastBackSyncAt,
-    watcherHeartbeatAt: null,
+    watcherHeartbeatAt,
     fulfillmentsLast24h,
     errorsLast24h,
   };
@@ -625,6 +750,10 @@ export class MiddlewareClientStub implements MiddlewareClient {
   async getInventorySyncStatus(): Promise<InventorySyncStatus> {
     this.note(MIDDLEWARE_PATHS.inventorySyncAnalytics);
     return { dryRunWouldPush: null, dryRunAt: null, totalPairs: null };
+  }
+  async getInventorySyncFeed(): Promise<InventorySyncFeedRow[]> {
+    this.note(MIDDLEWARE_PATHS.inventorySyncRecent);
+    return [];
   }
   async getAllocatorStatus(): Promise<AllocatorStatus> {
     this.note(MIDDLEWARE_PATHS.allocatorAudit);
@@ -789,15 +918,26 @@ class MiddlewareClientLive implements MiddlewareClient {
     }
   }
 
+  async getInventorySyncFeed(): Promise<InventorySyncFeedRow[]> {
+    try {
+      return mapInventorySyncFeed(
+        await this.getJson(buildPath(MIDDLEWARE_PATHS.inventorySyncRecent, { page_size: 200 })),
+      );
+    } catch (err) {
+      return this.degrade('inventory-sync recent feed', err, this.stub.getInventorySyncFeed());
+    }
+  }
+
   async getAllocatorStatus(): Promise<AllocatorStatus> {
     try {
-      const [audit, oosHeld] = await Promise.all([
+      const [audit, oosHeld, errors] = await Promise.all([
         this.getJson(buildPath(MIDDLEWARE_PATHS.allocatorAudit, { limit: MIDDLEWARE_FEED_LIMIT })),
         this.getJson(buildPath(MIDDLEWARE_PATHS.oosHeld, { limit: MIDDLEWARE_FEED_LIMIT })),
+        this.getJson(MIDDLEWARE_PATHS.errors),
       ]);
-      return mapAllocatorStatus(audit, oosHeld);
+      return mapAllocatorStatus(audit, oosHeld, errors);
     } catch (err) {
-      return this.degrade('allocator status (audit + oos-held)', err, this.stub.getAllocatorStatus());
+      return this.degrade('allocator status (audit + oos-held + errors)', err, this.stub.getAllocatorStatus());
     }
   }
 

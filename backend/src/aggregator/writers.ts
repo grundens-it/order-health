@@ -12,7 +12,11 @@ import { config } from '../config';
 import { getPool } from '../db/pool';
 import type { MiddlewareClient } from '../sources/middlewareClient';
 import type { NavClient, NavOrderLifecycleRow } from '../sources/navClient';
-import { computeInventorySync, type InventorySyncInput } from './inventorySync';
+import {
+  computeDryRunDivergence,
+  computeInventorySync,
+  type InventorySyncInput,
+} from './inventorySync';
 import {
   CHANNEL_STAGES,
   computeOrderRows,
@@ -60,11 +64,18 @@ export async function computeInventorySyncPipeline(sources: Sources): Promise<Pi
   // READ-ONLY source reads (currently stubbed: they return typed nulls/empties
   // until DevOps provisions NAV + the middleware endpoint). No live calls, no
   // writes anywhere upstream.
-  const [state, walks, status] = await Promise.all([
+  const [state, walks, status, feed, navAvailability] = await Promise.all([
     sources.nav.getInventoryWatermarkState(),
     sources.nav.getRecentInventoryWalks(8),
     sources.middleware.getInventorySyncStatus(),
+    sources.middleware.getInventorySyncFeed(),
+    sources.nav.getInventoryAvailability(),
   ]);
+
+  // REBUILD the dry-run "would push" count read-only: current NAV availability vs
+  // the quantity last pushed to Shopify per (sku, location). Falls back to the
+  // middleware's own dry-run body / null when the sources are absent (issue #37).
+  const divergence = computeDryRunDivergence(navAvailability, feed, status.dryRunAt);
 
   const input: InventorySyncInput = {
     navNewestIabcEntryNo: state.navNewestIabcEntryNo,
@@ -72,8 +83,8 @@ export async function computeInventorySyncPipeline(sources: Sources): Promise<Pi
     lastWalkAt: state.lastWalkAt,
     watcherHeartbeatAt: state.watcherHeartbeatAt,
     walks,
-    dryRunWouldPush: status.dryRunWouldPush,
-    dryRunAt: status.dryRunAt,
+    dryRunWouldPush: divergence.dryRunWouldPush ?? status.dryRunWouldPush,
+    dryRunAt: divergence.dryRunAt ?? status.dryRunAt,
     totalPairs: status.totalPairs,
   };
 

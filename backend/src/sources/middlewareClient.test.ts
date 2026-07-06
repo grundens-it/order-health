@@ -21,7 +21,11 @@ import {
   mapAllocationDecision,
   mapAllocatorStatus,
   mapBackSyncStatus,
+  mapInventorySyncFeed,
   mapInventorySyncStatus,
+  countAtpFallbacks,
+  isAllocationErrorRow,
+  deriveAllocatorFailedCount,
   mapJobQueueHealthStatus,
   mapMissedShipments,
   mapPriceSyncStatus,
@@ -92,9 +96,19 @@ test('mapInventorySyncStatus reads totalPairs from analytics.cron.last_walk', ()
     },
   });
   assert.equal(r.totalPairs, 12218);
-  // The dry-run "would push" preview is POST-triggered — not obtainable read-only.
+  // dryRunWouldPush is rebuilt downstream (NAV avail vs feed), not from analytics.
   assert.equal(r.dryRunWouldPush, null);
-  assert.equal(r.dryRunAt, null);
+  // dryRunAt now carries the pair universe's as-of: the last walk's completion.
+  assert.equal(r.dryRunAt, '2026-07-05T12:00:00.000Z');
+});
+
+test('mapInventorySyncStatus falls back to cron.last_run_at when the walk has no completed_at', () => {
+  const r = mapInventorySyncStatus({
+    total: 100,
+    cron: { last_run_at: '2026-07-05T11:30:00Z', last_walk: { running: true, total_pairs: 12218 } },
+  });
+  assert.equal(r.dryRunAt, '2026-07-05T11:30:00.000Z');
+  assert.equal(r.totalPairs, 12218);
 });
 
 test('mapInventorySyncStatus still honours an explicit dry-run body and yields typed nulls when absent', () => {
@@ -103,6 +117,56 @@ test('mapInventorySyncStatus still honours an explicit dry-run body and yields t
   assert.equal(r.dryRunAt, '2026-07-05T12:00:00.000Z');
   assert.equal(r.totalPairs, 12218);
   assert.deepEqual(mapInventorySyncStatus({}), { dryRunWouldPush: null, dryRunAt: null, totalPairs: null });
+});
+
+// --- GET /api/nav/inventory-sync/recent (dry-run reconstruction feed) --------
+test('mapInventorySyncFeed keeps the pair key + last-set quantity and flags reversal/error rows', () => {
+  const rows = mapInventorySyncFeed({
+    days: 15,
+    total: 3,
+    rows: [
+      { id: 3, sku: 'GND-1', location_code: 'HF1FTZ', shopify_set_quantity: 12, synced_at: '2026-07-05T11:00:00Z', error: null, reversed_at: null },
+      { id: 2, sku: 'GND-2', location_code: 'TAC', shopify_set_quantity: 4, synced_at: '2026-07-05T10:00:00Z', error: 'idempotency', reversed_at: null },
+      { id: 1, sku: 'GND-3', location_code: 'TAC', shopify_set_quantity: 7, synced_at: '2026-07-05T09:00:00Z', error: null, reversed_at: '2026-07-05T09:30:00Z' },
+    ],
+  });
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows[0], { sku: 'GND-1', location: 'HF1FTZ', shopifySetQuantity: 12, syncedAt: '2026-07-05T11:00:00.000Z', reversed: false, hasError: false });
+  assert.equal(rows[1].hasError, true);
+  assert.equal(rows[2].reversed, true);
+  assert.deepEqual(mapInventorySyncFeed({ rows: [] }), []);
+});
+
+// --- Allocator ATP-fallback + error classifiers -----------------------------
+test('countAtpFallbacks counts single_location + out_of_stock and excludes stock_asymmetry', () => {
+  assert.equal(
+    countAtpFallbacks([
+      { reason: 'single_location' },
+      { reason: 'out_of_stock' },
+      { reason: 'stock_asymmetry' }, // Rule 1 guardrail, not a fallback
+      { reason: 'rolled' },
+      { reason: 'order_level_pref' },
+    ]),
+    2,
+  );
+  assert.equal(countAtpFallbacks([]), 0);
+});
+
+test('isAllocationErrorRow attributes only orders-webhook / allocator rows', () => {
+  assert.equal(isAllocationErrorRow({ kind: 'event', summary: 'webhook_orders_updated: boom' }), true);
+  assert.equal(isAllocationErrorRow({ kind: 'webhook', summary: 'Webhook: orders/create · failed' }), true);
+  assert.equal(isAllocationErrorRow({ route_hint: 'warehouse-split', kind: 'event', summary: 'x' }), true);
+  assert.equal(isAllocationErrorRow({ kind: 'inventory_push', summary: 'Inventory: X → 5' }), false);
+  assert.equal(isAllocationErrorRow({ kind: 'event', summary: 'oauth_callback: ok' }), false);
+});
+
+test('deriveAllocatorFailedCount returns null only when the errors body is absent', () => {
+  assert.equal(deriveAllocatorFailedCount(undefined), null);
+  assert.equal(deriveAllocatorFailedCount({ rows: [] }), 0);
+  assert.equal(
+    deriveAllocatorFailedCount({ rows: [{ kind: 'event', summary: 'webhook_orders_updated: fail' }] }),
+    1,
+  );
 });
 
 // --- GET /api/warehouse/rollout/audit + /api/oos-held -----------------------
@@ -153,18 +217,53 @@ test('mapAllocatorStatus composes split sample + window from the audit page and 
   assert.equal(r.windowSeconds, 300); // 10:05:00 - 10:00:00
   assert.equal(r.unallocatableCount, 2); // OOS-held backlog
   assert.equal(r.recentDecisions.length, 3);
-  // Not obtainable read-only -> honest nulls.
+  // Liveness proxy = recency of the newest decision (no heartbeat endpoint).
+  assert.equal(r.serviceHeartbeatAt, '2026-07-05T10:05:00.000Z');
+  // No rows carry an ATP-fallback reason (rolled / order_level_pref) -> real 0.
+  assert.equal(r.atpFallbackCount, 0);
+  // No errors body was passed -> failedCount is 'unknown' (null), not a false 0.
   assert.equal(r.failedCount, null);
-  assert.equal(r.atpFallbackCount, null);
-  assert.equal(r.serviceHeartbeatAt, null);
+});
+
+test('mapAllocatorStatus counts ATP-fallback reasons (single_location + out_of_stock) from the audit page', () => {
+  const audit = {
+    rows: [
+      { order_id: 1, line_item_id: 10, warehouse_assigned: 'NEW', reason: 'single_location', decided_at: '2026-07-05T10:05:00Z' },
+      { order_id: 2, line_item_id: 20, warehouse_assigned: 'OLD', reason: 'out_of_stock', decided_at: '2026-07-05T10:04:00Z' },
+      { order_id: 3, line_item_id: 30, warehouse_assigned: 'NEW', reason: 'stock_asymmetry', decided_at: '2026-07-05T10:03:00Z' }, // guardrail, NOT a fallback
+      { order_id: 4, line_item_id: 40, warehouse_assigned: 'OLD', reason: 'order_level_pref', decided_at: '2026-07-05T10:02:00Z' },
+    ],
+  };
+  assert.equal(mapAllocatorStatus(audit, []).atpFallbackCount, 2); // single_location + out_of_stock only
+});
+
+test('mapAllocatorStatus derives failedCount from allocation-attributable /api/errors rows', () => {
+  const audit = { rows: [{ order_id: 1, line_item_id: 10, warehouse_assigned: 'NEW', reason: 'rolled', decided_at: '2026-07-05T10:05:00Z' }] };
+  const errors = {
+    days: 15,
+    total: 4,
+    rows: [
+      // allocation-attributable: orders/updated webhook is the allocator's entry point
+      { kind: 'event', summary: 'webhook_orders_updated: staging write failed', status: 'error', route_hint: null },
+      { kind: 'webhook', summary: 'Webhook: orders/updated · failed', status: 'error', route_hint: 'webhooks' },
+      // NOT allocation-related
+      { kind: 'inventory_push', summary: 'Inventory: X @ HF1FTZ → 5', status: 'error', route_hint: 'inventory-sync' },
+      { kind: 'price_push', summary: 'Price: Y → 9.99', status: 'error', route_hint: 'price-sync' },
+    ],
+  };
+  assert.equal(mapAllocatorStatus(audit, [], errors).failedCount, 2);
+  // A parsed-but-empty errors feed is a real zero (green), not unknown.
+  assert.equal(mapAllocatorStatus(audit, [], { rows: [] }).failedCount, 0);
 });
 
 test('mapAllocatorStatus returns honest nulls when the audit page is empty and oos-held not an array', () => {
   const r = mapAllocatorStatus({ rows: [] }, {});
   assert.deepEqual(r.recentDecisions, []);
   assert.equal(r.lastDecisionAt, null);
+  assert.equal(r.serviceHeartbeatAt, null); // no decisions -> no liveness proxy
   assert.equal(r.decisionsWindow, null);
   assert.equal(r.splitCount, null);
+  assert.equal(r.atpFallbackCount, null); // empty audit page -> unknown, not a false zero
   assert.equal(r.unallocatableCount, null); // non-array oos body -> unknown, not a false zero
 });
 
@@ -267,7 +366,24 @@ test('mapBackSyncStatus derives watermark + 24h counters from the feed rows', ()
   assert.equal(r.lastBackSyncAt, '2026-07-05T11:00:00.000Z');
   assert.equal(r.fulfillmentsLast24h, 1);
   assert.equal(r.errorsLast24h, 1);
-  assert.equal(r.watcherHeartbeatAt, null); // not exposed read-only
+  // Liveness proxy: newest recorded_at of ANY row (the errored SH-2 has no
+  // fulfillment id but is still newer than the fulfilled SH-3? no — SH-3 is
+  // newest overall, so the watcher heartbeat is SH-3's time).
+  assert.equal(r.watcherHeartbeatAt, '2026-07-05T11:00:00.000Z');
+});
+
+test('mapBackSyncStatus watcher heartbeat tracks the newest row even when it is an errored (unfulfilled) row', () => {
+  const now = Date.parse('2026-07-05T12:00:00Z');
+  const feed = {
+    rows: [
+      // newest row is an ERROR row with no fulfillment id -> still proves liveness
+      { nav_shipment_no: 'SH-9', recorded_at: '2026-07-05T11:45:00Z', shopify_fulfillment_id: null, error: 'timeout' },
+      { nav_shipment_no: 'SH-8', recorded_at: '2026-07-05T11:00:00Z', shopify_fulfillment_id: 908, error: null },
+    ],
+  };
+  const r = mapBackSyncStatus(feed, now);
+  assert.equal(r.watcherHeartbeatAt, '2026-07-05T11:45:00.000Z'); // newest of ANY row
+  assert.equal(r.lastBackSyncAt, '2026-07-05T11:00:00.000Z'); // watermark: newest WITH fulfillment id
 });
 
 // --- GET /api/back-sync/missed-shipments ------------------------------------
@@ -333,6 +449,7 @@ test('the stub returns typed empty shapes for every method, and null missed deta
   assert.equal(await stub.getMissedShipmentDetail(), null);
   assert.deepEqual(await stub.getShopifyWebhookStatus(), { topics: [] });
   assert.deepEqual(await stub.getErrors(), []);
+  assert.deepEqual(await stub.getInventorySyncFeed(), []);
 });
 
 // --- Path table sanity (the real GET routes this consumer calls) ------------
@@ -347,6 +464,7 @@ test('MIDDLEWARE_PATHS lists the reconciled real middleware GET routes', () => {
   // Issue #37 — compose sources.
   assert.equal(MIDDLEWARE_PATHS.backSyncFeed, '/api/nav/back-sync/feed');
   assert.equal(MIDDLEWARE_PATHS.inventorySyncAnalytics, '/api/nav/inventory-sync/analytics');
+  assert.equal(MIDDLEWARE_PATHS.inventorySyncRecent, '/api/nav/inventory-sync/recent');
   assert.equal(MIDDLEWARE_PATHS.priceSyncRecent, '/api/nav/price-sync/recent');
   assert.equal(MIDDLEWARE_PATHS.webhookSubscriptions, '/api/shopify/webhooks/subscriptions');
   assert.equal(MIDDLEWARE_PATHS.webhookEvents, '/api/shopify/webhooks/events');

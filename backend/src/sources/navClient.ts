@@ -42,6 +42,18 @@ export interface NavOrderLifecycleRow {
   missedBackSync: boolean;         // DTC only: NAV shipment exists, no fulfillment id => RED (design.md 5)
 }
 
+// Unit 3b (inventory dry-run reconstruction). Current NAV available-to-promise
+// for one (sku, NAV location code) pair. This is the SAME number the middleware's
+// inventory-sync cron pushes to Shopify (the corrected available-to-promise,
+// clamped to the raw ledger — see the middleware's query_nav_qty). Reading it
+// read-only lets us rebuild the middleware's dry-run "would push" predicate
+// ourselves (design.md 5A.2 / 5A.3) instead of leaving it null. SELECT-only.
+export interface NavInventoryAvailabilityRow {
+  sku: string | null;         // [Item No_]
+  location: string | null;    // [Location Code] (e.g. HF1FTZ / TAC)
+  availableQty: number | null; // corrected available-to-promise at that location
+}
+
 // Unit 2 (back-sync). A row from GRUS$Sales Shipment Header: a posted NAV shipment
 // used to enrich the missed-shipments detail (carrier / tracking / posted time)
 // the middleware endpoint does not fully expose. Read-only (SELECT only).
@@ -92,6 +104,20 @@ export interface NavClient {
   //    WHERE s.shopify_fulfillment_id IS NULL AND sh.[WebId] <> ''  -- DTC only
   // SELECT-only: no write path into NAV (design.md 7).
   getRecentShipments(limit: number): Promise<NavShipmentHeader[]>;
+  // Unit 3b (inventory dry-run reconstruction). Current NAV available-to-promise
+  // per (sku, location) so we can rebuild the middleware's inventory dry-run
+  // "would push" count read-only (a pair whose NAV availability now differs from
+  // the quantity last pushed to Shopify would be pushed by a real dry-run).
+  //
+  // Real read-only shape (mirrors the inventory-sync cron's per-pair NAV read;
+  // corrected available-to-promise, clamped to the raw ledger total — SELECT only):
+  //   SELECT ile.[Item No_] AS sku, ile.[Location Code] AS location,
+  //          SUM(ile.[Remaining Quantity]) AS availableQty
+  //     FROM [GRUS$Item Ledger Entry] ile
+  //    WHERE ile.[Open] = 1
+  //    GROUP BY ile.[Item No_], ile.[Location Code]
+  // No write path into NAV (design.md 7).
+  getInventoryAvailability(): Promise<NavInventoryAvailabilityRow[]>;
   // Read-only SQL passthrough for curated templates (design.md section 2).
   queryReadOnly<T>(templateName: string, params?: Record<string, unknown>): Promise<T[]>;
 }
@@ -120,6 +146,10 @@ class NavClientStub implements NavClient {
   }
   async getRecentShipments(limit: number): Promise<NavShipmentHeader[]> {
     this.note(`recent NAV shipments (limit ${limit})`);
+    return [];
+  }
+  async getInventoryAvailability(): Promise<NavInventoryAvailabilityRow[]> {
+    this.note('NAV inventory availability (item ledger by sku + location)');
     return [];
   }
   async queryReadOnly<T>(templateName: string): Promise<T[]> {

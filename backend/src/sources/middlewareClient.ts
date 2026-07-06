@@ -11,6 +11,15 @@
 // access is gated on DevOps provisioning (read-only token + base URL).
 import { config } from '../config';
 
+// The middleware's inventory-sync status endpoint exposes the last dry-run's
+// "would push" divergence (design.md 5A.2 / 5A.3). This is the ONLY signal the
+// monitor takes from the middleware; watermark, walks and heartbeat come from NAV.
+export interface InventorySyncStatus {
+  dryRunWouldPush: number | null; // last dry-run "would push" count (the 7,245)
+  dryRunAt: string | null;        // when that dry-run ran
+  totalPairs: number | null;      // denominator (the 12,218)
+}
+
 // Shapes are intentionally loose (Record) at the scaffold stage; Phase W units
 // tighten each endpoint's response type as they wire it in.
 export interface MiddlewareClient {
@@ -22,6 +31,8 @@ export interface MiddlewareClient {
   getMissedShipments(): Promise<Record<string, unknown>[]>;
   getStuckStaging(): Promise<Record<string, unknown>[]>;
   getPendingFulfillment(): Promise<Record<string, unknown>[]>;
+  // GET /api/inventory-sync/status (read-only): dry-run divergence numbers.
+  getInventorySyncStatus(): Promise<InventorySyncStatus>;
 }
 
 // Clearly-marked stub. Every method returns empty/placeholder data and logs a
@@ -54,6 +65,10 @@ class MiddlewareClientStub implements MiddlewareClient {
   async getPendingFulfillment(): Promise<Record<string, unknown>[]> {
     this.note('GET /api/fulfillment/pending');
     return [];
+  }
+  async getInventorySyncStatus(): Promise<InventorySyncStatus> {
+    this.note('GET /api/inventory-sync/status');
+    return { dryRunWouldPush: null, dryRunAt: null, totalPairs: null };
   }
 }
 

@@ -67,3 +67,23 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .badge { font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 5px; letter-spacing: .03em; }
 .badge.dtc { background: #17324e; color: #7fb3ff; }
 .badge.wholesale { background: #2a2140; color: #c2a6f0; }
+
+/* --- Inventory Sync Monitor panel (Unit 1, the reference panel) ------------ */
+.ip { margin: 4px 0 8px; }
+.ip-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.ip-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 13px 14px; }
+.ip-card-hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ip-card-hd h3 { margin: 0; font-size: 12.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.ip-metric { margin-top: 10px; font-size: 20px; font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.ip-sub { margin-top: 4px; font-size: 11.5px; color: var(--faint); }
+.ip-warn { color: var(--amber); }
+.ip-note { margin-top: 12px; font-size: 12.5px; padding: 9px 12px; border-radius: 8px; background: var(--sunken); border: 1px solid var(--line); color: var(--muted); }
+.ip-note.a { background: var(--amber-bg); border-color: var(--amber-bd); color: #e8c88a; }
+.ip-panel { margin-top: 12px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 15px; }
+.ip-panel h3 { margin: 0 0 10px; font-size: 13px; }
+.ip-bars { display: flex; align-items: flex-end; gap: 6px; height: 90px; margin: 6px 0 4px; }
+.ip-bar { flex: 1; background: var(--slate-bg); border-radius: 3px 3px 0 0; position: relative; }
+.ip-bar span { position: absolute; bottom: -18px; left: 0; right: 0; text-align: center; font-size: 10px; color: var(--faint); }
+.ip-bar.hl { background: var(--orange); }
+.ip-empty { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px 16px; text-align: center; color: var(--faint); font-size: 12.5px; }
+@media (max-width: 900px) { .ip-cards { grid-template-columns: 1fr; } }

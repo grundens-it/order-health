@@ -2,7 +2,7 @@
   "round": "order-health-observability",
   "repo": "grundens-it/order-health",
   "brief": "docs/kickoffs/order-health-observability.md",
-  "updated": "2026-07-06 (Unit 7 merged; Unit 8 + ADR-0005 in progress)",
+  "updated": "2026-07-06 (Unit 9 merged: local dev + CI; Unit 8 + ADR-0005 in progress)",
   "umbrella_issue": 2,
   "kickoff_pr": 1,
   "stack": {
@@ -37,7 +37,7 @@
     { "unit": 6, "issue": 9, "phase": "W", "name": "Leadership rollup strip", "status": "done", "pr": 15, "merged": true },
     { "unit": 7, "issue": 10, "phase": "C", "name": "Remediation runbook + health_transition wiring", "status": "done", "pr": 21, "merged": true },
     { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "active", "pr": null },
-    { "unit": 9, "issue": 19, "phase": "D", "name": "Local dev (Docker Compose) + CI workflow", "status": "active", "pr": null, "note": "unblocked; runs on stub data" },
+    { "unit": 9, "issue": 19, "phase": "D", "name": "Local dev (Docker Compose) + CI workflow", "status": "done", "pr": 22, "merged": true, "note": "docker compose up, CI build/test on push+PR" },
     { "unit": 10, "issue": 20, "phase": "D", "name": "ADR-0005 deploy target + CD pipeline", "status": "drafting_adr", "pr": null, "note": "Steve chose draft-ADR-first; ADR drafting, CD still gated on target pick" }
   ]
 }

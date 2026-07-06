@@ -12,7 +12,9 @@ This is a **standalone, read-only** observability service. It is a separate Grun
   - ADR-0001: standalone read-only service (not an in-app tab in the middleware).
   - ADR-0002: materialized snapshot read-model in this service's own store.
   - ADR-0004: service implementation stack (Accepted: Node + TypeScript backend, React + TypeScript frontend).
+  - ADR-0005: deploy target and CD pipeline (Accepted: cloud VM reaching internal NAV and the middleware over an owned, monitored VPN).
 - `demo/order-health-dashboard-demo.html`: the visual and interaction spec.
+- `docs/deploy.md`: how the service is delivered (the gated CD pipeline, the GHCR build/push then SSH deploy to the VM, and the required GitHub Environment provisioning). The pipeline is inert until DevOps provisioning is complete.
 
 ## Boundary
 

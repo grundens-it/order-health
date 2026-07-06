@@ -8,7 +8,7 @@
 // invariants are unit-testable without a DB or a live source.
 //
 // The named runbook set (design.md 5A.4 + the demo's remediation registry):
-//   - recovery_sweep         (back-sync missed fulfillment)   -> recovery.rs
+//   - recovery_sweep         (back-sync missed fulfillment)   -> recovery.rs (BATCH replay)
 //   - unblock_and_repromote  (stuck NAV staging)              -> ops runbook (NAV admin)
 //   - atomic_watcher_restart (inventory-sync watcher down)    -> ops runbook (systemctl)
 //   - clear_cu50007_job      (NAV job queue serialized)       -> ops runbook (NAV admin)
@@ -16,7 +16,20 @@
 // plus two runbook-only entries so every pipe key has a mapping:
 //   - webhook_resubscribe    (removed Shopify subscription)   -> ops runbook
 //   - allocator_reallocate   (allocator split failures)       -> ops runbook
-import type { RemediationMapping, RemediationTool } from '@order-health/shared';
+// and the failure-mode-detection targets (issue #35), each an EXISTING middleware
+// endpoint so detection has a real tool to name (never a new endpoint):
+//   - submit_fulfillment_request (single missed order)        -> main.rs:1059
+//   - back_sync_run_now          (watcher alive, pass due)    -> main.rs:581
+//   - back_sync_rescan_from      (historical window)          -> main.rs:594
+//   - close_unfulfilled_fos      (degenerate FulfillmentOrders) -> main.rs:841
+//   - stuck_staging_dedupe       (duplicate NAV staging rows) -> main.rs:570
+import type {
+  PipelineHealth,
+  RemediationDetection,
+  RemediationMapping,
+  RemediationTool,
+} from '@order-health/shared';
+import { detectRemediationTool } from '@order-health/shared';
 import { PIPES } from '../aggregator/writers';
 
 // --- The named tools ------------------------------------------------------
@@ -24,15 +37,95 @@ import { PIPES } from '../aggregator/writers';
 export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
   {
     id: 'recovery_sweep',
-    name: 'Recovery sweep (fulfillmentCreate)',
+    name: 'Recovery sweep (batch fulfillmentCreate replay)',
     description:
-      'Re-runs submit_fulfillment_requests_for_order for the order, dispatching the missing Shopify fulfillmentCreate, then re-checks the back-sync watermark.',
+      'BATCH replay: takes a list of shopify_order_ids (max 200) plus password + set_by ' +
+      '(NAV_TOGGLE_PASSWORD) and re-runs submit_fulfillment_requests_for_order for each, ' +
+      'dispatching every missing Shopify fulfillmentCreate. Returns a per-order outcome ' +
+      '(submitted / already_submitted / blocked_by_tag / failed / order_fetch_failed). ' +
+      'Idempotent: already-submitted orders are reported, never double-fulfilled.',
     kind: 'middleware_endpoint',
     // The EXISTING authenticated middleware endpoint (recovery.rs). No new path.
     endpoint: {
       method: 'POST',
-      path: '/api/recovery/fulfillments',
-      source: 'recovery.rs :: submit_fulfillment_requests_for_order -> Shopify fulfillmentCreate',
+      path: '/api/recovery/replay-fulfillment-requests',
+      source:
+        'recovery.rs::handle_replay -> submit_fulfillment_requests_for_order (orders_updated.rs) -> Shopify fulfillmentCreate',
+    },
+    writeCapable: true,
+  },
+  {
+    id: 'submit_fulfillment_request',
+    name: 'Submit single fulfillment request',
+    description:
+      'Single-order variant of the replay: submits submit_fulfillment_requests_for_order for ONE ' +
+      'shopify_order_id, dispatching its missing Shopify fulfillmentCreate. Use when exactly one ' +
+      'order missed back-sync rather than a backlog.',
+    kind: 'middleware_endpoint',
+    endpoint: {
+      method: 'POST',
+      path: '/api/middleware/submit-fulfillment-request',
+      source:
+        'main.rs:1059 -> submit_fulfillment_requests_for_order (orders_updated.rs) -> Shopify fulfillmentCreate',
+    },
+    writeCapable: true,
+  },
+  {
+    id: 'back_sync_run_now',
+    name: 'Back-sync run-now (force a pass)',
+    description:
+      'Forces the back-sync watcher to run a pass immediately, re-scanning for NAV shipments that ' +
+      'still need a Shopify fulfillmentCreate. Use when the watcher is alive but a pass is overdue ' +
+      '(freshness stale) with no standing backlog.',
+    kind: 'middleware_endpoint',
+    endpoint: {
+      method: 'POST',
+      path: '/api/back-sync/run-now',
+      source: 'main.rs:581 -> back-sync pass',
+    },
+    writeCapable: true,
+  },
+  {
+    id: 'back_sync_rescan_from',
+    name: 'Back-sync rescan-from (historical window)',
+    description:
+      'Re-scans a bounded historical window for missed back-sync shipments and submits any still-' +
+      'unfulfilled orders. Use to recover a past window rather than the current tail.',
+    kind: 'middleware_endpoint',
+    endpoint: {
+      method: 'POST',
+      path: '/api/back-sync/rescan-from',
+      source: 'main.rs:594 -> back-sync rescan',
+    },
+    writeCapable: true,
+  },
+  {
+    id: 'close_unfulfilled_fos',
+    name: 'Close degenerate unfulfilled FulfillmentOrders',
+    description:
+      'Closes degenerate Shopify FulfillmentOrders that can never be fulfilled (cancelled / ' +
+      'duplicated), unblocking the order so a subsequent replay can succeed. Use when a replay ' +
+      'reports blocked_by_tag / order_fetch_failed for stuck FulfillmentOrders.',
+    kind: 'middleware_endpoint',
+    endpoint: {
+      method: 'POST',
+      path: '/api/order-recovery/close-unfulfilled-fos',
+      source: 'main.rs:841 -> close degenerate FulfillmentOrders',
+    },
+    writeCapable: true,
+  },
+  {
+    id: 'stuck_staging_dedupe',
+    name: 'Dedupe duplicate NAV staging rows',
+    description:
+      'Resolves DUPLICATE NAV staging rows for an order (the distinct failure mode from a Blocked ' +
+      'SKU) via the middleware, so CU 50009 auto-release can promote the single remaining row. NAV ' +
+      'item data itself stays read-only; the middleware owns the dedupe.',
+    kind: 'middleware_endpoint',
+    endpoint: {
+      method: 'POST',
+      path: '/api/nav/stuck-staging/dedupe',
+      source: 'main.rs:570 -> stuck-staging dedupe',
     },
     writeCapable: true,
   },
@@ -141,13 +234,44 @@ export const REMEDIATION_MAPPINGS: readonly RemediationMapping[] = [
     toolId: 'reconcile_audit',
     primary: false,
   },
-  // back_sync: the pipe red is a missed-fulfillment backlog.
+  // back_sync: several real tools; the right one depends on the runtime failure
+  // mode (backlog vs a single miss vs a stale watcher). detectRemediationTool
+  // picks the recommended one at open time; these mappings make the alternatives
+  // visible in the modal. Exactly one stays primary (the static fallback).
   {
     subjectKind: 'pipe',
     subjectKey: 'back_sync',
-    appliesWhen: 'Missed back-sync backlog: NAV shipments posted with no Shopify fulfillmentCreate.',
+    appliesWhen: 'Missed back-sync BACKLOG (>=2): NAV shipments posted with no Shopify fulfillmentCreate.',
     toolId: 'recovery_sweep',
     primary: true,
+  },
+  {
+    subjectKind: 'pipe',
+    subjectKey: 'back_sync',
+    appliesWhen: 'Exactly ONE missed shipment: a single order to re-submit.',
+    toolId: 'submit_fulfillment_request',
+    primary: false,
+  },
+  {
+    subjectKind: 'pipe',
+    subjectKey: 'back_sync',
+    appliesWhen: 'Watcher alive but a back-sync pass is overdue (freshness stale, no standing backlog).',
+    toolId: 'back_sync_run_now',
+    primary: false,
+  },
+  {
+    subjectKind: 'pipe',
+    subjectKey: 'back_sync',
+    appliesWhen: 'Recover a bounded historical window of missed shipments.',
+    toolId: 'back_sync_rescan_from',
+    primary: false,
+  },
+  {
+    subjectKind: 'pipe',
+    subjectKey: 'back_sync',
+    appliesWhen: 'A replay is blocked by degenerate / unfulfillable FulfillmentOrders.',
+    toolId: 'close_unfulfilled_fos',
+    primary: false,
   },
   // price_sync: shares the middleware watcher loop; a stalled loop is the watcher.
   {
@@ -191,10 +315,24 @@ export const REMEDIATION_MAPPINGS: readonly RemediationMapping[] = [
   },
   {
     subjectKind: 'signal',
+    subjectKey: 'missed_back_sync',
+    appliesWhen: 'Re-submit just this one order (single-order variant of the replay).',
+    toolId: 'submit_fulfillment_request',
+    primary: false,
+  },
+  {
+    subjectKind: 'signal',
     subjectKey: 'nav_staging_stuck',
     appliesWhen: 'An order is stuck in NAV staging (CU 50009 errored promoting a Blocked SKU).',
     toolId: 'unblock_and_repromote',
     primary: true,
+  },
+  {
+    subjectKind: 'signal',
+    subjectKey: 'nav_staging_stuck',
+    appliesWhen: 'DUPLICATE NAV staging rows for the order (the distinct failure mode from a Blocked SKU).',
+    toolId: 'stuck_staging_dedupe',
+    primary: false,
   },
 ] as const;
 
@@ -216,6 +354,23 @@ export function remediationsForSubject(subjectKey: string): RemediationMapping[]
 export function primaryRemediationForSubject(subjectKey: string): RemediationTool | null {
   const mapping = remediationsForSubject(subjectKey).find((m) => m.primary);
   return mapping ? getRemediationTool(mapping.toolId) : null;
+}
+
+// The RECOMMENDED tool for a subject given its OBSERVED pipe health: the
+// failure-mode-detected tool when detection fires (issue #35), else the static
+// primary. Pure: detection reads only the already-computed verdicts + detail bag
+// on `pipe`, invokes nothing, and adds no endpoint. `pipe` is null for subjects
+// with no runtime detail (e.g. order-level signals), which falls back to primary.
+export function recommendedToolForSubject(
+  subjectKey: string,
+  pipe: PipelineHealth | null,
+): { tool: RemediationTool | null; detection: RemediationDetection | null } {
+  const detection = detectRemediationTool(subjectKey, pipe);
+  if (detection !== null) {
+    const detected = getRemediationTool(detection.toolId);
+    if (detected !== null) return { tool: detected, detection };
+  }
+  return { tool: primaryRemediationForSubject(subjectKey), detection: null };
 }
 
 // Coverage invariant helper (used by the read API and the tests): every pipe key

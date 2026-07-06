@@ -36,6 +36,6 @@ test('only the explicit operator path fires remediation, and it is stubbed (no l
   // The result is the typed 'would_trigger' stub; no live call was made.
   assert.equal(result.status, 'would_trigger');
   assert.equal(result.toolId, 'recovery_sweep');
-  assert.match(result.wouldCall, /\/api\/recovery\/fulfillments/);
+  assert.match(result.wouldCall, /\/api\/recovery\/replay-fulfillment-requests/);
   assert.deepEqual(result.resolvedSubject, { subjectKind: 'signal', subjectKey: 'missed_back_sync' });
 });

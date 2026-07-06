@@ -380,3 +380,116 @@ export interface RemediationTriggerResult {
   // Whether an open health_transition row was resolved as a remediation event.
   resolvedSubject: { subjectKind: HealthTransition['subject_kind']; subjectKey: string } | null;
 }
+
+// --- Failure-mode tool detection (issue #35) -------------------------------
+// A pipe can have SEVERAL real remediation tools, and the right one depends on
+// the runtime failure mode actually observed, not on a static primary. This PURE
+// function inspects a pipe's OBSERVED health (its verdict columns + its typed
+// detail bag, both already computed by the pipe compute modules) and NAMES the
+// tool whose real middleware contract matches that failure mode.
+//
+// BOUNDARY: it only NAMES a tool. It fires nothing, adds no endpoint, and reads
+// NAV nothing but read-only. The remediation modal marks the detected tool
+// "Recommended" (with `reason`) and lists the rest as alternatives; when this
+// returns null (no runtime detail, or no distinguishing signal) the caller falls
+// back to the static primary mapping. It lives here, beside worstVerdict, so both
+// the backend registry and the frontend modal share ONE implementation.
+export interface RemediationDetection {
+  toolId: string; // the detected tool's id (references RemediationTool.id)
+  reason: string; // short human note on the observed failure mode
+}
+
+function isRedOrAmber(v: Verdict): boolean {
+  return v === 'red' || v === 'amber';
+}
+
+// inventory_sync: liveness-dead vs watermark-stale-but-alive vs dry-run-divergence
+// (design.md 5A), mapping to atomic restart / clear-the-hung-job / reconcile audit.
+function detectInventorySync(pipe: PipelineHealth): RemediationDetection | null {
+  // 1. Watcher liveness dead/degraded -> atomic restart (re-attach to the queue).
+  if (isRedOrAmber(pipe.liveness_verdict)) {
+    return {
+      toolId: 'atomic_watcher_restart',
+      reason: `watcher liveness ${pipe.liveness_verdict} (heartbeat aging/dead)`,
+    };
+  }
+  // 2. Watermark stale while the watcher is still alive -> the NAV job queue is
+  //    serialized behind a hung CU 50007; clear that job so auto-release resumes.
+  if (isRedOrAmber(pipe.freshness_verdict)) {
+    return {
+      toolId: 'clear_cu50007_job',
+      reason: `watermark stale (freshness ${pipe.freshness_verdict}) but watcher alive`,
+    };
+  }
+  // 3. Dry-run divergence (structurally amber-capped) -> read-only reconcile audit.
+  const divergence = (pipe.detail as unknown as InventorySyncDetail).divergence;
+  if (divergence !== undefined && divergence.divergence_verdict === 'amber') {
+    return {
+      toolId: 'reconcile_audit',
+      reason: 'dry-run divergence (amber) - classify the delta, do not push',
+    };
+  }
+  return null;
+}
+
+// back_sync: backlog -> batch replay; a single miss -> single submit; a stale
+// watcher with no backlog -> force a pass (run-now). rescan-from / close-fos are
+// visible alternatives with no distinguishing runtime signal.
+function detectBackSync(pipe: PipelineHealth): RemediationDetection | null {
+  const missed = (pipe.detail as unknown as BackSyncDetail).missed_count ?? 0;
+  // A real backlog of unsubmitted fulfillments -> the BATCH replay (<=200 orders).
+  if (missed >= 2) {
+    return {
+      toolId: 'recovery_sweep',
+      reason: `${missed} missed shipments - batch replay of unsubmitted fulfillment requests`,
+    };
+  }
+  // Exactly one missed order -> the single-order submit variant.
+  if (missed === 1) {
+    return {
+      toolId: 'submit_fulfillment_request',
+      reason: 'one missed shipment - single-order fulfillment submit',
+    };
+  }
+  // No backlog, but the watcher/freshness is stale -> force a back-sync pass.
+  if (isRedOrAmber(pipe.liveness_verdict) || isRedOrAmber(pipe.freshness_verdict)) {
+    return {
+      toolId: 'back_sync_run_now',
+      reason: 'no backlog but back-sync watcher stale - force a pass',
+    };
+  }
+  return null;
+}
+
+// shopify_webhook: a removed/absent subscription is the WAF-removal failure mode.
+function detectShopifyWebhook(pipe: PipelineHealth): RemediationDetection | null {
+  const missing = (pipe.detail as unknown as ShopifyWebhookDetail).missing_subscription_count ?? 0;
+  if (missing > 0) {
+    return {
+      toolId: 'webhook_resubscribe',
+      reason: `${missing} webhook subscription(s) removed/absent`,
+    };
+  }
+  return null;
+}
+
+// Select the tool matching the observed failure mode, or null to fall back to the
+// static primary. `pipe` carries both the verdict columns and the typed detail bag.
+export function detectRemediationTool(
+  subjectKey: string,
+  pipe: PipelineHealth | null,
+): RemediationDetection | null {
+  if (pipe === null) return null;
+  switch (subjectKey) {
+    case 'inventory_sync':
+      return detectInventorySync(pipe);
+    case 'back_sync':
+      return detectBackSync(pipe);
+    case 'shopify_webhook':
+      return detectShopifyWebhook(pipe);
+    // price_sync / nav_job_queue / allocator each have a single tool today, so
+    // there is no runtime distinction to draw: the static primary stands.
+    default:
+      return null;
+  }
+}

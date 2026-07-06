@@ -40,12 +40,17 @@ test('the five named tools from the brief are all registered', () => {
   }
 });
 
-test('recovery_sweep calls the EXISTING recovery.rs middleware endpoint (no new endpoint)', () => {
+test('recovery_sweep calls the EXISTING recovery.rs BATCH replay endpoint (no new endpoint)', () => {
   const tool = getRemediationTool('recovery_sweep');
   assert.ok(tool !== null);
   assert.equal(tool?.kind, 'middleware_endpoint');
-  assert.equal(tool?.endpoint?.path, '/api/recovery/fulfillments');
-  assert.match(tool?.endpoint?.source ?? '', /recovery\.rs/);
+  // Real route (main.rs:1042); the old '/api/recovery/fulfillments' does not exist.
+  assert.equal(tool?.endpoint?.path, '/api/recovery/replay-fulfillment-requests');
+  assert.match(tool?.endpoint?.source ?? '', /recovery\.rs::handle_replay/);
+  assert.equal(tool?.writeCapable, true);
+  // The corrected contract is a BATCH of shopify_order_ids, capped at 200.
+  assert.match(tool?.description ?? '', /batch/i);
+  assert.match(tool?.description ?? '', /200/);
 });
 
 test('reconcile_audit is read-only (not write-capable)', () => {

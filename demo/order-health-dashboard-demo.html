@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grundens Order Health — demo</title>
+<style>
+  :root{
+    --ink:#e7e9ec; --muted:#9aa2ad; --faint:#6c7480; --line:#2a2f37; --line2:#22262d;
+    --bg:#0f1216; --card:#171b21; --band:#0b0e12; --band2:#232a33;
+    --orange:#f2751f; --orange-soft:#241408;
+    --green:#3ecb7f; --green-bg:#12271b; --green-bd:#204a32;
+    --amber:#e3a838; --amber-bg:#2a2110; --amber-bd:#4d3c18;
+    --red:#ef6a60; --red-bg:#2c1614; --red-bd:#5a2824;
+    --slate:#aab2bd; --slate-bg:#232a33;
+    --hover:#1c2128; --sunken:#12151a; --dash:#3a424c;
+    --radius:10px;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{color-scheme:dark}
+  body{margin:0;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.5}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 20px 60px}
+
+  .band{background:var(--band);color:#fff}
+  .band-in{max-width:1180px;margin:0 auto;padding:16px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  .logo{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.02em}
+  .logo .mark{width:26px;height:26px;border-radius:6px;background:var(--orange);display:grid;place-items:center;color:#fff;font-weight:800;font-size:15px}
+  .logo small{display:block;font-weight:400;color:#aeb6c0;font-size:11px;letter-spacing:.06em;text-transform:uppercase}
+  .band-spacer{flex:1}
+  .asof{font-size:12px;color:#c6cdd6;text-align:right;line-height:1.35}
+  .asof b{color:#fff;font-weight:600}
+  .btn{border:1px solid #333b45;background:var(--band2);color:#fff;border-radius:8px;padding:7px 12px;font-size:12px;cursor:pointer;font-weight:600}
+  .btn:hover{border-color:#4a5560}
+  .btn.warn{border-color:#5a2f1a;background:#25150c;color:#ffb27a}
+  .btn.warn:hover{border-color:#8a4a29}
+  .btn.active{background:var(--orange);border-color:var(--orange);color:#fff}
+
+  .demo-note{background:var(--orange-soft);border-bottom:1px solid #3a2416;color:#f0a878;font-size:12px;text-align:center;padding:6px 12px}
+  .demo-note b{font-weight:700}
+
+  .tabs{display:flex;gap:2px;margin:18px 0 0;flex-wrap:wrap;border-bottom:1px solid var(--line)}
+  .tab{padding:8px 14px;font-size:12.5px;color:var(--muted);border-radius:8px 8px 0 0;cursor:pointer;font-weight:600;border:1px solid transparent;border-bottom:none;position:relative;top:1px}
+  .tab:hover{color:var(--orange)}
+  .tab.on{color:var(--ink);background:var(--card);border-color:var(--line)}
+
+  .sec{margin:22px 0 10px;display:flex;align-items:center;gap:10px}
+  .sec h2{font-size:13px;margin:0;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700}
+  .sec .rule{flex:1;height:1px;background:var(--line)}
+  .sec .aux{font-size:12px;color:var(--muted)}
+
+  .rollup{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px 15px;position:relative;overflow:hidden}
+  .kpi .lab{font-size:11.5px;color:var(--muted);font-weight:600;letter-spacing:.02em}
+  .kpi .val{font-size:26px;font-weight:700;margin-top:8px;letter-spacing:-.01em}
+  .kpi .sub{font-size:11.5px;color:var(--faint);margin-top:3px}
+  .kpi .edge{position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--slate)}
+  .kpi.g .edge{background:var(--green)} .kpi.a .edge{background:var(--amber)} .kpi.r .edge{background:var(--red)}
+  .kpi.g .val{color:var(--green)} .kpi.a .val{color:var(--amber)} .kpi.r .val{color:var(--red)}
+
+  .pipes{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .pipe{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:13px 14px}
+  .pipe.clk{cursor:pointer} .pipe.clk:hover{border-color:var(--orange)}
+  .pipe .hd{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .pipe .nm{font-weight:700;font-size:13.5px}
+  .pipe .metrics{margin-top:10px;display:flex;flex-direction:column;gap:5px}
+  .m{display:flex;justify-content:space-between;gap:10px;font-size:12.5px}
+  .m .k{color:var(--muted)} .m .v{font-weight:600;font-variant-numeric:tabular-nums}
+  .m .v.warnv{color:var(--amber)} .m .v.redv{color:var(--red)} .m .v.okv{color:var(--green)}
+  .pipe .foot{margin-top:10px;font-size:11px;color:var(--faint);display:flex;justify-content:space-between}
+
+  .chip{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;padding:3px 8px;border-radius:20px;border:1px solid var(--slate-bg);background:var(--slate-bg);color:var(--slate);white-space:nowrap}
+  .chip .ic{width:8px;height:8px;border-radius:50%;background:currentColor}
+  .chip.g{background:var(--green-bg);border-color:var(--green-bd);color:var(--green)}
+  .chip.a{background:var(--amber-bg);border-color:var(--amber-bd);color:var(--amber)}
+  .chip.r{background:var(--red-bg);border-color:var(--red-bd);color:var(--red)}
+  .chip.g .ic{border-radius:50%} .chip.a .ic{border-radius:2px} .chip.r .ic{border-radius:0;transform:rotate(45deg)}
+
+  .controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 12px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--card)}
+  .seg button{border:0;background:transparent;padding:7px 13px;font-size:12.5px;font-weight:600;color:var(--muted);cursor:pointer}
+  .seg button.on{background:var(--orange);color:#fff}
+  .controls .count{font-size:12.5px;color:var(--muted);margin-left:auto}
+
+  .tblwrap{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+  table{width:100%;border-collapse:collapse}
+  thead th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--faint);font-weight:700;text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--sunken);white-space:nowrap}
+  thead th.stage{text-align:center;width:74px}
+  tbody td{padding:11px 12px;border-bottom:1px solid var(--line2);vertical-align:middle}
+  tbody tr.row{cursor:pointer}
+  tbody tr.row:hover{background:var(--hover)}
+  .oid{font-weight:700}
+  .oid small{display:block;color:var(--faint);font-weight:400;font-size:11px}
+  .badge{font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:5px;letter-spacing:.03em}
+  .badge.dtc{background:#17324e;color:#7fb3ff}
+  .badge.whs{background:#2a2140;color:#c2a6f0}
+  .stagecell{text-align:center}
+  .dot{display:inline-block;width:14px;height:14px;border-radius:50%}
+  .dot.g{background:var(--green)} .dot.a{background:var(--amber)} .dot.r{background:var(--red)}
+  .dot.na{background:transparent;border:1.5px dashed var(--dash)}
+  .dot.pending{background:transparent;border:2px solid var(--dash)}
+  .agecell{font-variant-numeric:tabular-nums;font-weight:600}
+  .agecell.warnv{color:var(--amber)} .agecell.redv{color:var(--red)}
+  td.mono,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+
+  .detail td{background:var(--sunken);padding:0}
+  .detail .din{padding:14px 16px 18px}
+  .timeline{display:flex;gap:0;margin-top:8px;flex-wrap:wrap}
+  .step{flex:1;min-width:130px;padding:0 6px}
+  .step .bar{height:4px;border-radius:2px;background:var(--line);margin-bottom:8px}
+  .step.g .bar{background:var(--green)} .step.a .bar{background:var(--amber)} .step.r .bar{background:var(--red)} .step.na .bar{background:repeating-linear-gradient(90deg,var(--dash) 0 6px,transparent 6px 12px)}
+  .step .st{font-weight:700;font-size:12.5px}
+  .step .sd{font-size:11.5px;color:var(--muted);margin-top:2px}
+  .note{margin-top:12px;font-size:12.5px;padding:9px 12px;border-radius:8px;background:var(--sunken);border:1px solid var(--line)}
+  .note.r{background:var(--red-bg);border-color:var(--red-bd);color:#f2b3ac}
+  .note.a{background:var(--amber-bg);border-color:var(--amber-bd);color:#e8c88a}
+  .actions{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}
+  .minibtn{font-size:11.5px;font-weight:600;border:1px solid var(--line);background:var(--hover);border-radius:7px;padding:6px 11px;cursor:pointer;color:var(--slate)}
+  .minibtn:hover{border-color:var(--orange);color:var(--orange)}
+
+  .legend{display:flex;gap:18px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);margin-top:12px;align-items:center}
+  .legend .li{display:flex;align-items:center;gap:6px}
+  .foot-src{margin-top:26px;font-size:11.5px;color:var(--faint);line-height:1.6}
+  .foot-src code,code.k{background:var(--slate-bg);padding:1px 5px;border-radius:4px;font-size:11px;font-family:ui-monospace,Menlo,Consolas,monospace}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:14px 15px}
+  .panel h3{margin:0 0 10px;font-size:13px}
+  .feed{display:flex;flex-direction:column}
+  .frow{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--line2);font-size:12.5px}
+  .frow:last-child{border-bottom:none}
+  .fdot{width:8px;height:8px;border-radius:50%;margin-top:5px;flex:none}
+  .fdot.g{background:var(--green)} .fdot.a{background:var(--amber)} .fdot.r{background:var(--red)} .fdot.i{background:var(--slate)}
+  .frow .ft{color:var(--faint);margin-left:auto;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .frow .fk{font-weight:700;font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+
+  .bars{display:flex;align-items:flex-end;gap:6px;height:90px;margin:6px 0 4px}
+  .bars .b{flex:1;background:var(--slate-bg);border-radius:3px 3px 0 0;position:relative}
+  .bars .b span{position:absolute;bottom:-18px;left:0;right:0;text-align:center;font-size:10px;color:var(--faint)}
+  .bars .b.hl{background:var(--orange)}
+
+  textarea.sql{width:100%;min-height:96px;border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;resize:vertical;background:var(--sunken);color:var(--ink)}
+  .tmpls{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
+  .tmpl{font-size:11.5px;border:1px solid var(--line);background:var(--hover);border-radius:20px;padding:5px 11px;cursor:pointer;color:var(--slate)}
+  .tmpl:hover{border-color:var(--orange);color:var(--orange)}
+
+  .overlay{position:fixed;inset:0;background:rgba(15,18,22,.5);display:none;align-items:center;justify-content:center;z-index:50;padding:20px}
+  .overlay.on{display:flex}
+  .modal{background:var(--card);border-radius:12px;max-width:640px;width:100%;max-height:82vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  .modal .mh{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--card)}
+  .modal .mh h3{margin:0;font-size:15px}
+  .modal .mb{padding:16px 18px}
+  .x{border:0;background:transparent;font-size:20px;cursor:pointer;color:var(--muted);line-height:1}
+  .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);background:#05070a;border:1px solid var(--line);color:#fff;padding:11px 18px;border-radius:10px;font-size:13px;font-weight:600;opacity:0;transition:.25s;z-index:60;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+  .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+  .toast .tk{color:#6fe0a0;margin-right:8px}
+
+  .hide{display:none}
+  @media(max-width:900px){.rollup{grid-template-columns:repeat(2,1fr)}.pipes{grid-template-columns:1fr}.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="band">
+  <div class="band-in">
+    <div class="logo"><span class="mark">G</span><div>GRUNDENS<small>Order health observability</small></div></div>
+    <div class="band-spacer"></div>
+    <div class="controls" style="margin:0">
+      <button class="btn warn" id="replayBtn">Replay 2026-07-01 outage</button>
+      <button class="btn" id="refreshBtn">Refresh snapshot</button>
+    </div>
+    <div class="asof">Snapshot <b id="asof">as of just now</b><br><span id="cadence">aggregator cadence 3 min · inventory layer ~2 h</span></div>
+  </div>
+</div>
+<div class="demo-note"><b>Demo</b> · synthetic data modeling the Investigations part 1 findings. Interactive mock of the proposed <b>Order Health</b> tab (design.md · ADR-0001 · ADR-0002).</div>
+
+<div class="wrap">
+  <div class="tabs" id="tabs">
+    <div class="tab on" data-tab="orderhealth">Order Health</div>
+    <div class="tab" data-tab="home">Home</div>
+    <div class="tab" data-tab="inventory">Inventory Sync</div>
+    <div class="tab" data-tab="backsync">Back-Sync</div>
+    <div class="tab" data-tab="split">Warehouse Split</div>
+    <div class="tab" data-tab="errors">Errors</div>
+    <div class="tab" data-tab="sql">SQL Console</div>
+  </div>
+
+  <div class="view" id="v-orderhealth">
+    <div class="sec"><h2>Leadership rollup</h2><div class="rule"></div></div>
+    <div class="rollup" id="rollup"></div>
+    <div class="sec"><h2>Pipeline health</h2><div class="rule"></div><span class="aux" id="pipeSummary"></span></div>
+    <div class="pipes" id="pipes"></div>
+    <div class="sec"><h2>Order lifecycle</h2><div class="rule"></div></div>
+    <div class="controls">
+      <div class="seg" id="chan">
+        <button data-c="all" class="on">All channels</button>
+        <button data-c="dtc">DTC</button>
+        <button data-c="whs">Wholesale</button>
+      </div>
+      <div class="seg" id="filt">
+        <button data-f="all" class="on">All</button>
+        <button data-f="attn">Needs attention</button>
+      </div>
+      <div class="count" id="rowcount"></div>
+    </div>
+    <div class="tblwrap">
+      <table>
+        <thead><tr>
+          <th>Order</th><th>Channel</th>
+          <th class="stage">Shopify</th><th class="stage">Split</th><th class="stage">Staging</th>
+          <th class="stage">Promote</th><th class="stage">Ship</th><th class="stage">Back-sync</th>
+          <th>Age</th><th>Verdict</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="legend">
+      <span class="li"><span class="dot g"></span> On time</span>
+      <span class="li"><span class="dot a"></span> In flight, within SLO</span>
+      <span class="li"><span class="dot r"></span> Errored / past SLO</span>
+      <span class="li"><span class="dot pending"></span> Not started</span>
+      <span class="li"><span class="dot na"></span> No leg (wholesale)</span>
+      <span class="li" style="margin-left:auto">Shape encodes state too, not color alone.</span>
+    </div>
+    <div class="foot-src">
+      Sources unified by the aggregator: <code>inventory_sync</code>, <code>price_sync</code>, <code>nav_shipment_sync</code>,
+      <code>shopify_webhook_event</code>, <code>warehouse_allocation_log</code>, NAV staging &amp; shipment tables, the IABC watermark,
+      and the existing NAV codeunit instrumentation. DTC correlates on <code>[WebId]</code>; wholesale is keyed on NAV order no (no Shopify leg).
+    </div>
+  </div>
+
+  <div class="view hide" id="v-home"></div>
+  <div class="view hide" id="v-inventory"></div>
+  <div class="view hide" id="v-backsync"></div>
+  <div class="view hide" id="v-split"></div>
+  <div class="view hide" id="v-errors"></div>
+  <div class="view hide" id="v-sql"></div>
+</div>
+
+<div class="overlay" id="overlay"><div class="modal">
+  <div class="mh"><h3 id="modalTitle">Detail</h3><button class="x" id="modalX">&times;</button></div>
+  <div class="mb" id="modalBody"></div>
+</div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+const F=(s)=>document.getElementById(s);
+let outage=false, chan="all", filt="all", activeTab="orderhealth", sqlPrefill="";
+
+const baseOrders=[
+  {id:"SP-319114",who:"D. Okafor",ch:"dtc",s:["g","g","g","g","g","g"],age:"—",ageState:"",note:null},
+  {id:"SP-319108",who:"M. Reyes",ch:"dtc",s:["g","g","g","g","a","pending"],age:"1h 40m",ageState:"",note:{t:"a",m:"Promoted, awaiting 3PL ship (TAC). Within the 24h DTC ship SLO."}},
+  {id:"SP-319090",who:"K. Bianchi",ch:"dtc",s:["g","g","g","g","g","r"],age:"6h 12m",ageState:"redv",note:{t:"r",m:"NAV shipment posted (GRUS$Sales Shipment Header) but no shopify_fulfillment_id in nav_shipment_sync. Missed back-sync.",fix:"backsync"}},
+  {id:"SP-319061",who:"T. Alvarez",ch:"dtc",s:["g","g","r","pending","pending","pending"],age:"3h 05m",ageState:"redv",note:{t:"r",m:"Stuck in NAV staging: Status != 0. Promotion errored — line references a Blocked = 1 SKU on GRUS$Item (Clipper 116 Bib).",fix:"staging"}},
+  {id:"SP-319044",who:"J. Powell",ch:"dtc",s:["g","g","g","g","g","g"],age:"—",ageState:"",note:null},
+  {id:"WH-208871",who:"Cabela's PO 4471",ch:"whs",s:["na","na","g","g","a","na"],age:"5h 22m",ageState:"warnv",note:{t:"a",m:"Wholesale order (no [WebId], correctly no Shopify leg). Promoted, awaiting ship at HF1FTZ. Not an orphan — the channel dimension keeps it from false-RED."}},
+  {id:"WH-208844",who:"West Marine PO 90312",ch:"whs",s:["na","na","g","g","g","na"],age:"—",ageState:"",note:{t:null,m:"Wholesale, shipped. Lifecycle complete for this channel (no back-sync leg)."}},
+  {id:"SP-319012",who:"R. Nguyen",ch:"dtc",s:["g","g","g","g","g","g"],age:"—",ageState:"",note:null},
+  {id:"WH-208820",who:"Sportsman's PO 5567",ch:"whs",s:["na","na","a","pending","pending","na"],age:"41m",ageState:"",note:{t:"a",m:"Wholesale order staged, awaiting NAV promotion. Within SLO."}},
+];
+const outageOrders=[
+  {id:"SP-319102",who:"L. Marchetti",ch:"dtc",s:["g","a","pending","pending","pending","pending"],age:"—",ageState:"",note:{t:"a",m:"Allocator held: inventory-sync is stale so ATP is untrusted for the split decision. Clears automatically once the watcher resumes.",fix:"watcher"}},
+];
+const orders=()=>outage?baseOrders.concat(outageOrders):baseOrders;
+
+const allocations={
+  "SP-319090":[["Clipper 116 Bib / L","2","least-split → TAC","TAC 102 ATP"],["Deck Boss Ankle / 10","1","single-unit → OLD","TAC 44 ATP"]],
+  "SP-319108":[["Neptune Jacket / XL","1","single-unit → OLD","TAC 71 ATP"]],
+  "SP-319061":[["Clipper 116 Bib / M","1","least-split → TAC","BLOCKED sku, staged"],["Weather Watch Hat / OS","2","weighted random → NEW","HF1FTZ 210 ATP"]],
+  "_default":[["(line 1)","1","single-unit → OLD","TAC ATP ok"]]
+};
+const missedShip=[{order:"SP-319090",webid:"7734921006",nav:"GRUS-SH-118844",carrier:"UPS",track:"1Z999AA10123456784",posted:"2026-07-02 09:41",reason:"fulfillmentCreate not yet sent — escalated after 6h"}];
+const walks=[
+  {t:"15:30",processed:12218,pushed:466,skipped:11752,untracked:0},
+  {t:"12:35",processed:12218,pushed:118,skipped:12100,untracked:0},
+  {t:"10:07",processed:12218,pushed:52,skipped:12166,untracked:0},
+  {t:"07:41",processed:12218,pushed:389,skipped:11829,untracked:0},
+  {t:"05:23",processed:12218,pushed:77,skipped:12141,untracked:0},
+];
+
+function chipFor(st){const map={g:["g","Healthy"],a:["a","At risk"],r:["r","Unhealthy"]};const p=map[st]||["","—"];return '<span class="chip '+p[0]+'"><span class="ic"></span>'+p[1]+'</span>';}
+function worst(states){const rank={r:3,a:2,g:1,pending:0,na:-1};let w="g",has=false;states.forEach(s=>{if(s==="r"||s==="a"||s==="g"){has=true;if(rank[s]>rank[w])w=s;}});return has?w:"g";}
+function stageLabel(i){return["Shopify order","Allocator split","NAV staging","NAV promotion","3PL ship","Shopify back-sync"][i];}
+function stageDesc(code,i){
+  if(code==="na")return "No leg for this channel";
+  if(code==="pending")return "Not started";
+  const done={0:"Order received",1:"Split decided",2:"Written to staging",3:"Promoted to Sales Header",4:"Shipment posted by 3PL",5:"fulfillmentCreate sent"}[i];
+  const wait={0:"Receiving",1:"Deciding split",2:"Writing to staging",3:"Awaiting promotion",4:"Awaiting ship",5:"Awaiting back-sync"}[i];
+  const err={2:"Staging promotion errored",3:"Promotion errored",4:"Ship overdue",5:"Back-sync missing"}[i]||"Errored";
+  return code==="g"?done:code==="a"?wait:err;
+}
+
+function pipes(){
+  const inv=outage
+    ?{key:"inventory",nm:"Inventory sync",st:"r",metrics:[["Watermark age","6h 14m stale","redv"],["Watcher heartbeat","no beat 3h 08m","redv"],["Last walk","during outage: none",""],["Dry-run would-push","7,245 / 12,218","warnv"]],foot:["trigger job_queue","watcher DOWN (bb8 timeout)"]}
+    :{key:"inventory",nm:"Inventory sync",st:"g",metrics:[["Watermark","entry 1321577 · fresh","okv"],["Last walk 15:30","push 466 · skip 11,752",""],["Untracked filtered","0","okv"],["Dry-run would-push","7,245 / 12,218","warnv"]],foot:["trigger job_queue","IABC ~2h cadence"]};
+  return[
+    inv,
+    {key:"backsync",nm:"Back-sync (ship → Shopify)",st:"a",metrics:[["Watermark age","34m",""],["Missed shipments 14d","1","warnv"],["Last fulfillmentCreate","22m ago",""],["Errors 24h","0","okv"]],foot:["NAV → Shopify","1 missed (SP-319090)"]},
+    {key:"jobqueue",nm:"NAV job queue",st:outage?"r":"g",metrics:outage
+        ?[["CU 50009 auto-release","not firing 3h+","redv"],["Stuck jobs >30m","1 (CU 50007)","redv"],["Staging backlog","rising","redv"],["Oldest staged","3h 08m","redv"]]
+        :[["CU 50009 auto-release","firing (4m ago)","okv"],["Stuck jobs >30m","0","okv"],["CU 50007 IABC","completing ~2h","okv"],["Staging backlog","0","okv"]],
+      foot:["NAV instrumentation","the 2026-05-20 tripwire"]},
+    {key:"split",nm:"Allocator",st:"g",metrics:[["Decisions 24h","1,204",""],["Split rate","31%",""],["Errors 24h","0","okv"],["ATP fallbacks","2",""]],foot:["warehouse_split","Mari's 4 rules"]},
+    {key:"price",nm:"Price sync",st:"g",metrics:[["Watermark","fresh","okv"],["Last run","28m ago",""],["Pushed","12",""],["Errors 24h","0","okv"]],foot:["trigger job_queue","healthy"]},
+    {key:"webhooks",nm:"Shopify webhooks",st:"g",metrics:[["orders/create","3m ago",""],["fulfillments/update","11m ago",""],["Removed subs","0","okv"],["WAF skip rule","present","okv"]],foot:["Cloudflare edge","subscriptions healthy"]},
+  ];
+}
+const tabForPipe={inventory:"inventory",backsync:"backsync",jobqueue:"errors",split:"split",price:"home",webhooks:"errors"};
+
+/* remediation registry — each error maps to the tool an operator should run */
+const remedies={
+  staging:{title:"Stuck NAV staging · SP-319061",sev:"r",
+    cause:"NAV promotion (CU 50009 processPendingOrders) errored promoting the staged order because a line references a <code class='k'>Blocked = 1</code> SKU on <code class='k'>[GRUS$Item]</code> (Clipper 116 Bib).",
+    tool:"Unblock item, then re-run promotion sweep",
+    how:"Diagnostic: <code class='k'>GET /api/nav/staging/stuck</code> (stuck_staging). Fix: set <code class='k'>[GRUS$Item].Blocked = 0</code> for the SKU, then NAV CU 50009 auto-release re-promotes the staged row on its next tick.",
+    does:"Clears the staging row to Status 0 and lets the order flow to a live Sales Header.",
+    run:"Re-run promotion sweep",done:"Promotion sweep queued — SP-319061 re-promotes once the SKU is unblocked",
+    extra:{label:"Find all blocked SKUs in SQL console",tpl:"SELECT [No_],[Description],[Blocked] FROM [GRUS$Item] WHERE [Blocked] = 1;"}},
+  backsync:{title:"Missed back-sync · SP-319090",sev:"r",
+    cause:"NAV posted the shipment (<code class='k'>GRUS$Sales Shipment Header</code>) but no <code class='k'>shopify_fulfillment_id</code> landed in <code class='k'>nav_shipment_sync</code> — the fulfillmentCreate never fired.",
+    tool:"Recovery sweep (fulfillmentCreate)",
+    how:"<code class='k'>POST /api/recovery/fulfillments</code> (recovery.rs) → <code class='k'>submit_fulfillment_requests_for_order</code> → Shopify <code class='k'>fulfillmentCreate</code>, then re-checks the back-sync watermark.",
+    does:"Sends the missing fulfillment to Shopify and records the fulfillment id, closing the leg.",
+    run:"Trigger fulfillmentCreate",done:"Recovery sweep queued for SP-319090 — fulfillmentCreate dispatched"},
+  dryrun:{title:"Inventory dry-run divergence",sev:"a",
+    cause:"The 16:46 dry-run reported 7,245 of 12,218 pairs would-push, while live walks push 52–466. Likely a counting difference (re-activations), not a real backlog — but unconfirmed.",
+    tool:"Reconcile dry-run vs live accounting",
+    how:"Read-only investigation: <code class='k'>reconcile_audit</code> compares the dry-run predicate against the live walk's push set and classifies the delta. No writes.",
+    does:"Tells you whether the 7,245 is benign (re-activation accounting) or a genuine backlog needing a full walk.",
+    run:"Run reconcile audit",done:"Reconcile audit started — classifying the 7,245-pair delta (read-only)"},
+  watcher:{title:"Inventory-sync watcher down",sev:"r",
+    cause:"The watcher died with <code class='k'>Timed out in bb8</code> during the nftables outage and did not cleanly resume. Auto-sync has been stalled since.",
+    tool:"Atomic restart of the middleware watcher",
+    how:"<code class='k'>systemctl restart grundens-middleware</code> (ATOMIC_RESTART_DEPLOYMENT). The watcher re-attaches to the job-queue and resumes from <code class='k'>last_iabc_job_entry_no</code> = 1321577.",
+    does:"Brings the watcher back and drains the pending IABC walk — recovers inventory-sync freshness.",
+    run:"Restart watcher (atomic)",done:"Watcher restarted — resumed from entry 1321577, inventory-sync recovering",recover:true},
+  cu50009:{title:"NAV auto-release stalled",sev:"r",
+    cause:"CU 50007 (IABC) hung mid-Shopify-call without a timeout, serialising NAV's Job Queue behind it, so CU 50009 (processPendingOrders) stopped firing and staging is backing up (the 2026-05-20 failure mode).",
+    tool:"Clear the hung NAV job to de-serialise the queue",
+    how:"Diagnostic: <code class='k'>GET /api/nav/job-queue/health</code> (job_queue_health). Fix: cancel the stuck CU 50007 <code class='k'>Job Queue Entry</code> so the queue unblocks and CU 50009 resumes auto-release.",
+    does:"Un-sticks the Job Queue; staged orders promote again on the next CU 50009 tick.",
+    run:"Clear stuck CU 50007 job",done:"Stuck CU 50007 job cleared — Job Queue de-serialised, CU 50009 resuming",recover:true},
+};
+
+function renderRollup(){
+  const all=orders();
+  const stuck=all.filter(o=>o.s.includes("r")).length;
+  const risk=all.filter(o=>!o.s.includes("r")&&o.s.includes("a")).length;
+  const healthy=all.length-stuck-risk;
+  const invFresh=!outage;
+  const items=[
+    {cls:stuck?"r":"g",lab:"Orders stuck",val:stuck,sub:stuck?"need operator action":"none right now"},
+    {cls:risk?"a":"g",lab:"At risk",val:risk,sub:"in flight, watching SLO"},
+    {cls:"g",lab:"Healthy",val:healthy,sub:"flowing normally"},
+    {cls:stuck?"r":(risk?"a":"g"),lab:"Oldest stuck",val:outage?"3h 08m":(stuck?"6h 12m":"—"),sub:outage?"NAV staging backlog":"missed back-sync"},
+    {cls:invFresh?"g":"r",lab:"Inventory sync",val:invFresh?"Fresh":"STALE",sub:invFresh?"watermark 1321577":"watcher down 3h 08m"},
+  ];
+  F("rollup").innerHTML=items.map(k=>'<div class="kpi '+k.cls+'"><span class="edge"></span><div class="lab">'+k.lab+'</div><div class="val">'+k.val+'</div><div class="sub">'+k.sub+'</div></div>').join("");
+}
+function renderPipes(){
+  const ps=pipes();
+  F("pipes").innerHTML=ps.map(p=>'<div class="pipe clk" data-pipe="'+p.key+'"><div class="hd"><span class="nm">'+p.nm+'</span>'+chipFor(p.st)+'</div><div class="metrics">'+p.metrics.map(m=>'<div class="m"><span class="k">'+m[0]+'</span><span class="v '+(m[2]||'')+'">'+m[1]+'</span></div>').join("")+'</div><div class="foot"><span>'+p.foot[0]+'</span><span>'+p.foot[1]+'</span></div></div>').join("");
+  const red=ps.filter(p=>p.st==="r").length,amb=ps.filter(p=>p.st==="a").length;
+  F("pipeSummary").textContent=red?(red+" pipe"+(red>1?"s":"")+" unhealthy · "+amb+" at risk · click a card to drill in"):(amb?(amb+" at risk · click a card to drill in"):"all pipes healthy · click a card to drill in");
+}
+function renderRows(){
+  let list=orders().filter(o=>chan==="all"?true:o.ch===chan);
+  if(filt==="attn")list=list.filter(o=>o.s.includes("r")||o.s.includes("a"));
+  const tb=F("rows");tb.innerHTML="";
+  list.forEach(o=>{
+    const w=worst(o.s);
+    const tr=document.createElement("tr");tr.className="row";
+    tr.innerHTML='<td class="oid">'+o.id+'<small>'+o.who+'</small></td><td><span class="badge '+o.ch+'">'+(o.ch==="dtc"?"DTC":"Wholesale")+'</span></td>'+o.s.map(c=>'<td class="stagecell"><span class="dot '+c+'"></span></td>').join("")+'<td class="agecell '+o.ageState+'">'+o.age+'</td><td>'+chipFor(w)+'</td>';
+    const det=document.createElement("tr");det.className="detail";det.style.display="none";
+    const fixBtn=o.note&&o.note.fix?'<button class="minibtn" data-act="fix" data-eid="'+o.note.fix+'">Suggested fix &rarr;</button>':'';
+    det.innerHTML='<td colspan="10"><div class="din"><div class="timeline">'+o.s.map((c,i)=>'<div class="step '+c+'"><div class="bar"></div><div class="st">'+stageLabel(i)+'</div><div class="sd">'+stageDesc(c,i)+'</div></div>').join("")+'</div>'+(o.note&&o.note.m?'<div class="note '+(o.note.t||'')+'">'+o.note.m+'</div>':'')+'<div class="actions"><button class="minibtn" data-act="sqlconsole" data-oid="'+o.id+'">Open in NAV SQL console</button><button class="minibtn" data-act="alloclog" data-oid="'+o.id+'">View allocation log</button>'+(w==="r"?'<button class="minibtn" data-act="recover" data-oid="'+o.id+'">Trigger recovery sweep</button>':'')+fixBtn+'</div></div></td>';
+    tr.addEventListener("click",()=>{det.style.display=det.style.display==="none"?"table-row":"none";});
+    tb.appendChild(tr);tb.appendChild(det);
+  });
+  F("rowcount").textContent=list.length+" order"+(list.length!==1?"s":"")+" shown";
+}
+
+function renderHome(){
+  const acts=[
+    ["g","inventory_sync","IABC walk complete — pushed 466, skipped 11,752","15:30"],
+    ["g","shopify_webhook_event","orders/create SP-319114 received","3m"],
+    ["r","nav_shipment_sync","SP-319090 shipment posted, back-sync not yet sent","6h"],
+    ["a","nav_shipment_sync","missed-shipments sweep found 1 in 14d window","34m"],
+    ["g","price_sync","price walk pushed 12 variants","28m"],
+    ["r","shopify_event_log","staging promotion error SP-319061 (Blocked SKU)","3h"],
+    ["g","shopify_webhook_event","fulfillments/update WH-208844","11m"],
+  ];
+  F("v-home").innerHTML=
+    '<div class="sec"><h2>Home · unified activity</h2><div class="rule"></div><span class="aux">merge-sort across the 5 timestamped tables</span></div>'+
+    '<div class="rollup" style="grid-template-columns:repeat(4,1fr)">'+
+      '<div class="kpi g"><span class="edge"></span><div class="lab">Orders today</div><div class="val">247</div><div class="sub">since 00:00 UTC</div></div>'+
+      '<div class="kpi '+(outage?'r':'a')+'"><span class="edge"></span><div class="lab">Errors 24h</div><div class="val">'+(outage?'14':'2')+'</div><div class="sub">across all sources</div></div>'+
+      '<div class="kpi g"><span class="edge"></span><div class="lab">Webhooks 1h</div><div class="val">63</div><div class="sub">all topics</div></div>'+
+      '<div class="kpi '+(outage?'r':'g')+'"><span class="edge"></span><div class="lab">Syncs healthy</div><div class="val">'+(outage?'4 / 6':'6 / 6')+'</div><div class="sub">pipeline layer</div></div>'+
+    '</div>'+
+    '<div class="grid2" style="margin-top:12px">'+
+      '<div class="panel"><h3>Recent activity</h3><div class="feed">'+acts.map(a=>'<div class="frow"><span class="fdot '+a[0]+'"></span><span><span class="fk">'+a[1]+'</span><br>'+a[2]+'</span><span class="ft">'+a[3]+'</span></div>').join("")+'</div></div>'+
+      '<div class="panel"><h3>Errors (last 15 days)</h3><div class="feed">'+
+        '<div class="frow"><span class="fdot r"></span><span><span class="fk">staging promotion</span><br>SP-319061 — Blocked = 1 SKU</span><span class="ft">3h</span></div>'+
+        '<div class="frow"><span class="fdot r"></span><span><span class="fk">back-sync</span><br>SP-319090 — fulfillmentCreate missing</span><span class="ft">6h</span></div>'+
+        '<div class="frow"><span class="fdot a"></span><span><span class="fk">inventory_sync</span><br>dry-run divergence 7,245 would-push</span><span class="ft">16:46</span></div>'+
+        (outage?'<div class="frow"><span class="fdot r"></span><span><span class="fk">job_queue</span><br>watcher: Timed out in bb8</span><span class="ft">07-01</span></div>':'')+
+      '</div><div style="margin-top:10px"><button class="minibtn" data-act="gotab" data-tab="errors">Open Errors tab →</button></div></div>'+
+    '</div>';
+}
+function renderInventory(){
+  const max=Math.max.apply(null,walks.map(w=>w.pushed));
+  F("v-inventory").innerHTML=
+    '<div class="sec"><h2>Inventory sync</h2><div class="rule"></div>'+chipFor(outage?'r':'g')+'</div>'+
+    '<div class="grid2">'+
+      '<div class="panel"><h3>Watermark &amp; watcher</h3>'+
+        '<div class="m"><span class="k">last_iabc_job_entry_no</span><span class="v mono">'+(outage?'1321421 (behind)':'1321577')+'</span></div>'+
+        '<div class="m"><span class="k">newest NAV IABC completion</span><span class="v mono">1321577</span></div>'+
+        '<div class="m"><span class="k">watermark age</span><span class="v '+(outage?'redv':'okv')+'">'+(outage?'6h 14m stale':'within cycle')+'</span></div>'+
+        '<div class="m"><span class="k">watcher heartbeat</span><span class="v '+(outage?'redv':'okv')+'">'+(outage?'no beat 3h 08m':'12s ago')+'</span></div>'+
+        '<div class="m"><span class="k">trigger mode</span><span class="v mono">job_queue</span></div>'+
+        (outage?'<div class="actions"><button class="minibtn" data-act="fix" data-eid="watcher">Suggested fix →</button></div>':'')+
+      '</div>'+
+      '<div class="panel"><h3>Dry-run vs live divergence</h3>'+
+        '<div class="m"><span class="k">dry-run would-push (16:46)</span><span class="v warnv">7,245 / 12,218</span></div>'+
+        '<div class="m"><span class="k">live walk pushes / cycle</span><span class="v">52 – 466</span></div>'+
+        '<div class="note a">The 7,245 gap is the part-1 open question: likely dry-run counting re-activations, not a true backlog. Surfaced amber, never auto-red until reconciled.</div>'+
+        '<div class="actions"><button class="minibtn" data-act="fix" data-eid="dryrun">Suggested fix →</button></div>'+
+      '</div>'+
+    '</div>'+
+    '<div class="panel" style="margin-top:12px"><h3>Recent catalog walks (pushed per cycle)</h3>'+
+      '<div class="bars">'+walks.slice().reverse().map(w=>'<div class="b '+(w.pushed===max?'hl':'')+'" style="height:'+Math.max(8,w.pushed/max*100)+'%"><span>'+w.t+'</span></div>').join("")+'</div>'+
+      '<div style="height:14px"></div>'+
+      '<div class="tblwrap"><table><thead><tr><th>Walk</th><th>Processed</th><th>Pushed</th><th>Skipped</th><th>Untracked filtered</th></tr></thead><tbody>'+walks.map(w=>'<tr><td class="mono">'+w.t+'</td><td class="mono">'+w.processed.toLocaleString()+'</td><td class="mono">'+w.pushed+'</td><td class="mono">'+w.skipped.toLocaleString()+'</td><td class="mono">'+w.untracked+'</td></tr>').join("")+'</tbody></table></div>'+
+    '</div>';
+}
+function renderBacksync(){
+  F("v-backsync").innerHTML=
+    '<div class="sec"><h2>Back-sync · NAV shipment → Shopify</h2><div class="rule"></div>'+chipFor('a')+'</div>'+
+    '<div class="rollup" style="grid-template-columns:repeat(4,1fr)">'+
+      '<div class="kpi g"><span class="edge"></span><div class="lab">Watermark age</div><div class="val">34m</div><div class="sub">within window</div></div>'+
+      '<div class="kpi a"><span class="edge"></span><div class="lab">Missed 14d</div><div class="val">1</div><div class="sub">SP-319090</div></div>'+
+      '<div class="kpi g"><span class="edge"></span><div class="lab">Fulfillments 24h</div><div class="val">231</div><div class="sub">sent to Shopify</div></div>'+
+      '<div class="kpi g"><span class="edge"></span><div class="lab">Errors 24h</div><div class="val">0</div><div class="sub">clean</div></div>'+
+    '</div>'+
+    '<div class="sec"><h2>Missed shipments</h2><div class="rule"></div><span class="aux">NAV shipment posted, no shopify_fulfillment_id</span></div>'+
+    '<div class="tblwrap"><table><thead><tr><th>Order</th><th>WebId</th><th>NAV shipment</th><th>Carrier</th><th>Tracking</th><th>Posted</th><th></th></tr></thead><tbody>'+
+      missedShip.map(s=>'<tr><td class="oid">'+s.order+'</td><td class="mono">'+s.webid+'</td><td class="mono">'+s.nav+'</td><td>'+s.carrier+'</td><td class="mono">'+s.track+'</td><td class="mono">'+s.posted+'</td><td><button class="minibtn" data-act="fix" data-eid="backsync">Suggested fix →</button></td></tr><tr><td colspan="7" style="color:var(--muted);font-size:12px">'+s.reason+'</td></tr>').join("")+
+    '</tbody></table></div>';
+}
+function renderSplit(){
+  const rows=[
+    ["SP-319114","Neptune Jacket / L","1","single-unit → OLD","TAC"],
+    ["SP-319108","Deck Boss / XL","2","least-split → TAC","TAC"],
+    ["WH-208871","Clipper 116 / M ×3","3","multi → least-split","HF1FTZ"],
+    ["SP-319061","Weather Watch Hat","2","weighted random (pct_new)","HF1FTZ"],
+    ["SP-319090","Clipper 116 Bib / L","2","least-split → TAC","TAC"],
+  ];
+  F("v-split").innerHTML=
+    '<div class="sec"><h2>Warehouse split · allocator</h2><div class="rule"></div>'+chipFor('g')+'</div>'+
+    '<div class="rollup" style="grid-template-columns:repeat(4,1fr)">'+
+      '<div class="kpi g"><span class="edge"></span><div class="lab">Decisions 24h</div><div class="val">1,204</div><div class="sub">across channels</div></div>'+
+      '<div class="kpi g"><span class="edge"></span><div class="lab">Split rate</div><div class="val">31%</div><div class="sub">multi-warehouse</div></div>'+
+      '<div class="kpi g"><span class="edge"></span><div class="lab">ATP fallbacks</div><div class="val">2</div><div class="sub">inventory-aware</div></div>'+
+      '<div class="kpi g"><span class="edge"></span><div class="lab">Errors 24h</div><div class="val">0</div><div class="sub">clean</div></div>'+
+    '</div>'+
+    '<div class="sec"><h2>Recent decisions</h2><div class="rule"></div><span class="aux">Mari\'s 4 rules · warehouse_allocation_log</span></div>'+
+    '<div class="tblwrap"><table><thead><tr><th>Order</th><th>Line</th><th>Qty</th><th>Rule applied</th><th>Location</th><th>Result</th></tr></thead><tbody>'+
+      rows.map(r=>'<tr><td class="oid">'+r[0]+'</td><td>'+r[1]+'</td><td class="mono">'+r[2]+'</td><td>'+r[3]+'</td><td class="mono">'+r[4]+'</td><td><span class="chip g"><span class="ic"></span>ok</span></td></tr>').join("")+
+    '</tbody></table></div>';
+}
+function renderErrors(){
+  const errs=[
+    {id:"staging",st:"r",kind:"staging promotion",subj:"SP-319061",msg:"Blocked = 1 SKU on GRUS$Item (Clipper 116 Bib)",age:"3h 05m",src:"shopify_event_log"},
+    {id:"backsync",st:"r",kind:"back-sync",subj:"SP-319090",msg:"fulfillmentCreate missing after NAV shipment posted",age:"6h 12m",src:"nav_shipment_sync"},
+    {id:"dryrun",st:"a",kind:"inventory dry-run",subj:"—",msg:"divergence 7,245 would-push vs live 52–466",age:"16:46",src:"inventory_sync"},
+  ];
+  if(outage){
+    errs.push({id:"watcher",st:"r",kind:"job_queue",subj:"inventory watcher",msg:"Timed out in bb8 during nftables outage",age:"07-01",src:"shopify_event_log"});
+    errs.push({id:"cu50009",st:"r",kind:"job_queue",subj:"CU 50009",msg:"auto-release not firing, staging backlog rising",age:"07-01",src:"nav instrumentation"});
+  }
+  F("v-errors").innerHTML=
+    '<div class="sec"><h2>Errors</h2><div class="rule"></div><span class="aux">click any row for the recommended remediation</span></div>'+
+    '<div class="tblwrap"><table><thead><tr><th>State</th><th>Kind</th><th>Subject</th><th>Message</th><th>Age</th><th>Source</th><th>Remediation</th></tr></thead><tbody>'+
+      errs.map(e=>'<tr class="row" data-act="fix" data-eid="'+e.id+'"><td><span class="chip '+e.st+'"><span class="ic"></span>'+(e.st==='r'?'Error':'Warn')+'</span></td><td>'+e.kind+'</td><td class="oid">'+e.subj+'</td><td>'+e.msg+'</td><td class="mono">'+e.age+'</td><td class="mono">'+e.src+'</td><td><button class="minibtn" data-act="fix" data-eid="'+e.id+'">Suggested fix &rarr;</button></td></tr>').join("")+
+    '</tbody></table></div>';
+}
+function renderSql(){
+  const templates=[
+    ["Order by WebId","SELECT * FROM [GRUS$Sales Header] WHERE [WebId] = '<webid>'"],
+    ["Stuck staging","SELECT * FROM [GRUS$Sales Header Staging] WHERE [Status] <> 0"],
+    ["IABC watermark","SELECT MAX([Entry No_]) FROM [Job Queue Log Entry] WHERE [Object ID to Run] = 50007 AND [Status] = 2"],
+    ["Missed shipments","SELECT sh.* FROM [GRUS$Sales Shipment Header] sh LEFT JOIN nav_shipment_sync s ON s.nav_shipment = sh.[No_] WHERE s.shopify_fulfillment_id IS NULL"],
+  ];
+  const val=sqlPrefill||templates[0][1];
+  F("v-sql").innerHTML=
+    '<div class="sec"><h2>NAV SQL console</h2><div class="rule"></div><span class="aux">read-only · curated templates · audited</span></div>'+
+    '<div class="panel"><textarea class="sql" id="sqlbox" placeholder="SELECT ...">'+val+'</textarea>'+
+      '<div class="tmpls">'+templates.map((t,i)=>'<span class="tmpl" data-sqltpl="'+i+'">'+t[0]+'</span>').join("")+'</div>'+
+      '<button class="btn" id="runsql" style="background:var(--orange);border-color:var(--orange)">Run query</button>'+
+      '<div id="sqlresult" style="margin-top:14px"></div></div>';
+  const tabWrap=F("v-sql");
+  tabWrap.querySelectorAll("[data-sqltpl]").forEach(el=>el.addEventListener("click",()=>{F("sqlbox").value=templates[+el.dataset.sqltpl][1];}));
+  F("runsql").addEventListener("click",()=>{
+    F("sqlresult").innerHTML='<div class="tblwrap"><table><thead><tr><th>No_</th><th>WebId</th><th>Status</th><th>Location Code</th><th>Bill-to Name</th></tr></thead><tbody><tr><td class="mono">108844</td><td class="mono">7734921006</td><td class="mono">Released</td><td class="mono">TAC</td><td>K. Bianchi</td></tr><tr><td class="mono">108845</td><td class="mono">7734920551</td><td class="mono">Open</td><td class="mono">HF1FTZ</td><td>Cabela\'s</td></tr></tbody></table></div><div style="font-size:11.5px;color:var(--faint);margin-top:6px">2 rows · 41ms · logged to nav_query_audit</div>';
+    toast("Query executed (read-only, audited)");
+  });
+}
+
+const renderers={home:renderHome,inventory:renderInventory,backsync:renderBacksync,split:renderSplit,errors:renderErrors,sql:renderSql};
+
+function showTab(name){
+  activeTab=name;
+  [].forEach.call(F("tabs").children,t=>t.classList.toggle("on",t.dataset.tab===name));
+  document.querySelectorAll(".view").forEach(v=>v.classList.add("hide"));
+  F("v-"+name).classList.remove("hide");
+  if(renderers[name])renderers[name]();
+}
+
+function openModal(title,html){F("modalTitle").textContent=title;F("modalBody").innerHTML=html;F("overlay").classList.add("on");}
+function closeModal(){F("overlay").classList.remove("on");}
+let toastTimer;
+function toast(msg){const t=F("toast");t.innerHTML='<span class="tk">✓</span>'+msg;t.classList.add("on");clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove("on"),2600);}
+
+function openFix(eid){
+  const r=remedies[eid];if(!r)return;
+  openModal(r.title,
+    '<div class="note '+r.sev+'" style="margin-top:0">'+r.cause+'</div>'+
+    '<div class="panel" style="margin-top:14px">'+
+      '<div style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--orange)">Recommended tool</div>'+
+      '<h3 style="margin:5px 0 8px">'+r.tool+'</h3>'+
+      '<div style="font-size:12.5px;color:var(--muted);margin-bottom:8px">'+r.how+'</div>'+
+      '<div class="m"><span class="k">Effect</span><span class="v" style="font-weight:400;text-align:right;max-width:340px">'+r.does+'</span></div>'+
+    '</div>'+
+    '<div class="actions">'+
+      '<button class="btn" id="runFix" style="background:var(--orange);border-color:var(--orange)">'+r.run+'</button>'+
+      (r.extra?'<button class="minibtn" id="fixSql">'+r.extra.label+'</button>':'')+
+      '<button class="minibtn" id="fixCancel">Close</button>'+
+    '</div>');
+  F("runFix").addEventListener("click",()=>{
+    closeModal();toast(r.done);
+    if(r.recover&&outage){setOutage(false);}
+  });
+  if(r.extra)F("fixSql").addEventListener("click",()=>{sqlPrefill=r.extra.tpl;closeModal();showTab("sql");window.scrollTo({top:0,behavior:"smooth"});});
+  F("fixCancel").addEventListener("click",closeModal);
+}
+
+F("modalX").addEventListener("click",closeModal);
+F("overlay").addEventListener("click",e=>{if(e.target===F("overlay"))closeModal();});
+
+document.addEventListener("click",e=>{
+  const pipe=e.target.closest("[data-pipe]");
+  if(pipe){showTab(tabForPipe[pipe.dataset.pipe]||"home");window.scrollTo({top:0,behavior:"smooth"});return;}
+  const b=e.target.closest("[data-act]");
+  if(!b)return;
+  const act=b.dataset.act,oid=b.dataset.oid;
+  if(act==="fix"){e.stopPropagation();openFix(b.dataset.eid);return;}
+  if(act==="gotab"){showTab(b.dataset.tab);window.scrollTo({top:0,behavior:"smooth"});return;}
+  if(act==="sqlconsole"){
+    sqlPrefill="SELECT * FROM [GRUS$Sales Header] WHERE [No_] LIKE '%"+oid+"%'\n  OR [WebId] IN (SELECT web_id FROM order_map WHERE shopify_name = '"+oid+"');";
+    showTab("sql");window.scrollTo({top:0,behavior:"smooth"});toast("Opened "+oid+" in SQL console");
+  }else if(act==="alloclog"){
+    const rows=allocations[oid]||allocations._default;
+    openModal("Allocation log · "+oid,'<div class="tblwrap"><table><thead><tr><th>Line</th><th>Qty</th><th>Rule</th><th>ATP note</th></tr></thead><tbody>'+rows.map(r=>'<tr><td>'+r[0]+'</td><td class="mono">'+r[1]+'</td><td>'+r[2]+'</td><td class="mono">'+r[3]+'</td></tr>').join("")+'</tbody></table></div><div style="font-size:11.5px;color:var(--faint);margin-top:8px">Source: warehouse_allocation_log · decision snapshot at order intake.</div>');
+  }else if(act==="recover"){
+    openModal("Trigger recovery sweep · "+oid,'<p style="margin-top:0">Re-runs <code class="k">submit_fulfillment_requests_for_order</code> / <code class="k">fulfillmentCreate</code> for <b>'+oid+'</b> and re-checks the back-sync watermark.</p><p style="font-size:12.5px;color:var(--muted)">Demo only — no live call is made.</p><div class="actions"><button class="btn" id="confirmRecover" style="background:var(--orange);border-color:var(--orange)">Run sweep</button><button class="minibtn" id="cancelRecover">Cancel</button></div>');
+    F("confirmRecover").addEventListener("click",()=>{closeModal();toast("Recovery sweep queued for "+oid);});
+    F("cancelRecover").addEventListener("click",closeModal);
+  }
+});
+
+F("tabs").addEventListener("click",e=>{const t=e.target.closest(".tab");if(t)showTab(t.dataset.tab);});
+F("chan").addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;[].forEach.call(F("chan").children,x=>x.classList.remove("on"));b.classList.add("on");chan=b.dataset.c;renderRows();});
+F("filt").addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;[].forEach.call(F("filt").children,x=>x.classList.remove("on"));b.classList.add("on");filt=b.dataset.f;renderRows();});
+
+function renderOrderHealth(){renderRollup();renderPipes();renderRows();}
+function renderActive(){renderOrderHealth();if(activeTab!=="orderhealth"&&renderers[activeTab])renderers[activeTab]();}
+
+function setOutage(on){
+  outage=on;
+  F("replayBtn").classList.toggle("active",outage);
+  F("replayBtn").textContent=outage?"Outage active · click to recover":"Replay 2026-07-01 outage";
+  F("asof").textContent=outage?"as of 2026-07-01 16:20 (incident)":"as of just now";
+  F("cadence").textContent=outage?"inventory-sync watcher DOWN · bb8 timeout during nftables outage":"aggregator cadence 3 min · inventory layer ~2 h";
+  renderActive();
+  toast(outage?"Replaying 2026-07-01 outage":"Recovered — pipes healthy");
+}
+
+F("refreshBtn").addEventListener("click",()=>{F("asof").textContent="as of just now";renderActive();toast("Snapshot refreshed");});
+F("replayBtn").addEventListener("click",()=>{setOutage(!outage);});
+
+renderOrderHealth();
+</script>
+</body>
+</html>

@@ -13,9 +13,10 @@
 //   - atomic_watcher_restart (inventory-sync watcher down)    -> ops runbook (systemctl)
 //   - clear_cu50007_job      (NAV job queue serialized)       -> ops runbook (NAV admin)
 //   - reconcile_audit        (dry-run divergence, read-only)  -> ops runbook (no writes)
-// plus two runbook-only entries so every pipe key has a mapping:
+// plus three runbook-only entries so every pipe key has a mapping:
 //   - webhook_resubscribe    (removed Shopify subscription)   -> ops runbook
 //   - allocator_reallocate   (allocator split failures)       -> ops runbook
+//   - forward_sync_recover   (exported not in NAV, Unit 11)   -> ops runbook (link-only, US-9)
 import type { RemediationMapping, RemediationTool } from '@order-health/shared';
 import { PIPES } from '../aggregator/writers';
 
@@ -112,6 +113,25 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
     },
     writeCapable: true,
   },
+  {
+    // forward_sync (Unit 11, US-9). LINK-ONLY and non-auto by charter: this service
+    // never re-drives the export. It points the operator at the EXISTING manual
+    // recovery path (middleware Fulfillment Recovery: force forward-sync single, or
+    // bulk replay by date window) and the Recover-StuckOrders.ps1 runbook. No
+    // endpoint is fired from here and no middleware mutation is issued.
+    id: 'forward_sync_recover',
+    name: 'Recover exported-but-absent orders (manual)',
+    description:
+      'Re-drive the Shopify to NAV export for orders tagged exported that never created a NAV Sales Order, using the middleware Fulfillment Recovery page (force forward-sync for a single order, or bulk replay by date window) and the Recover-StuckOrders.ps1 runbook. Link-only: this service does not re-drive the export and issues no middleware mutation.',
+    kind: 'ops_runbook',
+    runbook: {
+      ref: 'runbooks/Recover-StuckOrders.ps1',
+      command:
+        'Middleware Fulfillment Recovery (force forward-sync single / bulk replay by date window), or run Recover-StuckOrders.ps1',
+      diagnostic: 'GET /api/nav/stuck-staging',
+    },
+    writeCapable: false,
+  },
 ] as const;
 
 // --- Subject -> tool mappings ---------------------------------------------
@@ -179,6 +199,16 @@ export const REMEDIATION_MAPPINGS: readonly RemediationMapping[] = [
     subjectKey: 'allocator',
     appliesWhen: 'Split-sanity RED: high un-allocatable / failed split share on the allocation log.',
     toolId: 'allocator_reallocate',
+    primary: true,
+  },
+  // forward_sync (Unit 11): exported orders absent from NAV, or a stalled export.
+  // Link-only manual recovery (US-9); never auto-fires.
+  {
+    subjectKind: 'pipe',
+    subjectKey: 'forward_sync',
+    appliesWhen:
+      'Exported Shopify orders have no NAV Sales Order (backlog RED/AMBER) or the export has stalled (liveness RED).',
+    toolId: 'forward_sync_recover',
     primary: true,
   },
   // --- Order-level signals (design.md 5, the demo error rows) ---

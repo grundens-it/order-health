@@ -11,8 +11,9 @@ import type { OrderHealth, PipelineHealth } from '@order-health/shared';
 import { config } from '../config';
 import { getPool } from '../db/pool';
 import type { MiddlewareClient } from '../sources/middlewareClient';
-import type { NavClient, NavOrderLifecycleRow } from '../sources/navClient';
+import type { NavClient, NavOrderLifecycleRow, NavForwardSyncCandidate } from '../sources/navClient';
 import { computeInventorySync, type InventorySyncInput } from './inventorySync';
+import { computeForwardSync, type ForwardSyncCandidate, type ForwardSyncInput } from './forwardSync';
 import {
   CHANNEL_STAGES,
   computeOrderRows,
@@ -40,6 +41,7 @@ export const PIPES = [
   'nav_job_queue',
   'shopify_webhook',
   'allocator',
+  'forward_sync',
 ] as const;
 
 export interface Sources {
@@ -272,6 +274,65 @@ export async function computeBackSyncPipeline(sources: Sources): Promise<Pipelin
   };
 }
 
+// forward_sync pipe seam (Unit 11, ADR-0006 phase 1). Reads the read-only NAV
+// staging-derived backlog candidates, cross-checks NAV presence (Sales Header +
+// Sales Invoice Header under SP-<n>-%, correlation on <n>), and reads the export
+// liveness timestamp. Assembles the seeded input, calls the pure computeForwardSync,
+// and maps the result onto the PipelineHealth row per the Architect field mapping
+// (freshness = backlog, liveness = export liveness, watermark_lag_s = oldest age,
+// last_progress_at / heartbeat_at = last_success_at). All reads are currently
+// stubbed (candidates -> null so the pipe reads 'unknown', never a false green)
+// until DevOps wires the live NAV staging read. Phase 2 (never-staged tail via the
+// middleware tag surface) stays a stub seam; coverage is labeled 'staging' here.
+export async function computeForwardSyncPipeline(sources: Sources): Promise<PipelineHealth> {
+  // READ-ONLY source reads. Candidates and the liveness clock are independent;
+  // the presence cross-check depends on the candidate numbers, so it follows.
+  const [rawCandidates, lastSuccessAt] = await Promise.all([
+    sources.nav.getForwardSyncStagingCandidates(),
+    sources.nav.getLastForwardSyncSuccessAt(),
+  ]);
+
+  // null candidates => the source is not wired / failed: the backlog verdict must
+  // read 'unknown', never a false green (US-7). An empty array is a real zero.
+  const sourced = rawCandidates !== null;
+  const candidates: ForwardSyncCandidate[] = (rawCandidates ?? [])
+    .filter((c): c is NavForwardSyncCandidate & { shopifyNumber: string } => c.shopifyNumber !== null)
+    .map((c) => ({
+      shopifyOrderName: c.shopifyOrderName,
+      shopifyNumber: c.shopifyNumber,
+      createdAt: c.createdAt,
+      tag: c.tag,
+    }));
+
+  // Presence cross-check on the bare <n> (leg-stripped): an order present via any
+  // leg counts as present and is not in the backlog (multi-leg invariant, US-1).
+  const present = await sources.nav.getNavPresentShopifyNumbers(candidates.map((c) => c.shopifyNumber));
+
+  const input: ForwardSyncInput = {
+    candidates,
+    navPresent: new Set(present),
+    lastSuccessAt,
+    coverage: 'staging', // phase 1: NAV-staging-derived backlog only (ADR-0006)
+    sourced,
+  };
+
+  const r = computeForwardSync(input, config.forwardSync, Date.now());
+
+  return {
+    pipe: 'forward_sync',
+    pipe_verdict: r.pipeVerdict, // worst of backlog freshness / export liveness
+    freshness_verdict: r.freshnessVerdict, // the backlog verdict (exported-not-in-NAV)
+    watermark_lag_s: r.oldestAgeS,         // oldest stuck backlog age, seconds
+    last_progress_at: r.lastSuccessAt,
+    liveness_verdict: r.livenessVerdict,   // export liveness (last import)
+    heartbeat_at: r.lastSuccessAt,
+    heartbeat_age_s: r.lastSuccessAgeS,
+    // backlog_count, sample, contiguous_block, coverage live in the typed detail
+    // bag (ForwardSyncDetail) the panel renders.
+    detail: r.detail as unknown as Record<string, unknown>,
+  };
+}
+
 // A generic placeholder pipe so the strip has a full row set before each Phase W
 // unit lands its real compute. Same PipelineHealth shape as the seam above.
 function placeholderPipe(pipe: string): PipelineHealth {
@@ -299,6 +360,7 @@ export async function computePipelines(sources: Sources): Promise<PipelineHealth
     computeJobQueuePipeline(sources),       // Unit 3
     computeShopifyWebhookPipeline(sources), // Unit 3
     computeAllocatorPipeline(sources),      // Unit 4
+    computeForwardSyncPipeline(sources),    // Unit 11
   ]);
   const real = new Map<string, PipelineHealth>(landed.map((p) => [p.pipe, p]));
   return PIPES.map((p) => real.get(p) ?? placeholderPipe(p));

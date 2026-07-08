@@ -15,11 +15,14 @@ import {
   buildAuthentication,
   buildQueries,
   channelFromWebOrder,
+  classifyForwardSyncTag,
+  mapForwardSyncCandidate,
   mapInventoryWalk,
   mapOrderLifecycleRow,
   mapShipmentHeader,
   mapWatermarkState,
   navTable,
+  parseSpOrderNumber,
   toIso,
 } from './navClient.js';
 import type { config } from '../config.js';
@@ -272,4 +275,80 @@ test('NAV_AUTH_MODE=aad-service-principal passes tenant/client/secret', () => {
 test('NAV_AUTH_MODE=aad-msi selects the managed-identity type', () => {
   const auth = buildAuthentication(navCfg({ authMode: 'aad-msi' }));
   assert.equal(auth.type, 'azure-active-directory-msi-app-service');
+});
+
+// --- forward_sync helpers (Unit 11, ADR-0006) ------------------------------
+test('classifyForwardSyncTag maps the ADR-0006 candidate tags', () => {
+  // The exported tag => shopify_exported.
+  assert.equal(
+    classifyForwardSyncTag('1-Status:Shopify-Exported!'),
+    'shopify_exported',
+  );
+  // The middleware-status tag => middleware_status.
+  assert.equal(classifyForwardSyncTag('1-Middleware Status!'), 'middleware_status');
+  // The legacy imported tag also => middleware_status.
+  assert.equal(
+    classifyForwardSyncTag('1-Status:Middleware-Imported!'),
+    'middleware_status',
+  );
+  // Exported wins when both are present (the earlier, more specific stall signal).
+  assert.equal(
+    classifyForwardSyncTag('1-Middleware Status!, 1-Status:Shopify-Exported!'),
+    'shopify_exported',
+  );
+  // Terminal NAV-Created only / empty / null => unknown (never a candidate).
+  assert.equal(classifyForwardSyncTag('1-Status:NAV-Created!'), 'unknown');
+  assert.equal(classifyForwardSyncTag(''), 'unknown');
+  assert.equal(classifyForwardSyncTag(null), 'unknown');
+});
+
+test('parseSpOrderNumber extracts the <n> correlation key', () => {
+  assert.equal(parseSpOrderNumber('SP-319319-1'), '319319'); // legged (open order)
+  assert.equal(parseSpOrderNumber('SP-99999'), '99999');     // bare (posted invoice)
+  assert.equal(parseSpOrderNumber('sp-42-2'), '42');         // case-insensitive prefix
+  assert.equal(parseSpOrderNumber('X-1'), null);             // non-SP-
+  assert.equal(parseSpOrderNumber(''), null);
+  assert.equal(parseSpOrderNumber(null), null);
+});
+
+test('mapForwardSyncCandidate maps a staging row to the typed shape', () => {
+  const cand = mapForwardSyncCandidate({
+    shopifyOrderName: 'SP-319121',
+    createdAt: new Date('2026-07-01T14:00:00Z'),
+    orderTags: '1-Status:Shopify-Exported!',
+    status: 1,
+    navOrderNo: '', // empty => not promoted (a real candidate)
+    errorMessage: 'Item is blocked',
+  });
+  assert.deepEqual(cand, {
+    shopifyOrderName: 'SP-319121',
+    shopifyNumber: '319121',
+    createdAt: '2026-07-01T14:00:00.000Z',
+    tag: 'shopify_exported',
+    navOrderNo: null, // toStr('') => null
+    status: 1,
+    errorMessage: 'Item is blocked',
+  });
+});
+
+test('the four forward_sync queries are GRUS$-prefixed and read-only', () => {
+  const q = buildQueries('GRUS');
+  for (const sql of [
+    q.forwardSyncStagingCandidates,
+    q.forwardSyncPresentHeaders,
+    q.forwardSyncPresentInvoices,
+    q.forwardSyncLastSuccess,
+  ]) {
+    assert.doesNotThrow(() => assertReadOnly(sql));
+  }
+  // Staging candidates + last-success read GRUS$Sales Header Staging.
+  assert.match(q.forwardSyncStagingCandidates, /\[GRUS\$Sales Header Staging\]/);
+  assert.match(q.forwardSyncStagingCandidates, /SELECT TOP \(@limit\)/);
+  assert.match(q.forwardSyncLastSuccess, /\[GRUS\$Sales Header Staging\]/);
+  assert.match(q.forwardSyncLastSuccess, /MAX\(\[CreatedDate\]\)/);
+  // Presence checks read the two GRUS$-prefixed headers under SP-%.
+  assert.match(q.forwardSyncPresentHeaders, /\[GRUS\$Sales Header\][\s\S]*LIKE 'SP-%'/);
+  assert.match(q.forwardSyncPresentInvoices, /\[GRUS\$Sales Invoice Header\][\s\S]*LIKE 'SP-%'/);
+  // No unprefixed table name leaks.
+  assert.ok(!q.forwardSyncPresentInvoices.includes('[Sales Invoice Header]'));
 });

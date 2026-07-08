@@ -117,6 +117,11 @@ export interface MiddlewareClient {
   // endpoint has not been queried (stub) so the missed signal reads 'unknown'
   // rather than a false green. Wholesale shipments are excluded upstream.
   getMissedShipmentDetail(): Promise<MissedShipment[] | null>;
+  // PHASE 2 (ADR-0006) seam, STUB ONLY in Unit 11. The never-staged tail: Shopify
+  // orders tagged exported that never reached NAV staging, visible only via the
+  // middleware's read-only exported-tag surface. Not wired in phase 1: returns null
+  // so the pipe reads its phase-1 (staging) coverage. No new endpoint, no fetch here.
+  getExportedPendingOrders(): Promise<null>;
 }
 
 // Clearly-marked stub. Every method returns empty/placeholder data and logs a
@@ -207,6 +212,11 @@ class MiddlewareClientStub implements MiddlewareClient {
     this.note('GET /api/back-sync/missed-shipments');
     // null (not empty) so the missed-shipments signal reads 'unknown' until the
     // endpoint is live; an empty array would falsely read as green (zero missed).
+    return null;
+  }
+  async getExportedPendingOrders(): Promise<null> {
+    // PHASE 2 (ADR-0006), not wired in phase 1: no live call, no new endpoint.
+    this.note('forward-sync exported-pending (phase 2, not wired)');
     return null;
   }
 }

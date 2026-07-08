@@ -19,6 +19,7 @@ import type {
 } from '../sources/middlewareClient';
 import type {
   NavClient,
+  NavForwardSyncCandidate,
   NavOrderLifecycleRow,
   NavShipmentHeader,
   NavWatermarkState,
@@ -55,6 +56,13 @@ export interface BoardSeed {
   webhook?: ShopifyWebhookStatus;
   allocator?: Partial<AllocatorStatus>;
   orders?: NavOrderLifecycleRow[];
+  // forward_sync (Unit 11, ADR-0006). Omitted => green: no backlog, all present,
+  // a recent promotion. candidates=null seeds an 'unknown' (source not wired).
+  forwardSync?: {
+    candidates?: NavForwardSyncCandidate[] | null;
+    present?: string[];
+    lastSuccessAt?: string | null;
+  };
 }
 
 function greenWalks(now: number): InventoryWalk[] {
@@ -85,6 +93,19 @@ class SeededNavClient implements NavClient {
   }
   async getRecentShipments(): Promise<NavShipmentHeader[]> {
     return this.seed.backSync?.shipments ?? [];
+  }
+  async getForwardSyncStagingCandidates(): Promise<NavForwardSyncCandidate[] | null> {
+    // Default: queried and found no exported-pending backlog (a genuine green),
+    // not null (unknown). Matches getMissedShipmentDetail's default.
+    return this.seed.forwardSync?.candidates ?? [];
+  }
+  async getNavPresentShopifyNumbers(numbers: string[]): Promise<string[]> {
+    // Default green board: every correlated order is present in NAV.
+    return this.seed.forwardSync?.present ?? numbers;
+  }
+  async getLastForwardSyncSuccessAt(): Promise<string | null> {
+    // A recent promotion => export liveness green.
+    return this.seed.forwardSync?.lastSuccessAt ?? agoIso(300, this.now);
   }
   async queryReadOnly<T>(): Promise<T[]> {
     return [];
@@ -175,6 +196,10 @@ class SeededMiddlewareClient implements MiddlewareClient {
   async getMissedShipmentDetail(): Promise<MissedShipment[] | null> {
     // Default: queried and found none (a genuine green), not null (unknown).
     return this.seed.backSync?.missed ?? [];
+  }
+  async getExportedPendingOrders(): Promise<null> {
+    // PHASE 2 (ADR-0006) seam, not wired: no never-staged tail source in the board.
+    return null;
   }
 }
 

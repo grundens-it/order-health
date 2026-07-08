@@ -17,7 +17,7 @@
 // COMPANY: the NAV DB is multi-company. EVERY table MUST be prefixed with the
 // company code ('GRUS' for Grundens US) or you read another company's data. The
 // prefix is built from NAV_COMPANY, never hardcoded per query.
-import type { Channel, InventoryWalk } from '@order-health/shared';
+import type { Channel, ForwardSyncTag, InventoryWalk } from '@order-health/shared';
 import { config } from '../config';
 
 export interface NavWatermarkState {
@@ -67,11 +67,39 @@ export interface NavShipmentHeader {
   postedAt: string | null;        // [Posting Date] / posting time
 }
 
+// Unit 11 (forward_sync, ADR-0006). One exported-pending backlog candidate read
+// from GRUS$Sales Header Staging: a Shopify DTC order the middleware tagged as
+// exported whose NAV Sales Order create may not have committed. Read-only: this
+// is a staging snapshot row, mapped from the SELECT-only candidate query. The
+// pure computeForwardSync layer applies the grace / date-floor / presence filters
+// on top of these; this shape just carries what NAV staging holds per order.
+export interface NavForwardSyncCandidate {
+  shopifyOrderName: string | null; // e.g. 'SP-319121' (the staging order name, or built from the number)
+  shopifyNumber: string | null;    // '319121' - the <n> correlation key
+  createdAt: string | null;        // CreatedDate ISO (the age clock)
+  tag: ForwardSyncTag;             // classified from the Order Tags snapshot
+  navOrderNo: string | null;       // Nav Order No (populated on promotion; empty => not promoted)
+  status: number | null;           // staging Status
+  errorMessage: string | null;     // Error Message
+}
+
 export interface NavClient {
   getInventoryWatermarkState(): Promise<NavWatermarkState>;
   getRecentInventoryWalks(limit: number): Promise<InventoryWalk[]>;
   getOrderLifecycleRows(): Promise<NavOrderLifecycleRow[]>;
   getRecentShipments(limit: number): Promise<NavShipmentHeader[]>;
+  // Phase 1 (ADR-0006): exported-pending backlog candidates from GRUS$Sales Header
+  // Staging (a candidate Order Tags snapshot or unpromoted/errored status), read-only.
+  // Returns null when not wired / on failure so the pipe reads 'unknown', never a
+  // false green (mirrors getMissedShipmentDetail). An empty array is a real zero.
+  getForwardSyncStagingCandidates(): Promise<NavForwardSyncCandidate[] | null>;
+  // The presence cross-check: of the given Shopify numbers (<n>), which are present
+  // in GRUS$Sales Header ([No_]) or GRUS$Sales Invoice Header ([Order No_]) under
+  // SP-<n>-% (correlation on <n>, extraction via parseSpOrderNumber). Read-only.
+  getNavPresentShopifyNumbers(numbers: string[]): Promise<string[]>;
+  // Export liveness: newest promotion observed in staging (MAX(CreatedDate) over
+  // recently promoted rows, ADR-0006). null when not wired.
+  getLastForwardSyncSuccessAt(): Promise<string | null>;
   queryReadOnly<T>(templateName: string, params?: Record<string, unknown>): Promise<T[]>;
 }
 
@@ -97,6 +125,46 @@ export function navTable(company: string, table: string): string {
   return `[${company}$${table}]`;
 }
 
+// ---------------------------------------------------------------------------
+// FORWARD_SYNC helpers (Unit 11, ADR-0006). Read-only staging-derived surface:
+// Shopify DTC orders tagged exported whose NAV Sales Order create never committed.
+// ---------------------------------------------------------------------------
+
+// The candidate stall-stage tags, authoritative from the middleware's
+// order_tags.rs (cited in ADR-0006). Kept as named consts so a middleware rename
+// is a one-line change here. '1-Status:NAV-Created!' is TERMINAL and NEVER a
+// candidate, so it is intentionally absent from this list.
+export const TAG_SHOPIFY_EXPORTED = '1-Status:Shopify-Exported!';
+export const TAG_MIDDLEWARE_STATUS = '1-Middleware Status!';
+// Legacy alias for the middleware-status stage; older tagged orders still carry it.
+export const TAG_MIDDLEWARE_IMPORTED_LEGACY = '1-Status:Middleware-Imported!';
+
+// Classify an Order Tags snapshot into a ForwardSyncTag. The exported tag wins
+// over the middleware-status tag when both are present (it is the earlier, more
+// specific stall signal). The legacy imported tag maps to 'middleware_status'.
+// Anything else (NAV-Created only, empty, null) => 'unknown'.
+export function classifyForwardSyncTag(orderTags: string | null): ForwardSyncTag {
+  if (orderTags === null) return 'unknown';
+  if (orderTags.includes(TAG_SHOPIFY_EXPORTED)) return 'shopify_exported';
+  if (
+    orderTags.includes(TAG_MIDDLEWARE_STATUS) ||
+    orderTags.includes(TAG_MIDDLEWARE_IMPORTED_LEGACY)
+  ) {
+    return 'middleware_status';
+  }
+  return 'unknown';
+}
+
+// Extract the <n> correlation key from a staging / NAV order name. Equivalent to
+// the documented live extraction CHARINDEX('-', No_ + '-', 4): take the digit run
+// immediately after a case-insensitive 'SP-' prefix. 'SP-319319-1' => '319319',
+// bare 'SP-99999' => '99999'. A non-SP- value or empty => null.
+export function parseSpOrderNumber(no: string | null): string | null {
+  if (no === null) return null;
+  const m = /^SP-(\d+)/i.exec(no.trim());
+  return m ? m[1] : null;
+}
+
 // The SELECT-only statements, all company-prefixed via navTable. Returned as a
 // map so tests can assert the prefixing and the watermark predicate directly.
 export interface NavQueries {
@@ -105,6 +173,11 @@ export interface NavQueries {
   recentWalks: string;      // recent completed CU 50007 entries for the walks table
   orderLifecycle: string;   // Sales Header join (header + staging + shipment)
   recentShipments: string;  // posted GRUS$Sales Shipment Header rows
+  // Unit 11 forward_sync (ADR-0006). All read-only, GRUS$-prefixed.
+  forwardSyncStagingCandidates: string; // exported-pending backlog from staging
+  forwardSyncPresentHeaders: string;    // present <n> in Sales Header ([No_])
+  forwardSyncPresentInvoices: string;   // present <n> in Sales Invoice Header ([Order No_])
+  forwardSyncLastSuccess: string;       // MAX(CreatedDate) over promoted staging rows
 }
 
 export function buildQueries(company: string): NavQueries {
@@ -112,6 +185,7 @@ export function buildQueries(company: string): NavQueries {
   const salesHeader = navTable(company, 'Sales Header');
   const staging = navTable(company, 'Sales Header Staging');
   const shipment = navTable(company, 'Sales Shipment Header');
+  const invoiceHeader = navTable(company, 'Sales Invoice Header');
 
   return {
     // IABC watermark: newest CU 50007 completion (design.md / DATA_SOURCES.md).
@@ -148,6 +222,36 @@ ORDER BY h.[Order Date] DESC;`,
        sh.[Package Tracking No_] AS tracking, sh.[Posting Date] AS postedAt
 FROM ${shipment} sh
 ORDER BY sh.[Posting Date] DESC;`,
+    // forward_sync (ADR-0006) exported-pending backlog candidates, most-recent-first,
+    // bounded. Read-only staging snapshot: [CreatedDate] is the per-order age clock,
+    // [Order Tags] the classified Shopify tag snapshot, [Status] / [Error Message] the
+    // promotion state, [Nav Order No] populated => promoted (not a candidate). The
+    // staging identifier [No_] is the SP-<n> order name. computeForwardSync applies
+    // the grace / date-floor / presence filters; this only surfaces the rows.
+    forwardSyncStagingCandidates: `SELECT TOP (@limit) [No_] AS shopifyOrderName, [CreatedDate] AS createdAt,
+       [Order Tags] AS orderTags, [Status] AS status,
+       [Nav Order No] AS navOrderNo, [Error Message] AS errorMessage
+FROM ${staging}
+ORDER BY [CreatedDate] DESC;`,
+    // Presence cross-check (ADR-0006). The <n> keys present as OPEN orders. Selects
+    // the raw SP-<n>-<leg> [No_]; the <n> is extracted client-side via
+    // parseSpOrderNumber then intersected with the requested numbers (mssql array
+    // params are awkward). Server-side equivalent of the extraction:
+    //   SUBSTRING([No_], 4, CHARINDEX('-', [No_] + '-', 4) - 4)
+    forwardSyncPresentHeaders: `SELECT [No_] AS orderNo
+FROM ${salesHeader}
+WHERE [No_] LIKE 'SP-%';`,
+    // The <n> keys present as POSTED invoices. Live invoices show the bare SP-<n>;
+    // the +'-' in the extraction handles both bare and legged shapes.
+    forwardSyncPresentInvoices: `SELECT [Order No_] AS orderNo
+FROM ${invoiceHeader}
+WHERE [Order No_] LIKE 'SP-%';`,
+    // Export liveness (ADR-0006): newest promotion observed in staging. Promoted
+    // rows carry a non-empty [Nav Order No]; MAX([CreatedDate]) over them is the
+    // "last import committed" clock (a better signal than [Order Date]).
+    forwardSyncLastSuccess: `SELECT MAX([CreatedDate]) AS lastSuccessAt
+FROM ${staging}
+WHERE [Nav Order No] IS NOT NULL AND [Nav Order No] <> '';`,
   };
 }
 
@@ -261,6 +365,22 @@ export function mapShipmentHeader(row: Row): NavShipmentHeader {
   };
 }
 
+// Map a GRUS$Sales Header Staging candidate row to NavForwardSyncCandidate. The
+// tag is classified from the [Order Tags] snapshot, the number extracted from the
+// staging order name via parseSpOrderNumber, and CreatedDate normalised via toIso.
+export function mapForwardSyncCandidate(row: Row): NavForwardSyncCandidate {
+  const shopifyOrderName = toStr(row.shopifyOrderName);
+  return {
+    shopifyOrderName,
+    shopifyNumber: parseSpOrderNumber(shopifyOrderName),
+    createdAt: toIso(row.createdAt),
+    tag: classifyForwardSyncTag(toStr(row.orderTags)),
+    navOrderNo: toStr(row.navOrderNo),
+    status: toNum(row.status),
+    errorMessage: toStr(row.errorMessage),
+  };
+}
+
 // Read-only enforcement. Reject any statement that could mutate NAV. Applied to
 // every query the live client runs (defence in depth on top of the db_datareader
 // grant). Pure => unit-tested against write statements.
@@ -350,6 +470,19 @@ export class NavClientStub implements NavClient {
   async getRecentShipments(limit: number): Promise<NavShipmentHeader[]> {
     this.note(`recent NAV shipments (limit ${limit})`);
     return [];
+  }
+  async getForwardSyncStagingCandidates(): Promise<NavForwardSyncCandidate[] | null> {
+    this.note('forward-sync staging candidates (exported-pending backlog)');
+    // null (not []) so the pipe reads 'unknown' until wired, never a false green.
+    return null;
+  }
+  async getNavPresentShopifyNumbers(numbers: string[]): Promise<string[]> {
+    this.note(`nav present shopify numbers (${numbers.length} requested)`);
+    return [];
+  }
+  async getLastForwardSyncSuccessAt(): Promise<string | null> {
+    this.note('last forward-sync success (max staging promotion)');
+    return null;
   }
   async queryReadOnly<T>(templateName: string): Promise<T[]> {
     this.note(`read-only template ${templateName}`);
@@ -459,6 +592,59 @@ class NavClientLive implements NavClient {
       return rows.map(mapShipmentHeader);
     } catch (err) {
       return this.degrade('recent NAV shipments', err, this.stub.getRecentShipments(limit));
+    }
+  }
+
+  async getForwardSyncStagingCandidates(): Promise<NavForwardSyncCandidate[] | null> {
+    try {
+      const rows = await this.select(this.queries.forwardSyncStagingCandidates, {
+        limit: config.nav.orderIngestLimit,
+      });
+      return rows.map(mapForwardSyncCandidate);
+    } catch (err) {
+      return this.degrade(
+        'forward-sync staging candidates',
+        err,
+        this.stub.getForwardSyncStagingCandidates(),
+      );
+    }
+  }
+
+  // Presence intersection. mssql array params are awkward, so read the full present
+  // <n> set from BOTH headers (open + posted), extract <n> client-side via
+  // parseSpOrderNumber, and intersect with the requested numbers. Read-only.
+  async getNavPresentShopifyNumbers(numbers: string[]): Promise<string[]> {
+    if (numbers.length === 0) return [];
+    try {
+      const [headers, invoices] = await Promise.all([
+        this.select(this.queries.forwardSyncPresentHeaders),
+        this.select(this.queries.forwardSyncPresentInvoices),
+      ]);
+      const present = new Set<string>();
+      for (const r of [...headers, ...invoices]) {
+        const n = parseSpOrderNumber(toStr(r.orderNo));
+        if (n !== null) present.add(n);
+      }
+      return numbers.filter((n) => present.has(n));
+    } catch (err) {
+      return this.degrade(
+        'nav present shopify numbers',
+        err,
+        this.stub.getNavPresentShopifyNumbers(numbers),
+      );
+    }
+  }
+
+  async getLastForwardSyncSuccessAt(): Promise<string | null> {
+    try {
+      const rows = await this.select(this.queries.forwardSyncLastSuccess);
+      return rows.length > 0 ? toIso(rows[0].lastSuccessAt) : null;
+    } catch (err) {
+      return this.degrade(
+        'last forward-sync success',
+        err,
+        this.stub.getLastForwardSyncSuccessAt(),
+      );
     }
   }
 

@@ -226,6 +226,20 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .oid { font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .ip-note.r { background: var(--red-bg); border-color: var(--red-bd); color: #f0a49c; }
 
+/* --- Forward-sync Monitor panel (Unit 11, ADR-0006 phase 1) ---------------- */
+/* Reuses the .ip-card / .ip-cards-2 / .ip-note / .tblwrap tokens. Adds only an
+   actionable-card affordance, the headline and coverage notes, and a text-label
+   tag pill (color is decorative, the label carries the meaning). */
+.fs-actionable { cursor: pointer; }
+.fs-actionable:hover { border-color: var(--line2); background: var(--hover); }
+.fs-actionable:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+.fs-resolve { margin-top: 8px; font-size: 11.5px; font-weight: 700; color: var(--orange); }
+.fs-headline { margin-top: 12px; font-size: 13px; color: var(--ink); }
+.fs-note-ic { color: inherit; }
+.fs-coverage { margin-top: 8px; font-size: 11.5px; color: var(--faint); }
+.fs-tag { display: inline-block; font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 20px; letter-spacing: .03em; background: var(--slate-bg); color: var(--slate); }
+.fs-table { margin-top: 12px; }
+
 /* --- Remediation modal (Unit 7, design.md 5A.4) --------------------------- */
 /* The error-to-remediation modal: opens on a red/amber pipe verdict, names the
    mapped tool and offers an operator trigger. Dark theme, accessible dialog. */

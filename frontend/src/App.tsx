@@ -9,6 +9,7 @@ import type {
 import { fetchOrders, fetchPipelines, fetchRemediationRegistry, fetchRollup } from './api';
 import { LeadershipStrip } from './components/LeadershipStrip';
 import { PipelineStrip } from './components/PipelineStrip';
+import { ForwardSyncPanel } from './components/ForwardSyncPanel';
 import { RemediationModal, type RemediationSubject } from './components/RemediationModal';
 import { OrderTable } from './components/OrderTable';
 import { ChannelFilter } from './components/ChannelFilter';
@@ -32,6 +33,7 @@ const PIPE_LABELS: Record<string, string> = {
   nav_job_queue: 'NAV job queue',
   shopify_webhook: 'Shopify webhooks',
   allocator: 'Allocator split',
+  forward_sync: 'Forward sync',
 };
 
 export function App(): JSX.Element {
@@ -185,6 +187,11 @@ export function App(): JSX.Element {
         <LeadershipStrip rollup={rollup} />
 
         <PipelineStrip pipelines={pipelines} onRemediate={openPipeRemediation} />
+
+        <ForwardSyncPanel
+          pipe={pipelines.find((p) => p.pipe === 'forward_sync') ?? null}
+          onRemediate={setRemediationSubject}
+        />
 
         <div className="sec">
           <h2>Order lifecycle</h2>

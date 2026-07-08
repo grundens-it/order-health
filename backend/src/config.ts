@@ -134,6 +134,24 @@ export interface Config {
     missedAmberCount: number;      // missed count >= this => AMBER
     missedRedCount: number;        // missed count >= this => RED (real backlog)
   };
+  // forward_sync monitor thresholds (Unit 11, ADR-0006 phase 1). The backlog
+  // (freshness) verdict escalates by the worse of an age band and a count band and
+  // is floored at AMBER once a real stuck order exists (never GREEN past grace);
+  // the export-liveness verdict is minute-banded on the last successful import.
+  // All Ops-tunable, read from env, never hardcoded. Minutes/counts, not cycles.
+  forwardSync: {
+    graceMinutes: number;          // min age before an absent exported order is counted (suppresses in-flight)
+    backlogAmberMinutes: number;   // oldest backlog age >= this => AMBER
+    backlogRedMinutes: number;     // oldest backlog age >= this => RED
+    backlogAmberCount: number;     // backlog count >= this => AMBER
+    backlogRedCount: number;       // backlog count >= this => RED (real backlog) + contiguous-block floor
+    livenessAmberMinutes: number;  // time since last successful import >= this => AMBER
+    livenessRedMinutes: number;    // time since last successful import >= this => RED
+    // NAV cutover date (ISO). Orders created before it are excluded so the pipe
+    // does not boot RED on the historical May cutover cluster / stale tag lint.
+    // Left blank by default (no floor) until BA supplies the cutover date.
+    dateFloorIso: string;
+  };
 }
 
 export const config: Config = {
@@ -236,6 +254,21 @@ export const config: Config = {
     missedWindowDays: num('BACK_SYNC_MISSED_WINDOW_DAYS', 14),
     missedAmberCount: num('BACK_SYNC_MISSED_AMBER_COUNT', 1),
     missedRedCount: num('BACK_SYNC_MISSED_RED_COUNT', 5),
+  },
+  // Unit 11: forward_sync. Defaults folded in from the 2026-07-07 NAV measurement
+  // (ADR-0006): median staging-to-promotion ~9 min, CU 50009 promoter ~every 5 min,
+  // worst cycle ~26 min => grace 30 min sits just above worst-normal. Backlog amber
+  // 30 min / red 120 min, amber count 1 / red count 5. Liveness amber 60 / red 180
+  // min. dateFloor blank (no floor) until BA supplies the NAV cutover date.
+  forwardSync: {
+    graceMinutes: num('FORWARD_SYNC_GRACE_MINUTES', 30),
+    backlogAmberMinutes: num('FORWARD_SYNC_BACKLOG_AMBER_MINUTES', 30),
+    backlogRedMinutes: num('FORWARD_SYNC_BACKLOG_RED_MINUTES', 120),
+    backlogAmberCount: num('FORWARD_SYNC_BACKLOG_AMBER_COUNT', 1),
+    backlogRedCount: num('FORWARD_SYNC_BACKLOG_RED_COUNT', 5),
+    livenessAmberMinutes: num('FORWARD_SYNC_LIVENESS_AMBER_MINUTES', 60),
+    livenessRedMinutes: num('FORWARD_SYNC_LIVENESS_RED_MINUTES', 180),
+    dateFloorIso: str('FORWARD_SYNC_DATE_FLOOR'),
   },
 };
 

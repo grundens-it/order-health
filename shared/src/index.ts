@@ -246,6 +246,47 @@ export interface BackSyncDetail {
   missed_shipments: MissedShipment[]; // detail rows for the panel table
 }
 
+// --- forward_sync pipe detail (Unit 11, ADR-0006 phase 1) ------------------
+// The forward_sync pipe surfaces Shopify DTC orders the middleware tagged as
+// exported (1-Status:Shopify-Exported! / 1-Middleware Status!) that have no NAV
+// Sales Order under SP-<n>-% (exported-but-absent). Phase 1 derives the backlog
+// read-only from GRUS$Sales Header Staging using CreatedDate as the age clock
+// (ADR-0006). It carries the two panel verdicts in PipelineHealth columns
+// (freshness_verdict = backlog, liveness_verdict = export liveness) and this typed
+// detail bag inside PipelineHealth.detail. Snake_case matches the JSONB convention.
+
+// Which stall-stage tag a backlog order carries (the ADR-0006 candidate tags). The
+// panel renders 'shopify_exported' as "Exported" and 'middleware_status' as
+// "Middleware". 'unknown' when the source carried no recognised candidate tag.
+export type ForwardSyncTag = 'shopify_exported' | 'middleware_status' | 'unknown';
+
+// One backlog order in the panel's oldest-first sample table (capped ~25). The
+// order name is the Shopify SP-<n>; correlation is on <n>, never the shipment leg.
+export interface ForwardSyncSampleOrder {
+  shopify_order_name: string | null; // Shopify order name (SP-<n>)
+  age_s: number | null;              // wall-clock age since the order was created (CreatedDate)
+  tag: ForwardSyncTag;               // which stall-stage tag the order carries
+}
+
+// Which candidate source(s) fed this run. 'staging' = NAV-staging-derived backlog
+// only (phase 1); 'staging+tags' once the middleware never-staged tail lands
+// (phase 2). The panel/rollup label a green honestly so "no staging-stalled
+// backlog" is not over-read as "no never-staged losses" (ADR-0006 consequences).
+export type ForwardSyncCoverage = 'staging' | 'staging+tags';
+
+// The full typed detail bag for the forward_sync pipe. Like back-sync's missed
+// signal (and unlike inventory divergence) the backlog is a real backlog and is
+// allowed to reach RED. A null last_success_at reads 'unknown' liveness, never RED.
+export interface ForwardSyncDetail {
+  backlog_count: number;             // exported orders absent from NAV, past grace, after the date floor
+  oldest_age_s: number | null;       // age of the oldest backlog order (mirrors watermark_lag_s)
+  newest_age_s: number | null;       // age of the newest backlog order
+  last_success_at: string | null;    // last observed successful import (export-liveness source); null => unknown
+  contiguous_block: boolean;         // >= backlogRedCount orders clustered in one tight created-at window
+  coverage: ForwardSyncCoverage;     // which candidate source(s) fed this run (honest green label)
+  sample: ForwardSyncSampleOrder[];  // oldest-first, capped (~25) backlog detail rows
+}
+
 export interface HealthTransition {
   subject_kind: 'pipe' | 'signal' | 'order';
   subject_key: string;

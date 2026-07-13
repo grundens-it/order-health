@@ -272,8 +272,10 @@ export function greenWholesaleOrder(
   };
 }
 
-// A DTC order stuck in NAV staging with a nonzero (blocked) status and no
-// promotion: a latched error at nav_staging => RED (design.md 5).
+// A DTC order genuinely stuck: received days ago and STILL not shipped, so it ages
+// past the awaiting-ship SLO => RED. (Unit D: staging Status is no longer a per-order
+// red, since Status = 1 is a normal early state; the honest stuck signal is an
+// unshipped order aged past the SLO.)
 export function stuckStagingDtcOrder(
   navOrderNo: string,
   now: number = Date.now(),
@@ -284,13 +286,13 @@ export function stuckStagingDtcOrder(
     webId: `web-${navOrderNo}`,
     webOrder: 1, // a web order (WebOrder = 1 on the NAV Sales Header)
     shopifyOrderName: `#${navOrderNo}`,
-    customerRef: 'CUST-777 Blocked',
-    shopifyOrderAt: agoIso(9000, now),
-    allocatorSplitAt: agoIso(8900, now),
-    navStagingAt: agoIso(8800, now),
-    navStagingStatus: 1, // Blocked = 1 SKU (design.md 5): promotion errored
+    customerRef: 'CUST-777 Stalled',
+    shopifyOrderAt: agoIso(5 * 86400, now), // received 5 days ago, never shipped => past 72h red
+    allocatorSplitAt: null,
+    navStagingAt: null,
+    navStagingStatus: 1, // Not Auto-released (a normal state; no longer the trigger)
     navPromotionAt: null,
-    navShipmentAt: null,
+    navShipmentAt: null, // still unshipped => aged red at awaiting_ship
     backSyncAt: null,
     missedBackSync: false,
   };

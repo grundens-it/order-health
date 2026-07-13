@@ -78,10 +78,17 @@ test('a DTC order not shipped for 25h is amber (over 24h, under 72h)', () => {
   assert.equal(r.order_verdict, 'amber');
 });
 
-test('a real NAV staging stuck row (Status 1, not shipped) reds the order', () => {
-  const r = grade(navRow({ navStagingStatus: 1 }));
+test('Unit D: a recent Status=1 (Not Auto-released) order is NOT red (normal early state)', () => {
+  // Live NAV: Status = 1 is the ordinary early-lifecycle state of a freshly received
+  // DTC order (530 of 533 reds were these). A recent one must not read red.
+  const r = grade(navRow({ navStagingStatus: 1, shopifyOrderAt: ago(3 * 3600) }));
+  assert.notEqual(r.order_verdict, 'red');
+});
+
+test('Unit D: a Status=1 order genuinely unshipped past the SLO still reds (via awaiting-ship age)', () => {
+  const r = grade(navRow({ navStagingStatus: 1, shopifyOrderAt: ago(4 * 86400) }));
   assert.equal(r.order_verdict, 'red');
-  assert.match(r.note ?? '', /NAV staging stuck/);
+  assert.equal(r.current_stage, 'awaiting_ship');
 });
 
 test('a shipped order flagged missed-back-sync reds at back_sync', () => {

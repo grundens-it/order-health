@@ -396,9 +396,15 @@ export function buildOrderInput(row: NavOrderLifecycleRow): OrderInput {
   // Inferred completion for an unobservable intermediate hop: the shipment time when
   // shipped, else the received time (the order is in flight, awaiting shipment).
   const inferredMidCompletion = shipped ? row.navShipmentAt : receivedAt;
-  // A genuine staging fault NAV can see: a nonzero staging Status on an order that has
-  // NOT shipped (a shipped order clearly promoted, so a stale Status is not a fault).
-  const stagingStuck = row.navStagingStatus !== null && row.navStagingStatus !== 0 && !shipped;
+  // Unit D (health-fidelity integration): staging Status is NOT a per-order stuck
+  // signal. Live NAV shows GRUS$Sales Header Staging [Status] = 1 ("Not Auto-released")
+  // is the ordinary early-lifecycle state of a freshly received DTC order (530 of 533
+  // reds were recent Status=1 orders, median age 1 day). No field in the read-only
+  // order-lifecycle query identifies a GENUINELY stuck staging row, so a status FLAG
+  // cannot be a truthful red. The honest per-order signal is age based: an unshipped
+  // order is aged at its awaiting_ship frontier against the awaiting-ship band. The
+  // Status=1 backlog remains a PIPE signal (nav_job_queue), not a per-order red.
+  // See docs/business/order-layer-residual-red-finding-2026-07-13.md.
   // Back-sync completion is unobservable; infer it from the shipment plus the
   // missed-back-sync reconciliation. A missed back-sync leaves it incomplete + latched.
   const backSynced = shipped && !row.missedBackSync;
@@ -420,12 +426,12 @@ export function buildOrderInput(row: NavOrderLifecycleRow): OrderInput {
   for (const stage of CHANNEL_STAGES[row.channel]) {
     const completedAt = completedAtByStage[stage] ?? null;
 
-    // Latched errors promote a hop straight to RED (design.md 5). These are the
-    // NAV-observable faults the reconciliation surfaces.
+    // Latched errors promote a hop straight to RED (design.md 5). The only
+    // NAV-observable per-order fault kept is a missed back-sync (a NAV shipment
+    // posted with no Shopify fulfillment); the staging-status flag is NOT a fault
+    // (Unit D). An order stuck in staging surfaces as an unshipped order aged past
+    // the awaiting-ship SLO, not as a status flag.
     let error: string | null = null;
-    if (stage === 'nav_staging' && stagingStuck) {
-      error = `NAV staging stuck (Status ${row.navStagingStatus})`;
-    }
     if (stage === 'back_sync' && row.missedBackSync) {
       error = 'Missed back-sync: NAV shipment exists with no Shopify fulfillment';
     }

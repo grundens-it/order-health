@@ -97,6 +97,61 @@ test('all subscribed => green subscription verdict', () => {
   assert.equal(r.subscriptionVerdict, 'green');
 });
 
+// --- ADR-0008: a quiet subscribed topic is idle, not unknown ---------------
+test('the live-run case: fresh topics plus quiet subscribed topics read GREEN, not unknown', () => {
+  // 3 busy topics fresh, 3 low-volume topics simply quiet (no receipt in the
+  // window). Old code let the null-age quiet topics drag the pipe to unknown.
+  const input: ShopifyWebhookInput = {
+    topics: [
+      subscribed('orders/updated', 300),
+      subscribed('orders/paid', 500),
+      subscribed('fulfillments/create', 900),
+      { topic: 'orders/cancelled', lastReceivedAt: null, subscribed: true },
+      { topic: 'fulfillments/update', lastReceivedAt: null, subscribed: true },
+      { topic: 'orders/create', lastReceivedAt: null, subscribed: true },
+    ],
+  };
+  const r = computeShopifyWebhook(input, T, NOW);
+  assert.equal(r.freshnessVerdict, 'green');
+  assert.equal(r.pipeVerdict, 'green');
+  assert.equal(r.detail.idle_topic_count, 3);
+  // Mixed traffic: the pipe is active-green, not neutralized.
+  assert.equal(r.detail.applicability, 'active');
+  const quiet = r.detail.topics.find((t) => t.topic === 'orders/cancelled');
+  assert.equal(quiet?.idle_no_traffic, true);
+  assert.equal(quiet?.verdict, 'green');
+});
+
+test('all subscribed topics quiet (no traffic) => pipe idle_no_traffic (neutral), not unknown', () => {
+  const input: ShopifyWebhookInput = {
+    topics: [
+      { topic: 'orders/cancelled', lastReceivedAt: null, subscribed: true },
+      { topic: 'fulfillments/update', lastReceivedAt: null, subscribed: true },
+    ],
+  };
+  const r = computeShopifyWebhook(input, T, NOW);
+  assert.equal(r.pipeVerdict, 'green');
+  assert.equal(r.detail.applicability, 'idle_no_traffic');
+  assert.equal(r.detail.idle_topic_count, 2);
+});
+
+test('a dropped subscription with no traffic is NOT idle: it stays amber', () => {
+  // subscribed=false + null receipt is the real WAF-removal failure mode, not a
+  // quiet topic. It must amber, and it must not neutralize the pipe.
+  const input: ShopifyWebhookInput = {
+    topics: [
+      subscribed('orders/updated', 300),
+      { topic: 'orders/create', lastReceivedAt: null, subscribed: false },
+    ],
+  };
+  const r = computeShopifyWebhook(input, T, NOW);
+  assert.equal(r.subscriptionVerdict, 'amber');
+  assert.equal(r.pipeVerdict, 'amber');
+  assert.equal(r.detail.applicability, 'active');
+  const dropped = r.detail.topics.find((t) => t.topic === 'orders/create');
+  assert.equal(dropped?.idle_no_traffic, false);
+});
+
 // --- Empty + detail --------------------------------------------------------
 test('no topics yet => unknown, not a false green', () => {
   const r = computeShopifyWebhook({ topics: [] }, T, NOW);

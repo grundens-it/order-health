@@ -89,6 +89,15 @@ function backSyncMetrics(p: PipelineHealth): Metric[] {
 
 function priceSyncMetrics(p: PipelineHealth): Metric[] {
   const d = p.detail as unknown as PriceSyncDetail;
+  // ADR-0008: a disabled feature reads a labelled neutral state, not a broken sensor.
+  if (d?.applicability === 'disabled') {
+    return [
+      { k: 'Feature', v: 'disabled (not applicable)', cls: '' },
+      { k: 'Last received', v: 'n/a' },
+      { k: 'Last run', v: 'n/a' },
+      { k: 'Status', v: 'off by design', cls: '' },
+    ];
+  }
   return [
     { k: 'Watermark', v: freshWord(p.freshness_verdict), cls: vClass(p.freshness_verdict) },
     { k: 'Last received', v: agoLabel(d?.last_received_at ?? null) },
@@ -121,7 +130,12 @@ function webhookMetrics(p: PipelineHealth): Metric[] {
     v: d ? numOr(d.missing_subscription_count) : PENDING,
     cls: d && d.missing_subscription_count === 0 ? 'okv' : d && d.missing_subscription_count > 0 ? 'redv' : '',
   });
-  rows.push({ k: 'Subscriptions', v: freshWord(p.liveness_verdict), cls: vClass(p.liveness_verdict) });
+  // ADR-0008: an all-quiet subscribed pipe reads idle, not a broken sensor.
+  if (d?.applicability === 'idle_no_traffic') {
+    rows.push({ k: 'Traffic', v: `idle (${numOr(d.idle_topic_count ?? 0)} quiet)`, cls: '' });
+  } else {
+    rows.push({ k: 'Subscriptions', v: freshWord(p.liveness_verdict), cls: vClass(p.liveness_verdict) });
+  }
   return rows;
 }
 

@@ -172,6 +172,7 @@ class SeededMiddlewareClient implements MiddlewareClient {
     return {
       lastReceivedAt: agoIso(600, this.now),
       lastRunAt: agoIso(300, this.now),
+      enabled: true,
       ...this.seed.priceSync,
     };
   }

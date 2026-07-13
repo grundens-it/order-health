@@ -67,6 +67,7 @@ export interface JobQueueHealthStatus {
 export interface PriceSyncStatus {
   lastReceivedAt: string | null; // newest price_sync row received
   lastRunAt: string | null;      // last price-sync run/loop completed
+  enabled: boolean | null;       // ADR-0008: the middleware's explicit feature flag (null = unread)
 }
 
 // shopify_webhook: last-received per topic plus each topic's subscription state
@@ -200,7 +201,9 @@ class MiddlewareClientStub implements MiddlewareClient {
     // Real read-only shape: newest dashboard price_sync row (last-received) and
     // the price-sync run/loop timestamp (last-run). SELECT-only / GET-only.
     this.note('GET /api/price-sync/status');
-    return { lastReceivedAt: null, lastRunAt: null };
+    // enabled null (unread) so the pipe reads unknown until provisioned; a live
+    // client returns enabled:false when the feature is deliberately disabled.
+    return { lastReceivedAt: null, lastRunAt: null, enabled: null };
   }
   async getShopifyWebhookStatus(): Promise<ShopifyWebhookStatus> {
     // Real read-only shape: last shopify_webhook_event per topic joined to the

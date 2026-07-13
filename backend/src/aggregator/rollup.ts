@@ -36,6 +36,21 @@ function tally(verdicts: readonly Verdict[]): {
   return c;
 }
 
+// ADR-0008: a pipe whose applicability is 'disabled' or 'idle_no_traffic' is
+// correctly NOT reporting (a disabled feature, a quiet webhook). It is NEUTRAL: it
+// must not be counted as unknown/amber/red and must not move the headline off
+// healthy. applicability rides in the pipe's detail bag (a loose Record on the
+// wire); absent or 'active' means a normal, counted pipe.
+function pipeApplicability(p: PipelineHealth): string {
+  const detail = p.detail as Record<string, unknown> | null | undefined;
+  const a = detail?.applicability;
+  return typeof a === 'string' ? a : 'active';
+}
+function isNeutralPipe(p: PipelineHealth): boolean {
+  const a = pipeApplicability(p);
+  return a === 'disabled' || a === 'idle_no_traffic';
+}
+
 // Map the worst OBSERVED verdict to a headline bucket. Unknown rows are "not yet
 // observed" (an unprovisioned / DevOps-gated pipe): they neither push the
 // headline to at-risk nor hide a genuinely healthy board, so they are excluded
@@ -77,7 +92,11 @@ export function computeRollup(
   pipelines: readonly PipelineHealth[],
   orders: readonly OrderHealth[],
 ): LeadershipRollup {
-  const pipeVerdicts = pipelines.map((p) => p.pipe_verdict);
+  // Neutral pipes (disabled / idle-no-traffic) are excluded from the rollup so they
+  // cannot drag the headline or inflate any count (ADR-0008). They still render in
+  // the strip with their own labelled state.
+  const activePipes = pipelines.filter((p) => !isNeutralPipe(p));
+  const pipeVerdicts = activePipes.map((p) => p.pipe_verdict);
   const orderVerdicts = orders.map((o) => o.order_verdict);
 
   // Worst-wins over OBSERVED verdicts only. worstVerdict over an empty set is
@@ -96,7 +115,8 @@ export function computeRollup(
     orders_amber: orderCounts.amber,
     orders_red: orderCounts.red,
     orders_unknown: orderCounts.unknown,
-    pipes_total: pipelines.length,
+    // pipes_total counts the ACTIVE (non-neutral) pipes, so the tally sums cleanly.
+    pipes_total: activePipes.length,
     pipes_green: pipeCounts.green,
     pipes_amber: pipeCounts.amber,
     pipes_red: pipeCounts.red,

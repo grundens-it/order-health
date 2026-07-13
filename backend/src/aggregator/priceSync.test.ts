@@ -29,6 +29,7 @@ function baseInput(overrides: Partial<PriceSyncInput> = {}): PriceSyncInput {
   return {
     lastReceivedAt: ago(600), // 10 min ago => fresh
     lastRunAt: ago(30),       // 30s ago => alive
+    enabled: true,
     ...overrides,
   };
 }
@@ -89,11 +90,31 @@ test('rollup: worst wins (amber freshness, green liveness => amber pipe)', () =>
   assert.equal(r.pipeVerdict, 'amber');
 });
 
-test('rollup: empty inputs produce unknown, not a false green', () => {
-  const r = computePriceSync({ lastReceivedAt: null, lastRunAt: null }, T, NOW);
+test('rollup: unread inputs (enabled null) produce unknown, not a false green', () => {
+  const r = computePriceSync({ lastReceivedAt: null, lastRunAt: null, enabled: null }, T, NOW);
   assert.equal(r.freshnessVerdict, 'unknown');
   assert.equal(r.livenessVerdict, 'unknown');
   assert.equal(r.pipeVerdict, 'unknown');
+});
+
+// --- ADR-0008: a disabled feature is a labelled neutral state, not unknown -----
+test('disabled feature reads a green-neutral pipe flagged disabled, not unknown', () => {
+  // The live-run case: the middleware reports enabled:false with all timestamps
+  // null. Old code returned unknown (a broken-sensor dash); now it is disabled.
+  const r = computePriceSync(
+    { lastReceivedAt: null, lastRunAt: null, enabled: false },
+    T,
+    NOW,
+  );
+  assert.equal(r.pipeVerdict, 'green');
+  assert.equal(r.freshnessVerdict, 'green');
+  assert.equal(r.livenessVerdict, 'green');
+  assert.equal(r.detail.applicability, 'disabled');
+});
+
+test('an enabled feature carries applicability active', () => {
+  const r = computePriceSync(baseInput(), T, NOW);
+  assert.equal(r.detail.applicability, 'active');
 });
 
 test('detail carries received/run timestamps and ages', () => {

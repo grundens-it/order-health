@@ -142,6 +142,7 @@ export async function computePriceSyncPipeline(sources: Sources): Promise<Pipeli
   const input: PriceSyncInput = {
     lastReceivedAt: status.lastReceivedAt,
     lastRunAt: status.lastRunAt,
+    enabled: status.enabled,
   };
 
   const r = computePriceSync(input, config.priceSync, Date.now());

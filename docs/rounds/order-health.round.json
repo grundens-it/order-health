@@ -2,8 +2,18 @@
   "round": "order-health-observability",
   "repo": "grundens-it/order-health",
   "brief": "docs/kickoffs/order-health-observability.md",
-  "updated": "2026-07-06 (post-round: real read-only NAV client build, Entra auth, off DATA_SOURCES.md; data path corrected from NAV login to Azure SQL + Entra)",
+  "updated": "2026-07-13 (health-fidelity round: stop the dashboard crying wolf; branch fix/health-fidelity off main; ADR-0007 source precedence + reconciliation, ADR-0008 applicability display state; per-pipe fidelity fixes, all pure-compute with node:test)",
   "umbrella_issue": 2,
+  "fidelity_round": {
+    "name": "health-fidelity-fixes",
+    "brief": "docs/kickoffs/health-fidelity-fixes-kickoff.md",
+    "evidence": "docs/business/order-health-validation-results-2026-07-13.md",
+    "branch": "fix/health-fidelity",
+    "umbrella_issue": 46,
+    "adrs": ["ADR-0007 source-of-truth precedence + reconciliation", "ADR-0008 verdict-applicability display state"],
+    "foundation_item": "issue 54 (read-only Shopify Admin API client + least-privilege credential; does not block NAV units)",
+    "note": "branch pushed; PRs not opened, not merged to main, per the kickoff"
+  },
   "kickoff_pr": 1,
   "stack": {
     "adr": "ADR-0004",
@@ -27,7 +37,11 @@
     "W": "fan-out wave, independent subagents, after Unit 0",
     "C": "convergence, sequential, after the wave",
     "D": "delivery track (added 2026-07-06): local dev + CI now, deploy pipeline gated on target decision",
-    "P": "provisioning realization (post-round): real read-only source clients against live systems, do not merge until validated"
+    "P": "provisioning realization (post-round): real read-only source clients against live systems, do not merge until validated",
+    "HF-F": "health-fidelity foundation (2026-07-13): reconciliation ADR, applicability ADR, config + shared, one commit",
+    "HF-W": "health-fidelity fan-out: per-pipe fidelity fixes, each pure-compute + node:test (healthy-green AND true-fault-fires)",
+    "HF-R": "health-fidelity research-first: order-layer 98.9% red investigation then fix",
+    "HF-C": "health-fidelity convergence: typecheck + test, round.json, push (no PRs)"
   },
   "units": [
     { "unit": 0, "issue": 3, "phase": "F", "name": "Foundation scaffold", "status": "done", "pr": 12, "merged": true },
@@ -41,6 +55,15 @@
     { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "done", "pr": 24, "merged": true, "note": "staleness sim, a11y shape-audit, dark-theme parity, visual-status script" },
     { "unit": 9, "issue": 19, "phase": "D", "name": "Local dev (Docker Compose) + CI workflow", "status": "done", "pr": 22, "merged": true, "note": "docker compose up, CI build/test on push+PR" },
     { "unit": 10, "issue": 20, "phase": "D", "name": "ADR-0005 deploy target + CD pipeline", "status": "done", "pr": 25, "merged": true, "note": "ADR-0005 accepted Alternative B; CD workflow (GHCR + SSH to VM, gated by production environment) merged; inert until DevOps provisions VM+VPN+secrets" },
-    { "unit": "1b", "issue": 28, "phase": "P", "name": "Real read-only NAV client (Entra auth) against live NAV", "status": "review", "pr": 29, "note": "provisioning realization of Unit 1 NAV reads per docs/DATA_SOURCES.md; Entra auth (az login local), GRUS$ prefixes, WebOrder read; strictly read-only, stub fallback; do NOT merge until validated by az login against sqldb-nav18-grus-prd-01" }
+    { "unit": "1b", "issue": 28, "phase": "P", "name": "Real read-only NAV client (Entra auth) against live NAV", "status": "review", "pr": 29, "note": "provisioning realization of Unit 1 NAV reads per docs/DATA_SOURCES.md; Entra auth (az login local), GRUS$ prefixes, WebOrder read; strictly read-only, stub fallback; do NOT merge until validated by az login against sqldb-nav18-grus-prd-01" },
+
+    { "unit": "HF-F", "issue": 46, "phase": "HF-F", "name": "Foundation: ADR-0007 precedence+reconciliation, ADR-0008 applicability, config + shared", "status": "done", "note": "one commit; supersedes ADR-0002 middleware-adoption for health signals; Shopify Admin API client surfaced as foundation item #54 (does not block NAV units)" },
+    { "unit": "HF-1", "issue": 47, "phase": "HF-W", "name": "nav_job_queue: compute from read-only NAV, stop adopting the middleware verdict", "status": "done", "note": "supersedes the internal direct-NAV task; liveness=CU 50009 auto-release, stuck-job=in-process CU 50007 past ~60m, staging=real Status=0; middleware kept as labelled cross-check" },
+    { "unit": "HF-2", "issue": 48, "phase": "HF-W", "name": "back_sync: gate freshness/liveness on unsynced-work-exists", "status": "done", "note": "a quiet caught-up stretch reads green (idle_no_traffic); missed-shipments signal unchanged" },
+    { "unit": "HF-3", "issue": 49, "phase": "HF-W", "name": "inventory_sync: align liveness bands to the ~2h walk cadence", "status": "done", "note": "amber 2 cycles, red 3; a healthy 124-min heartbeat reads green" },
+    { "unit": "HF-4", "issue": 50, "phase": "HF-W", "name": "allocator: failed_rate over the sampled window, OOS-held backlog split out", "status": "done", "note": "standing OOS backlog no longer inflates the rate; surfaced as its own labelled count/age" },
+    { "unit": "HF-5", "issue": 51, "phase": "HF-W", "name": "shopify_webhook + price_sync: truthful applicability states (ADR-0008)", "status": "done", "note": "disabled / idle_no_traffic read neutral and are excluded from the rollup; subscription-drop signal intact" },
+    { "unit": "HF-6", "issue": 52, "phase": "HF-R", "name": "order layer: fix the 98.9% red rate (broken stage-timestamp join)", "status": "done", "note": "research-first finding docs/business/order-layer-red-rate-finding-2026-07-13.md; infer unobservable middleware hop completions from NAV evidence; bands were fine" },
+    { "unit": "HF-7", "issue": 53, "phase": "HF-W", "name": "frontend: distinguish backend-down from backend-up-error in the banner", "status": "done", "note": "typed ApiError kind network vs http; distinct message and remedy for each" }
   ]
 }

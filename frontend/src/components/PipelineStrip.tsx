@@ -100,10 +100,10 @@ function priceSyncMetrics(p: PipelineHealth): Metric[] {
 function jobQueueMetrics(p: PipelineHealth): Metric[] {
   const d = p.detail as unknown as JobQueueDetail;
   return [
-    { k: 'CU 50009 auto-release', v: agoLabel(d?.auto_release_fired_at ?? null) },
-    { k: 'Stuck jobs', v: d && d.stuck_job_count != null ? numOr(d.stuck_job_count) : PENDING, cls: d && d.stuck_job_count === 0 ? 'okv' : d && (d.stuck_job_count ?? 0) > 0 ? 'redv' : '' },
-    { k: 'Longest running job', v: humanAge(d?.longest_running_job_s ?? null) },
-    { k: 'Verdict source', v: 'middleware', cls: vClass(p.pipe_verdict) },
+    { k: 'CU 50009 auto-release', v: agoLabel(d?.auto_release_fired_at ?? null), cls: vClass(d?.liveness_verdict ?? 'unknown') },
+    { k: 'Longest in-process job', v: humanAge(d?.longest_running_job_s ?? null), cls: vClass(d?.stuck_job_verdict ?? 'unknown') },
+    { k: 'Pending staging (Status 0)', v: d && d.pending_staging_count != null ? numOr(d.pending_staging_count) : PENDING, cls: vClass(d?.staging_verdict ?? 'unknown') },
+    { k: 'Middleware says', v: d?.middleware_verdict_raw ?? PENDING, cls: '' },
   ];
 }
 
@@ -149,7 +149,7 @@ const PIPE_FOOT: Record<string, [string, string]> = {
   inventory_sync: ['trigger job_queue', 'IABC ~2h cadence'],
   back_sync: ['NAV to Shopify', 'fulfillmentCreate leg'],
   price_sync: ['trigger job_queue', 'received then run'],
-  nav_job_queue: ['NAV instrumentation', 'verdict consumed, not recomputed'],
+  nav_job_queue: ['NAV read-only', 'computed, middleware cross-checked'],
   shopify_webhook: ['Cloudflare edge', 'subscription health'],
   allocator: ['warehouse_split', 'split-sanity signal'],
 };

@@ -157,32 +157,43 @@ export async function computePriceSyncPipeline(sources: Sources): Promise<Pipeli
   };
 }
 
-// --- Unit 3: nav_job_queue -------------------------------------------------
-// CONSUME the middleware's already-computed job-queue verdict; do NOT recompute
-// it (design.md 6). The row's three verdict columns all reflect that single
-// adopted verdict (this pipe derives no independent freshness/liveness); the
-// supporting numbers ride in the typed detail bag.
+// --- Unit 1: nav_job_queue -------------------------------------------------
+// COMPUTE the verdict from read-only NAV (ADR-0007), do NOT adopt the middleware
+// level. Read three NAV signals (last CU 50009 auto-release, oldest in-process
+// CU 50007, real Status=0 staging backlog); read the middleware's own level and
+// stuck-staging count only as a labelled cross-check. The row's freshness column
+// carries the liveness (auto-release recency) verdict; the staging sub-verdict
+// rides in the detail bag.
 export async function computeJobQueuePipeline(sources: Sources): Promise<PipelineHealth> {
-  const status = await sources.middleware.getJobQueueHealthStatus();
+  const [nav, mwHealth, mwStuckStaging] = await Promise.all([
+    sources.nav.getJobQueueState(),
+    sources.middleware.getJobQueueHealthStatus(),
+    sources.middleware.getStuckStaging(),
+  ]);
 
   const input: JobQueueInput = {
-    middlewareVerdict: status.verdict,
-    autoReleaseFiredAt: status.autoReleaseFiredAt,
-    longestRunningJobS: status.longestRunningJobS,
-    stuckJobCount: status.stuckJobCount,
-    checkedAt: status.checkedAt,
+    // NAV (authoritative).
+    autoReleaseFiredAt: nav.autoReleaseFiredAt,
+    oldestInProcessJobAt: nav.oldestInProcessJobAt,
+    inProcessJobCount: nav.inProcessJobCount,
+    pendingStagingCount: nav.pendingStagingCount,
+    // Middleware cross-check (monitored, not authoritative).
+    middlewareVerdict: mwHealth.verdict,
+    middlewareStuckStagingCount: mwStuckStaging.length > 0 ? mwStuckStaging.length : null,
+    stuckJobCount: mwHealth.stuckJobCount,
+    checkedAt: mwHealth.checkedAt,
   };
 
   const r = computeJobQueue(input, config.jobQueue, Date.now());
 
   return {
     pipe: 'nav_job_queue',
-    pipe_verdict: r.pipeVerdict,           // == the adopted middleware verdict
-    freshness_verdict: r.adoptedVerdict,   // mirrors the single consumed verdict
-    watermark_lag_s: null,
-    last_progress_at: r.lastProgressAt,    // last CU 50009 auto-release firing
-    liveness_verdict: r.adoptedVerdict,    // mirrors the single consumed verdict
-    heartbeat_at: r.detail.checked_at,
+    pipe_verdict: r.pipeVerdict,            // worst of liveness / stuck-job / staging
+    freshness_verdict: r.livenessVerdict,   // auto-release recency (NAV liveness)
+    watermark_lag_s: r.detail.auto_release_age_s,
+    last_progress_at: r.lastProgressAt,     // last CU 50009 auto-release firing
+    liveness_verdict: r.livenessVerdict,
+    heartbeat_at: r.heartbeatAt,
     heartbeat_age_s: null,
     detail: r.detail as unknown as Record<string, unknown>,
   };

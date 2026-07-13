@@ -19,6 +19,7 @@ import type {
 } from '../sources/middlewareClient';
 import type {
   NavClient,
+  NavJobQueueState,
   NavOrderLifecycleRow,
   NavShipmentHeader,
   NavWatermarkState,
@@ -51,7 +52,8 @@ export interface BoardSeed {
     shipments?: NavShipmentHeader[];
   };
   priceSync?: Partial<PriceSyncStatus>;
-  jobQueue?: Partial<JobQueueHealthStatus>;
+  jobQueue?: Partial<JobQueueHealthStatus>;       // middleware cross-check only (Unit 1)
+  jobQueueState?: Partial<NavJobQueueState>;      // NAV-authoritative job-queue signals (Unit 1)
   webhook?: ShopifyWebhookStatus;
   allocator?: Partial<AllocatorStatus>;
   orders?: NavOrderLifecycleRow[];
@@ -85,6 +87,17 @@ class SeededNavClient implements NavClient {
   }
   async getRecentShipments(): Promise<NavShipmentHeader[]> {
     return this.seed.backSync?.shipments ?? [];
+  }
+  async getJobQueueState(): Promise<NavJobQueueState> {
+    // Default healthy: auto-release firing minutes ago, no in-process job, an empty
+    // Status=0 pending-promotion backlog. A test overrides only what it exercises.
+    return {
+      autoReleaseFiredAt: agoIso(300, this.now),
+      oldestInProcessJobAt: null,
+      inProcessJobCount: 0,
+      pendingStagingCount: 0,
+      ...this.seed.jobQueueState,
+    };
   }
   async queryReadOnly<T>(): Promise<T[]> {
     return [];

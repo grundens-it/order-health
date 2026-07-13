@@ -79,6 +79,20 @@ export interface NavShipmentHeader {
   postedAt: string | null;        // [Posting Date] / posting time
 }
 
+// Unit 1 (nav_job_queue, ADR-0007). The job-queue verdict is COMPUTED from
+// read-only NAV, not adopted from the middleware. Three independent NAV reads:
+//   - the last CU 50009 auto-release firing (liveness),
+//   - the oldest IN-PROCESS CU 50007 run (a genuinely stuck IABC job),
+//   - the count of real Status = 0 pending-promotion staging rows.
+// All SELECT-only, GRUS$-prefixed. The middleware's own level / stuck-staging
+// number is read separately and kept only as a labelled cross-check.
+export interface NavJobQueueState {
+  autoReleaseFiredAt: string | null;   // newest completed CU 50009 (auto-release) firing
+  oldestInProcessJobAt: string | null; // start time of the oldest in-process CU 50007 run
+  inProcessJobCount: number | null;    // CU 50007 rows currently In Process (null = unread)
+  pendingStagingCount: number | null;  // GRUS$Sales Header Staging rows with Status = 0 (null = unread)
+}
+
 export interface NavClient {
   getInventoryWatermarkState(): Promise<NavWatermarkState>;
   getRecentInventoryWalks(limit: number): Promise<InventoryWalk[]>;
@@ -98,6 +112,15 @@ export interface NavClient {
   //    GROUP BY ile.[Item No_], ile.[Location Code]
   // No write path into NAV (design.md 7).
   getInventoryAvailability(): Promise<NavInventoryAvailabilityRow[]>;
+  // Unit 1 (nav_job_queue). Read-only NAV job-queue state (auto-release firing,
+  // in-process CU 50007, real Status=0 staging backlog) so the verdict is computed,
+  // not adopted from the middleware. See jobQueue.ts.
+  getJobQueueState(): Promise<NavJobQueueState>;
+  // Unit 2 (back_sync has-work gate). The posting time of the newest DTC (WebId
+  // present) NAV shipment. Compared against the back-sync watermark to decide
+  // whether any UNSYNCED work exists: if the newest DTC shipment is not newer than
+  // the last back-sync, the watcher is idle-not-behind and the clocks must not age.
+  getNewestDtcShipmentAt(): Promise<string | null>;
   // Read-only SQL passthrough for curated templates (design.md section 2).
   queryReadOnly<T>(templateName: string, params?: Record<string, unknown>): Promise<T[]>;
 }
@@ -116,6 +139,14 @@ export interface NavClient {
 // completed run is Status = 0 (DATA_SOURCES.md originally said 2, which is Error).
 export const NAV_IABC_OBJECT_ID = 50007;
 export const NAV_JOB_STATUS_SUCCESS = 0;
+// NAV Job Queue Log Entry [Status] option: 0 = Success, 1 = In Process, 2 = Error.
+// CU 50009 is the auto-release codeunit (the job-queue liveness heartbeat); a
+// genuinely stuck IABC job is a CU 50007 run still In Process past a real threshold.
+export const NAV_JOB_STATUS_IN_PROCESS = 1;
+export const NAV_AUTO_RELEASE_OBJECT_ID = 50009;
+// GRUS$Sales Header Staging [Status] = 0 is a real row pending promotion (the true
+// backlog). Status = 1 rows are old "Not Auto-released" rows and are NOT counted.
+export const NAV_STAGING_STATUS_PENDING_PROMOTION = 0;
 
 // Bracketed, company-prefixed table name: navTable('GRUS', 'Sales Header') =>
 // "[GRUS$Sales Header]". Centralising this is what guarantees no query can read
@@ -133,6 +164,10 @@ export interface NavQueries {
   orderLifecycle: string;   // Sales Header join (header + staging + shipment)
   recentShipments: string;  // posted GRUS$Sales Shipment Header rows
   inventoryAvailability: string; // ATP per (sku, location) for the dry-run rebuild
+  autoReleaseFiring: string; // Unit 1: newest completed CU 50009 auto-release firing
+  inProcessJobs: string;     // Unit 1: in-process CU 50007 runs, oldest first (stuck-job)
+  pendingStagingCount: string; // Unit 1: count of Status = 0 pending-promotion staging rows
+  newestDtcShipment: string; // Unit 2: posting time of the newest DTC (WebId) shipment
 }
 
 export function buildQueries(company: string): NavQueries {
@@ -185,6 +220,29 @@ ORDER BY sh.[Posting Date] DESC;`,
 FROM ${itemLedger} ile
 WHERE ile.[Open] = 1
 GROUP BY ile.[Item No_], ile.[Location Code];`,
+    // Unit 1 liveness: newest completed CU 50009 auto-release firing.
+    autoReleaseFiring: `SELECT TOP 1 [Entry No_] AS entryNo, [Start Date_Time] AS startAt, [End Date_Time] AS endAt
+FROM ${jqLog}
+WHERE [Object ID to Run] = @autoReleaseObjectId AND [Status] = @successStatus
+ORDER BY [Entry No_] DESC;`,
+    // Unit 1 stuck-job: CU 50007 runs still In Process, oldest first. The oldest
+    // one's start time ages the "genuinely stuck IABC job" signal (a normal run is
+    // 20 to 47 min, so it only reds/ambers past the ~60 min threshold).
+    inProcessJobs: `SELECT [Entry No_] AS entryNo, [Start Date_Time] AS startAt
+FROM ${jqLog}
+WHERE [Object ID to Run] = @iabcObjectId AND [Status] = @inProcessStatus
+ORDER BY [Start Date_Time] ASC;`,
+    // Unit 1 staging backlog: count of REAL pending-promotion rows (Status = 0),
+    // NOT the old Status = 1 "Not Auto-released" rows the middleware endpoint counts.
+    pendingStagingCount: `SELECT COUNT(*) AS pendingCount
+FROM ${staging}
+WHERE [Status] = @pendingStatus;`,
+    // Unit 2 has-work gate: posting time of the newest DTC (WebId present) shipment.
+    // Wholesale shipments have no Shopify back-sync leg, so they are excluded.
+    newestDtcShipment: `SELECT TOP 1 sh.[Posting Date] AS postedAt
+FROM ${shipment} sh
+WHERE sh.[WebId] IS NOT NULL AND sh.[WebId] <> ''
+ORDER BY sh.[Posting Date] DESC;`,
   };
 }
 
@@ -307,6 +365,27 @@ export function mapShipmentHeader(row: Row): NavShipmentHeader {
   };
 }
 
+// Unit 1: assemble NavJobQueueState from the three read-only job-queue reads. An
+// empty inProcess recordset is a genuine "no in-process job" (count 0, healthy),
+// distinct from an unread source (the stub returns count null => unknown). The
+// oldest in-process row is first (queried ORDER BY start ASC) so the compute ages
+// the longest-running job. Pure: fake rows in, typed state out (no live call).
+export function mapJobQueueState(
+  autoRelease: Row | undefined,
+  inProcess: Row[],
+  staging: Row | undefined,
+): NavJobQueueState {
+  const oldest = inProcess[0];
+  return {
+    autoReleaseFiredAt: autoRelease
+      ? (toIso(autoRelease.endAt) ?? toIso(autoRelease.startAt))
+      : null,
+    oldestInProcessJobAt: oldest ? toIso(oldest.startAt) : null,
+    inProcessJobCount: inProcess.length,
+    pendingStagingCount: staging ? toNum(staging.pendingCount) : null,
+  };
+}
+
 // Read-only enforcement. Reject any statement that could mutate NAV. Applied to
 // every query the live client runs (defence in depth on top of the db_datareader
 // grant). Pure => unit-tested against write statements.
@@ -400,6 +479,23 @@ export class NavClientStub implements NavClient {
   async getInventoryAvailability(): Promise<NavInventoryAvailabilityRow[]> {
     this.note('NAV inventory availability (item ledger by sku + location)');
     return [];
+  }
+  async getJobQueueState(): Promise<NavJobQueueState> {
+    this.note('job-queue state (CU 50009 auto-release + CU 50007 in-process + staging)');
+    // All null => the three sub-verdicts read 'unknown' (unread source), never a
+    // false green. inProcessJobCount null is "unread", distinct from a real 0.
+    return {
+      autoReleaseFiredAt: null,
+      oldestInProcessJobAt: null,
+      inProcessJobCount: null,
+      pendingStagingCount: null,
+    };
+  }
+  async getNewestDtcShipmentAt(): Promise<string | null> {
+    this.note('newest DTC shipment posting time (back-sync has-work gate)');
+    // null => the has-work gate cannot detect unsynced work; the pipe rolls up to
+    // unknown via the missed-shipments signal rather than a false idle-green.
+    return null;
   }
   async queryReadOnly<T>(templateName: string): Promise<T[]> {
     this.note(`read-only template ${templateName}`);
@@ -518,6 +614,36 @@ class NavClientLive implements NavClient {
       return rows.map(mapInventoryAvailabilityRow);
     } catch (err) {
       return this.degrade('inventory availability', err, this.stub.getInventoryAvailability());
+    }
+  }
+
+  async getJobQueueState(): Promise<NavJobQueueState> {
+    try {
+      const [autoRelease, inProcess, staging] = await Promise.all([
+        this.select(this.queries.autoReleaseFiring, {
+          autoReleaseObjectId: NAV_AUTO_RELEASE_OBJECT_ID,
+          successStatus: NAV_JOB_STATUS_SUCCESS,
+        }),
+        this.select(this.queries.inProcessJobs, {
+          iabcObjectId: NAV_IABC_OBJECT_ID,
+          inProcessStatus: NAV_JOB_STATUS_IN_PROCESS,
+        }),
+        this.select(this.queries.pendingStagingCount, {
+          pendingStatus: NAV_STAGING_STATUS_PENDING_PROMOTION,
+        }),
+      ]);
+      return mapJobQueueState(autoRelease[0], inProcess, staging[0]);
+    } catch (err) {
+      return this.degrade('job-queue state', err, this.stub.getJobQueueState());
+    }
+  }
+
+  async getNewestDtcShipmentAt(): Promise<string | null> {
+    try {
+      const rows = await this.select(this.queries.newestDtcShipment);
+      return rows[0] ? toIso(rows[0].postedAt) : null;
+    } catch (err) {
+      return this.degrade('newest DTC shipment', err, this.stub.getNewestDtcShipmentAt());
     }
   }
 

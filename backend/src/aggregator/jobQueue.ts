@@ -1,39 +1,60 @@
-// NAV Job Queue Monitor: CONSUME the middleware verdict, do not recompute it.
+// NAV Job Queue Monitor: COMPUTE the verdict from read-only NAV (Unit 1, ADR-0007).
 //
-// Design rule (design.md 5 line 126 and section 6): the middleware ALREADY
-// computes NAV job-queue health (the CU 50009 auto-release + no-stuck-job
-// tripwire). This unit promotes that verdict into the rollup rather than
-// re-deriving it. So this "compute" is deliberately NOT a verdict calculation:
-// it normalizes and ADOPTS the middleware's verdict unchanged, and carries the
-// supporting numbers into a typed detail bag for the panel. There is no cycle
-// banding here on purpose; re-deriving job-queue health would duplicate (and
-// risk diverging from) the source of truth.
+// This unit replaces the old "adopt the middleware verdict" behaviour. The live
+// run on 2026-07-13 showed why: the middleware returned level:"Stuck" for a normal
+// 53-min IABC run (a legitimate 20 to 47 min job), our map did not recognise it,
+// and the pipe flipped to 'unknown' while NAV showed auto-release firing 4.5 min
+// prior. Separately its stuck-staging endpoint reported 1,988 while its job-queue
+// endpoint reported pending_staging=0 for the same instant. The middleware graded
+// itself and got it wrong.
+//
+// So the verdict is now three INDEPENDENT sub-verdicts computed from read-only NAV:
+//   1. liveness  - recency of the last CU 50009 auto-release firing.
+//   2. stuck-job - the oldest IN-PROCESS CU 50007 run. A normal IABC run is 20 to
+//                  47 min, so this only ambers/reds past a REAL threshold (~60 min);
+//                  it never flags a normal long run.
+//   3. staging   - the count of REAL Status = 0 pending-promotion staging rows
+//                  (NOT the old Status = 1 "Not Auto-released" rows).
+// The middleware's own level and stuck-staging count are kept only as a labelled
+// CROSS-CHECK in the detail bag, never as the verdict.
 //
 // PURE: same inputs + nowMs => same result (no I/O, no clock read beyond nowMs),
-// so the passthrough is unit-testable without a live middleware.
+// so every band is unit-testable without a live NAV or middleware.
 import type { JobQueueDetail, Verdict } from '@order-health/shared';
+import { worstVerdict } from '@order-health/shared';
 
 export interface JobQueueThresholds {
-  // No verdict band lives here (the verdict is adopted, not computed). This knob
-  // only documents the stuck-job age the middleware itself trips on, so the
-  // panel can label the supporting number. It never re-derives the verdict.
-  stuckJobWarnSeconds: number;
+  autoReleaseAmberSeconds: number;   // last CU 50009 auto-release age >= this => AMBER
+  autoReleaseRedSeconds: number;     // ...>= this => RED
+  inProcessAmberSeconds: number;     // oldest in-process CU 50007 age >= this => AMBER (>= ~60 min)
+  inProcessRedSeconds: number;       // ...>= this => RED
+  pendingStagingAmberCount: number;  // real Status=0 pending-promotion rows >= this => AMBER
+  pendingStagingRedCount: number;    // ...>= this => RED
+  stuckJobWarnSeconds: number;       // legacy: labels the middleware cross-check only
 }
 
-// Seeded, source-shaped input: exactly what the middleware job-queue/health
-// endpoint exposes read-only. middlewareVerdict is the endpoint's OWN verdict.
+// Seeded, source-shaped input. The NAV fields are authoritative; the middleware
+// fields are the monitored cross-check (never gate the verdict).
 export interface JobQueueInput {
-  middlewareVerdict: string | null;   // the verdict the middleware already computed
-  autoReleaseFiredAt: string | null;  // last CU 50009 auto-release firing
-  longestRunningJobS: number | null;  // age of the oldest running Job Queue Entry
-  stuckJobCount: number | null;       // jobs the middleware flags stuck
-  checkedAt: string | null;           // when the middleware computed this
+  // NAV (authoritative).
+  autoReleaseFiredAt: string | null;   // last CU 50009 auto-release firing
+  oldestInProcessJobAt: string | null; // start time of the oldest in-process CU 50007 run
+  inProcessJobCount: number | null;    // CU 50007 rows In Process (null = unread => unknown)
+  pendingStagingCount: number | null;  // real Status=0 pending-promotion rows (null = unread)
+  // Middleware cross-check (monitored, NOT authoritative).
+  middlewareVerdict: string | null;         // the raw level the endpoint returned
+  middlewareStuckStagingCount: number | null; // the endpoint's own stuck-staging count
+  stuckJobCount: number | null;             // jobs the middleware flags stuck
+  checkedAt: string | null;                 // when the middleware computed its view
 }
 
 export interface JobQueueResult {
-  pipeVerdict: Verdict;   // == the adopted middleware verdict (NOT recomputed)
-  adoptedVerdict: Verdict;
+  pipeVerdict: Verdict;       // worst of the three NAV sub-verdicts
+  livenessVerdict: Verdict;
+  stuckJobVerdict: Verdict;
+  stagingVerdict: Verdict;
   lastProgressAt: string | null;
+  heartbeatAt: string | null;
   detail: JobQueueDetail;
 }
 
@@ -45,10 +66,26 @@ function ageSeconds(iso: string | null, nowMs: number): number | null {
   return Math.max(0, Math.round((nowMs - t) / 1000));
 }
 
-// Normalize the middleware's verdict string to our Verdict enum WITHOUT changing
-// its meaning. This is a label map, not a re-derivation: green/amber/red pass
-// straight through, common synonyms map to the same class, anything else (or a
-// missing verdict) is 'unknown'. The middleware remains the source of truth.
+// A seconds-banded verdict: green under amber, amber up to red, red at or beyond
+// red. A null age is 'unknown' (source not reporting).
+function secondsBandVerdict(ageS: number | null, amberS: number, redS: number): Verdict {
+  if (ageS === null) return 'unknown';
+  if (ageS >= redS) return 'red';
+  if (ageS >= amberS) return 'amber';
+  return 'green';
+}
+
+// A count-banded verdict: green under amber, amber up to red, red at or beyond
+// red. A null count is 'unknown' (source not reporting).
+function countBandVerdict(count: number | null, amberCount: number, redCount: number): Verdict {
+  if (count === null) return 'unknown';
+  if (count >= redCount) return 'red';
+  if (count >= amberCount) return 'amber';
+  return 'green';
+}
+
+// Normalize the middleware's raw level to a Verdict for the CROSS-CHECK only (so
+// the panel can show whether the actor agrees). This does NOT drive the verdict.
 export function adoptMiddlewareVerdict(raw: string | null): Verdict {
   if (raw === null) return 'unknown';
   switch (raw.trim().toLowerCase()) {
@@ -65,41 +102,78 @@ export function adoptMiddlewareVerdict(raw: string | null): Verdict {
     case 'critical':
     case 'down':
     case 'unhealthy':
+    case 'stuck':
       return 'red';
     default:
       return 'unknown';
   }
 }
 
-// The consume (not recompute) step. pipeVerdict is exactly the adopted verdict.
+// The stuck-job sub-verdict. An unread source (inProcessJobCount null) is unknown;
+// a genuine "no in-process job" (count 0) is GREEN (nothing can be stuck); with
+// jobs in process, band the oldest one's age. This is what stops a normal long
+// IABC run from reading stuck: under the ~60 min threshold it stays green.
+function stuckJobVerdict(input: JobQueueInput, t: JobQueueThresholds, nowMs: number): Verdict {
+  if (input.inProcessJobCount === null) return 'unknown';
+  if (input.inProcessJobCount === 0) return 'green';
+  return secondsBandVerdict(
+    ageSeconds(input.oldestInProcessJobAt, nowMs),
+    t.inProcessAmberSeconds,
+    t.inProcessRedSeconds,
+  );
+}
+
+// The compute. Three NAV sub-verdicts; the middleware is a labelled cross-check.
 export function computeJobQueue(
   input: JobQueueInput,
   thresholds: JobQueueThresholds,
   nowMs: number,
 ): JobQueueResult {
-  const adoptedVerdict = adoptMiddlewareVerdict(input.middlewareVerdict);
+  const autoReleaseAgeS = ageSeconds(input.autoReleaseFiredAt, nowMs);
+
+  const livenessVerdict = secondsBandVerdict(
+    autoReleaseAgeS,
+    thresholds.autoReleaseAmberSeconds,
+    thresholds.autoReleaseRedSeconds,
+  );
+
+  const stuckVerdict = stuckJobVerdict(input, thresholds, nowMs);
+
+  const stagingVerdict = countBandVerdict(
+    input.pendingStagingCount,
+    thresholds.pendingStagingAmberCount,
+    thresholds.pendingStagingRedCount,
+  );
+
+  // Reference the legacy label so it stays part of the record's meaning.
+  void thresholds.stuckJobWarnSeconds;
 
   const detail: JobQueueDetail = {
-    source: 'middleware:job-queue/health',
-    adopted_verdict: adoptedVerdict,
-    middleware_verdict_raw: input.middlewareVerdict,
+    source: 'nav:job-queue-log+staging',
+    liveness_verdict: livenessVerdict,
+    stuck_job_verdict: stuckVerdict,
+    staging_verdict: stagingVerdict,
     auto_release_fired_at: input.autoReleaseFiredAt,
-    auto_release_age_s: ageSeconds(input.autoReleaseFiredAt, nowMs),
-    // Surfaced only for context; the middleware, not this line, owns the tripwire
-    // (stuckJobWarnSeconds documents the source threshold, it does not gate here).
-    longest_running_job_s: input.longestRunningJobS,
+    auto_release_age_s: autoReleaseAgeS,
+    longest_running_job_s: ageSeconds(input.oldestInProcessJobAt, nowMs),
+    in_process_job_count: input.inProcessJobCount,
+    pending_staging_count: input.pendingStagingCount,
+    // Cross-check: the actor's own claim, surfaced but not adopted.
+    middleware_verdict_raw: input.middlewareVerdict,
+    middleware_stuck_staging_count: input.middlewareStuckStagingCount,
     stuck_job_count: input.stuckJobCount,
     checked_at: input.checkedAt,
   };
-  // Reference the knob so the source threshold is part of the record's meaning
-  // without re-deriving the verdict from it.
-  void thresholds.stuckJobWarnSeconds;
+
+  const pipeVerdict = worstVerdict([livenessVerdict, stuckVerdict, stagingVerdict]);
 
   return {
-    // Adopted, NOT recomputed. Whatever the middleware said, we surface.
-    pipeVerdict: adoptedVerdict,
-    adoptedVerdict,
-    lastProgressAt: input.autoReleaseFiredAt,
+    pipeVerdict,
+    livenessVerdict,
+    stuckJobVerdict: stuckVerdict,
+    stagingVerdict,
+    lastProgressAt: input.autoReleaseFiredAt, // last CU 50009 auto-release firing
+    heartbeatAt: input.checkedAt,
     detail,
   };
 }

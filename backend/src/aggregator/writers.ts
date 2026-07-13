@@ -122,6 +122,8 @@ export async function computeAllocatorPipeline(sources: Sources): Promise<Pipeli
     unallocatableCount: status.unallocatableCount,
     failedCount: status.failedCount,
     atpFallbackCount: status.atpFallbackCount,
+    oosHeldCount: status.oosHeldCount,
+    oosHeldOldestAgeS: status.oosHeldOldestAgeS,
     decisions: status.recentDecisions,
   };
 
@@ -151,6 +153,7 @@ export async function computePriceSyncPipeline(sources: Sources): Promise<Pipeli
   const input: PriceSyncInput = {
     lastReceivedAt: status.lastReceivedAt,
     lastRunAt: status.lastRunAt,
+    enabled: status.enabled,
   };
 
   const r = computePriceSync(input, config.priceSync, Date.now());
@@ -168,32 +171,43 @@ export async function computePriceSyncPipeline(sources: Sources): Promise<Pipeli
   };
 }
 
-// --- Unit 3: nav_job_queue -------------------------------------------------
-// CONSUME the middleware's already-computed job-queue verdict; do NOT recompute
-// it (design.md 6). The row's three verdict columns all reflect that single
-// adopted verdict (this pipe derives no independent freshness/liveness); the
-// supporting numbers ride in the typed detail bag.
+// --- Unit 1: nav_job_queue -------------------------------------------------
+// COMPUTE the verdict from read-only NAV (ADR-0007), do NOT adopt the middleware
+// level. Read three NAV signals (last CU 50009 auto-release, oldest in-process
+// CU 50007, real Status=0 staging backlog); read the middleware's own level and
+// stuck-staging count only as a labelled cross-check. The row's freshness column
+// carries the liveness (auto-release recency) verdict; the staging sub-verdict
+// rides in the detail bag.
 export async function computeJobQueuePipeline(sources: Sources): Promise<PipelineHealth> {
-  const status = await sources.middleware.getJobQueueHealthStatus();
+  const [nav, mwHealth, mwStuckStaging] = await Promise.all([
+    sources.nav.getJobQueueState(),
+    sources.middleware.getJobQueueHealthStatus(),
+    sources.middleware.getStuckStaging(),
+  ]);
 
   const input: JobQueueInput = {
-    middlewareVerdict: status.verdict,
-    autoReleaseFiredAt: status.autoReleaseFiredAt,
-    longestRunningJobS: status.longestRunningJobS,
-    stuckJobCount: status.stuckJobCount,
-    checkedAt: status.checkedAt,
+    // NAV (authoritative).
+    autoReleaseFiredAt: nav.autoReleaseFiredAt,
+    oldestInProcessJobAt: nav.oldestInProcessJobAt,
+    inProcessJobCount: nav.inProcessJobCount,
+    pendingStagingCount: nav.pendingStagingCount,
+    // Middleware cross-check (monitored, not authoritative).
+    middlewareVerdict: mwHealth.verdict,
+    middlewareStuckStagingCount: mwStuckStaging.length > 0 ? mwStuckStaging.length : null,
+    stuckJobCount: mwHealth.stuckJobCount,
+    checkedAt: mwHealth.checkedAt,
   };
 
   const r = computeJobQueue(input, config.jobQueue, Date.now());
 
   return {
     pipe: 'nav_job_queue',
-    pipe_verdict: r.pipeVerdict,           // == the adopted middleware verdict
-    freshness_verdict: r.adoptedVerdict,   // mirrors the single consumed verdict
-    watermark_lag_s: null,
-    last_progress_at: r.lastProgressAt,    // last CU 50009 auto-release firing
-    liveness_verdict: r.adoptedVerdict,    // mirrors the single consumed verdict
-    heartbeat_at: r.detail.checked_at,
+    pipe_verdict: r.pipeVerdict,            // worst of liveness / stuck-job / staging
+    freshness_verdict: r.livenessVerdict,   // auto-release recency (NAV liveness)
+    watermark_lag_s: r.detail.auto_release_age_s,
+    last_progress_at: r.lastProgressAt,     // last CU 50009 auto-release firing
+    liveness_verdict: r.livenessVerdict,
+    heartbeat_at: r.heartbeatAt,
     heartbeat_age_s: null,
     detail: r.detail as unknown as Record<string, unknown>,
   };
@@ -235,10 +249,11 @@ export async function computeShopifyWebhookPipeline(sources: Sources): Promise<P
 // the pure computeBackSync, and maps the result to the PipelineHealth row. All reads
 // are currently stubbed (typed nulls/empties) until DevOps provisions the sources.
 export async function computeBackSyncPipeline(sources: Sources): Promise<PipelineHealth> {
-  const [status, missed, shipments] = await Promise.all([
+  const [status, missed, shipments, newestDtcShipmentAt] = await Promise.all([
     sources.middleware.getBackSyncStatus(),
     sources.middleware.getMissedShipmentDetail(),
     sources.nav.getRecentShipments(50),
+    sources.nav.getNewestDtcShipmentAt(), // Unit 2 has-work gate
   ]);
 
   // Enrich each missed row with NAV shipment header detail (carrier / tracking /
@@ -264,6 +279,7 @@ export async function computeBackSyncPipeline(sources: Sources): Promise<Pipelin
     fulfillmentsLast24h: status.fulfillmentsLast24h,
     errorsLast24h: status.errorsLast24h,
     missedShipments: enriched,
+    newestDtcShipmentAt,
   };
 
   const r = computeBackSync(input, config.backSync, Date.now());
@@ -325,21 +341,47 @@ export async function computePipelines(sources: Sources): Promise<PipelineHealth
 // yields an empty snapshot with no live calls.
 // ---------------------------------------------------------------------------
 
-// Map one read-only NAV lifecycle row to the seeded OrderInput the grader takes.
-// The per-channel chain (CHANNEL_STAGES) decides which hops exist, so wholesale
-// simply has no shopify_order / allocator_split / back_sync hop to grade.
-function buildOrderInput(row: NavOrderLifecycleRow): OrderInput {
-  // Completion timestamp per stage. awaiting_ship completes when the shipment
-  // exists (same signal as nav_shipment), which is what moves a promoted order
-  // off "awaiting ship".
+// Map one read-only NAV lifecycle row to the seeded OrderInput the grader takes
+// (Unit 6, health-fidelity; see docs/business/order-layer-red-rate-finding-2026-07-13.md).
+//
+// THE JOIN FIX. Four DTC hop completions are middleware-sourced and NOT observable
+// from read-only NAV, so a live row carries them null: allocatorSplitAt, navStagingAt,
+// navPromotionAt, backSyncAt. Reading those nulls as "never happened" pinned every
+// order at allocator_split and aged it from the order date against the tight staging
+// band, reddening 98.9% of a healthy board. Per ADR-0007, NAV read-only is the system
+// of record: the authoritative per-order evidence is that the order was RECEIVED
+// (orderDate), whether it SHIPPED (navShipmentAt), the staging Status, and the
+// missed-back-sync reconciliation. So INFER each unobservable completion from that
+// evidence (assume the middleware's step landed unless NAV shows a fault) instead of
+// aging a null as if stuck. When a real timestamp IS present (seeded fixtures, or a
+// future source that provides it) it is used unchanged, so the grader and its tests
+// are untouched.
+export function buildOrderInput(row: NavOrderLifecycleRow): OrderInput {
+  const shipped = row.navShipmentAt !== null;
+  // The received-time anchor. DTC carries the NAV order date; wholesale has none in
+  // the read-only row, so an unshipped wholesale order has no anchor and reads
+  // unknown (never a false red) rather than being aged.
+  const receivedAt = row.shopifyOrderAt;
+  // Inferred completion for an unobservable intermediate hop: the shipment time when
+  // shipped, else the received time (the order is in flight, awaiting shipment).
+  const inferredMidCompletion = shipped ? row.navShipmentAt : receivedAt;
+  // A genuine staging fault NAV can see: a nonzero staging Status on an order that has
+  // NOT shipped (a shipped order clearly promoted, so a stale Status is not a fault).
+  const stagingStuck = row.navStagingStatus !== null && row.navStagingStatus !== 0 && !shipped;
+  // Back-sync completion is unobservable; infer it from the shipment plus the
+  // missed-back-sync reconciliation. A missed back-sync leaves it incomplete + latched.
+  const backSynced = shipped && !row.missedBackSync;
+
+  // Completion timestamp per stage. Real timestamp if the source provides one, else
+  // the NAV-evidence inference. awaiting_ship / nav_shipment complete on the shipment.
   const completedAtByStage: Partial<Record<OrderHop['stage'], string | null>> = {
     shopify_order: row.shopifyOrderAt,
-    allocator_split: row.allocatorSplitAt,
-    nav_staging: row.navStagingAt,
-    nav_promotion: row.navPromotionAt,
+    allocator_split: row.allocatorSplitAt ?? inferredMidCompletion,
+    nav_staging: row.navStagingAt ?? inferredMidCompletion,
+    nav_promotion: row.navPromotionAt ?? inferredMidCompletion,
     awaiting_ship: row.navShipmentAt,
     nav_shipment: row.navShipmentAt,
-    back_sync: row.backSyncAt,
+    back_sync: row.backSyncAt ?? (backSynced ? row.navShipmentAt : null),
   };
 
   const hops: OrderHop[] = [];
@@ -347,14 +389,10 @@ function buildOrderInput(row: NavOrderLifecycleRow): OrderInput {
   for (const stage of CHANNEL_STAGES[row.channel]) {
     const completedAt = completedAtByStage[stage] ?? null;
 
-    // Latched errors promote a hop straight to RED (design.md 5).
+    // Latched errors promote a hop straight to RED (design.md 5). These are the
+    // NAV-observable faults the reconciliation surfaces.
     let error: string | null = null;
-    if (
-      stage === 'nav_staging' &&
-      row.navStagingStatus !== null &&
-      row.navStagingStatus !== 0 &&
-      row.navPromotionAt === null
-    ) {
+    if (stage === 'nav_staging' && stagingStuck) {
       error = `NAV staging stuck (Status ${row.navStagingStatus})`;
     }
     if (stage === 'back_sync' && row.missedBackSync) {

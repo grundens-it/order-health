@@ -106,11 +106,22 @@ export interface Config {
     livenessAmberCycles: number;
     livenessRedCycles: number;
   };
-  // nav_job_queue (design.md 6): verdict is CONSUMED from the middleware, never
-  // recomputed. This knob only documents the middleware's own stuck-job age so
-  // the panel can label the supporting number; it does not gate any verdict.
+  // nav_job_queue (ADR-0007, health-fidelity Unit 1): the verdict is COMPUTED
+  // from read-only NAV, not adopted from the middleware. Three independent bands:
+  //   liveness    - recency of the last CU 50009 auto-release firing.
+  //   stuck-job   - a genuinely stuck in-process CU 50007 (a normal IABC run is
+  //                 20 to 47 min, so the threshold sits near 60 min, never under).
+  //   staging     - real GRUS$Sales Header Staging rows with Status = 0 pending
+  //                 promotion (NOT the Status = 1 "Not Auto-released" old rows).
+  // The middleware's own number is kept only as a labelled cross-check.
   jobQueue: {
-    stuckJobWarnSeconds: number;
+    stuckJobWarnSeconds: number;         // legacy label for the middleware cross-check
+    autoReleaseAmberSeconds: number;     // last CU 50009 auto-release age >= this => AMBER
+    autoReleaseRedSeconds: number;       // ...>= this => RED
+    inProcessAmberSeconds: number;       // CU 50007 in-process age >= this => AMBER (>= ~60 min)
+    inProcessRedSeconds: number;         // ...>= this => RED
+    pendingStagingAmberCount: number;    // real Status=0 pending-promotion rows >= this => AMBER
+    pendingStagingRedCount: number;      // ...>= this => RED
   };
   // shopify_webhook (design.md 5): per-topic last-received freshness bands. A
   // removed subscription is amber-or-worse by rule (not a tunable band).
@@ -178,8 +189,13 @@ export const config: Config = {
     cycleSeconds: num('INVENTORY_CYCLE_SECONDS', 7200), // ~2h IABC cycle
     freshnessAmberCycles: num('INVENTORY_FRESHNESS_AMBER_CYCLES', 1),
     freshnessRedCycles: num('INVENTORY_FRESHNESS_RED_CYCLES', 2),
-    livenessAmberCycles: num('INVENTORY_LIVENESS_AMBER_CYCLES', 1),
-    livenessRedCycles: num('INVENTORY_LIVENESS_RED_CYCLES', 2),
+    // Liveness widened to the real walk cadence (Unit 3, health-fidelity). Walks
+    // run about every 2h (one cycle), so a heartbeat is legitimately up to one full
+    // inter-walk gap old right before the next run. Amber at 2 missed cadences (~4h),
+    // red at 3 (~6h), so a healthy 124-min heartbeat reads GREEN instead of flipping
+    // amber right before every walk, while a genuine >4h stall still fires.
+    livenessAmberCycles: num('INVENTORY_LIVENESS_AMBER_CYCLES', 2),
+    livenessRedCycles: num('INVENTORY_LIVENESS_RED_CYCLES', 3),
     // 7,245 / 466 ~= 15.5 (the part-1 case) trips amber at 5x; never escalates to red.
     divergenceAmberRatio: num('INVENTORY_DIVERGENCE_AMBER_RATIO', 5),
   },
@@ -211,10 +227,23 @@ export const config: Config = {
     livenessAmberCycles: num('PRICE_SYNC_LIVENESS_AMBER_CYCLES', 1),
     livenessRedCycles: num('PRICE_SYNC_LIVENESS_RED_CYCLES', 2),
   },
-  // Unit 3: nav_job_queue. Verdict consumed from the middleware; this only labels
-  // the supporting stuck-job number (matches the existing 30-min tripwire).
+  // nav_job_queue (Unit 1, ADR-0007). Computed from read-only NAV. Defaults are
+  // safe starting points surfaced for Ops to tune (health-fidelity kickoff s11):
+  //   auto-release: healthy firings were 4 to 7 min apart in the live run, so
+  //     amber at 30 min and red at 60 min flag a genuine stall without tripping on
+  //     a normal quiet gap.
+  //   in-process: a normal IABC (CU 50007) run is 20 to 47 min, so amber at 60 min
+  //     and red at 90 min; never flag under 60 min (the false-"Stuck" the live run showed).
+  //   pending staging: real Status=0 rows clear quickly; a standing backlog is the
+  //     signal. Amber at 25, red at 100 (surfaced default; NOT the 1,988 Status=1 rows).
   jobQueue: {
     stuckJobWarnSeconds: num('JOB_QUEUE_STUCK_JOB_WARN_SECONDS', 1800),
+    autoReleaseAmberSeconds: num('JOB_QUEUE_AUTO_RELEASE_AMBER_SECONDS', 1800),
+    autoReleaseRedSeconds: num('JOB_QUEUE_AUTO_RELEASE_RED_SECONDS', 3600),
+    inProcessAmberSeconds: num('JOB_QUEUE_IN_PROCESS_AMBER_SECONDS', 3600),
+    inProcessRedSeconds: num('JOB_QUEUE_IN_PROCESS_RED_SECONDS', 5400),
+    pendingStagingAmberCount: num('JOB_QUEUE_PENDING_STAGING_AMBER_COUNT', 25),
+    pendingStagingRedCount: num('JOB_QUEUE_PENDING_STAGING_RED_COUNT', 100),
   },
   // Unit 3: shopify_webhook. Default expected-delivery window 1h; a removed
   // subscription is amber-or-worse regardless of these bands.

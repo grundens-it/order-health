@@ -25,6 +25,11 @@ export interface PriceSyncThresholds {
 export interface PriceSyncInput {
   lastReceivedAt: string | null; // last price-sync signal received (freshness)
   lastRunAt: string | null;      // last price-sync run/loop completed (liveness)
+  // ADR-0008: the middleware's explicit enabled flag. false => the feature is
+  // deliberately off; the pipe reads a labelled 'disabled' neutral state instead of
+  // 'unknown' (which rendered like a broken sensor and dragged the rollup). null =>
+  // unread (stub): compute normally so an unprovisioned source still reads unknown.
+  enabled: boolean | null;
 }
 
 export interface PriceSyncResult {
@@ -69,6 +74,30 @@ export function computePriceSync(
   const lastReceivedAgeS = ageSeconds(input.lastReceivedAt, nowMs);
   const lastRunAgeS = ageSeconds(input.lastRunAt, nowMs);
 
+  // ADR-0008: a deliberately disabled feature is not a fault. Read a labelled
+  // 'disabled' neutral state (green sub-verdicts) so it does not render like a
+  // broken sensor or drag the rollup to unknown. The rollup treats 'disabled' as
+  // neutral (excluded from the counts and the headline).
+  if (input.enabled === false) {
+    const detail: PriceSyncDetail = {
+      last_received_at: input.lastReceivedAt,
+      last_received_age_s: lastReceivedAgeS,
+      last_run_at: input.lastRunAt,
+      last_run_age_s: lastRunAgeS,
+      applicability: 'disabled',
+    };
+    return {
+      freshnessVerdict: 'green',
+      livenessVerdict: 'green',
+      pipeVerdict: 'green',
+      lastReceivedAgeS,
+      lastRunAgeS,
+      lastReceivedAt: input.lastReceivedAt,
+      lastRunAt: input.lastRunAt,
+      detail,
+    };
+  }
+
   const freshnessVerdict = cycleBandVerdict(
     lastReceivedAgeS,
     thresholds.cycleSeconds,
@@ -88,6 +117,7 @@ export function computePriceSync(
     last_received_age_s: lastReceivedAgeS,
     last_run_at: input.lastRunAt,
     last_run_age_s: lastRunAgeS,
+    applicability: 'active',
   };
 
   return {

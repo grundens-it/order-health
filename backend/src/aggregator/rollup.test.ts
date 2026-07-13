@@ -23,6 +23,15 @@ function pipe(pipeKey: string, verdict: Verdict, freshness: Verdict = verdict): 
   };
 }
 
+// A neutral pipe (ADR-0008): disabled or idle-no-traffic, carried in detail.
+function neutralPipe(
+  pipeKey: string,
+  applicability: 'disabled' | 'idle_no_traffic',
+  verdict: Verdict = 'green',
+): PipelineHealth {
+  return { ...pipe(pipeKey, verdict), detail: { applicability } };
+}
+
 // An order row with a given verdict and optional stuck age.
 function order(verdict: Verdict, oldestStuckAgeS: number | null = null): OrderHealth {
   return {
@@ -116,6 +125,39 @@ test('all-unknown pipes (nothing observed) => healthy-empty unknown chip', () =>
   const r = computeRollup([pipe('inventory_sync', 'unknown')], []);
   assert.equal(r.headline, 'healthy');
   assert.equal(r.headline_verdict, 'unknown');
+});
+
+// --- ADR-0008: neutral (disabled / idle) pipes do not drag the rollup ------
+test('a disabled pipe does not drag the headline and is excluded from the counts', () => {
+  // The live-run case: price_sync disabled, everything else green. Old code let
+  // the disabled/unknown pipe pollute the rollup; now it is neutral.
+  const r = computeRollup(
+    [pipe('inventory_sync', 'green'), neutralPipe('price_sync', 'disabled')],
+    [order('green')],
+  );
+  assert.equal(r.headline, 'healthy');
+  assert.equal(r.headline_verdict, 'green');
+  assert.equal(r.counts.pipes_total, 1); // only the active pipe counts
+  assert.equal(r.counts.pipes_green, 1);
+});
+
+test('an idle-no-traffic webhook pipe is neutral, not counted unknown', () => {
+  const r = computeRollup(
+    [pipe('inventory_sync', 'green'), neutralPipe('shopify_webhook', 'idle_no_traffic')],
+    [order('green')],
+  );
+  assert.equal(r.headline, 'healthy');
+  assert.equal(r.counts.pipes_total, 1);
+  assert.equal(r.counts.pipes_unknown, 0);
+});
+
+test('a neutral pipe never masks a real red elsewhere', () => {
+  const r = computeRollup(
+    [pipe('back_sync', 'red'), neutralPipe('price_sync', 'disabled')],
+    [order('green')],
+  );
+  assert.equal(r.headline, 'stuck');
+  assert.equal(r.headline_verdict, 'red');
 });
 
 // --- Oldest stuck age selection -------------------------------------------

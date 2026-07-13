@@ -7,7 +7,7 @@ import type {
   PipelineHealth,
   RemediationRegistry,
 } from '@order-health/shared';
-import { fetchOrders, fetchPipelines, fetchRemediationRegistry, fetchRollup } from './api';
+import { ApiError, fetchOrders, fetchPipelines, fetchRemediationRegistry, fetchRollup } from './api';
 import { LeadershipStrip } from './components/LeadershipStrip';
 import { PipelineStrip } from './components/PipelineStrip';
 import { RemediationModal, type RemediationSubject } from './components/RemediationModal';
@@ -75,7 +75,10 @@ export function App(): JSX.Element {
   const [rollup, setRollup] = useState<LeadershipRollup | null>(null);
   const [rollupAsOf, setRollupAsOf] = useState<string | null>(null);
   const [asOf, setAsOf] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Health-fidelity Unit 7: carry the failure MODE, not just a message, so the
+  // banner can tell "backend down / unreachable" apart from "backend up but errored
+  // (e.g. DB down)".
+  const [error, setError] = useState<{ kind: 'network' | 'http' | 'unknown'; message: string } | null>(null);
 
   // Order-lifecycle controls (Order Health view).
   const [attention, setAttention] = useState<'all' | 'attn'>('all');
@@ -118,7 +121,14 @@ export function App(): JSX.Element {
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : 'failed to load health snapshot');
+        if (err instanceof ApiError) {
+          setError({ kind: err.kind, message: err.message });
+        } else {
+          setError({
+            kind: 'unknown',
+            message: err instanceof Error ? err.message : 'failed to load health snapshot',
+          });
+        }
       });
     return () => {
       cancelled = true;
@@ -243,7 +253,19 @@ export function App(): JSX.Element {
       <div className="wrap">
         {error && (
           <div className="sec">
-            <span className="aux">Backend unreachable: {error}. Start the backend on :8080.</span>
+            {error.kind === 'network' ? (
+              <span className="aux">
+                Backend unreachable: {error.message}. The service is not responding; start the
+                backend on :8080.
+              </span>
+            ) : error.kind === 'http' ? (
+              <span className="aux">
+                Backend is up but returned an error: {error.message}. The service is running; check
+                its dependencies (for example the database) and logs, not its reachability.
+              </span>
+            ) : (
+              <span className="aux">Could not load the health snapshot: {error.message}.</span>
+            )}
           </div>
         )}
 

@@ -80,12 +80,21 @@ export interface InventorySyncFeedRow {
 export interface AllocatorStatus {
   lastDecisionAt: string | null;      // recency of the newest split decision
   serviceHeartbeatAt: string | null;  // allocator loop heartbeat proxy (== lastDecisionAt)
-  windowSeconds: number | null;       // wall-clock span the returned sample covers
+  windowSeconds: number | null;       // wall-clock span the returned audit sample covers
   decisionsWindow: number | null;     // decisions in the returned audit sample
   splitCount: number | null;          // multi-warehouse splits in that sample
-  unallocatableCount: number | null;  // OOS-held backlog (order-level) from /api/oos-held
-  failedCount: number | null;         // allocation-attributable errors in /api/errors
-  atpFallbackCount: number | null;    // Rule-4 inventory-aware (ATP) fallbacks in the log
+  // Unit 4 (health-fidelity): WINDOW-scoped counts (decisions inside the returned
+  // audit sample), NOT the standing backlog. These feed failed_rate. On the real
+  // route they are counted over /api/warehouse/rollout/audit (the recent decision
+  // page) and /api/errors, never over the OOS-held backlog.
+  unallocatableCount: number | null;  // in-window audit rows with an out-of-stock outcome
+  failedCount: number | null;         // allocation-attributable errors in /api/errors (in-window)
+  atpFallbackCount: number | null;    // Rule-4 inventory-aware (ATP) fallbacks in the audit page
+  // The STANDING OOS-held / needs-operator / backorder backlog, from the SEPARATE
+  // (non-time-windowed) /api/oos-held read. Surfaced beside the rate as its own
+  // labelled count/age; NEVER folded into failed_rate (the live-run bug Unit 4 fixed).
+  oosHeldCount: number | null;        // orders currently held OOS / needs-operator / backorder
+  oosHeldOldestAgeS: number | null;   // age of the oldest such held order (first-seen)
   recentDecisions: AllocationDecision[]; // most-recent-first
 }
 
@@ -109,6 +118,7 @@ export interface JobQueueHealthStatus {
 export interface PriceSyncStatus {
   lastReceivedAt: string | null; // newest price_sync row received
   lastRunAt: string | null;      // last price-sync run/loop completed
+  enabled: boolean | null;       // ADR-0008: the middleware's explicit feature flag (null = unread)
 }
 
 // shopify_webhook: last-received per topic (from GET /api/shopify/webhooks/events)
@@ -491,6 +501,7 @@ export function mapAllocatorStatus(
   auditBody: unknown,
   oosHeldBody: unknown,
   errorsBody?: unknown,
+  now: number = Date.now(),
 ): AllocatorStatus {
   const rows = asRecordArray(auditBody);
   const decisions = rows.map(mapAllocationDecision);
@@ -527,11 +538,34 @@ export function mapAllocatorStatus(
     if (set.size > 1) splitCount += 1;
   }
 
-  // unallocatable ≈ OOS-held backlog (order-level, current). A bare array (even
-  // empty) is a real count; a non-array (degraded/failed body) leaves it null.
-  const unallocatableCount = Array.isArray(oosHeldBody) ? asRecordArray(oosHeldBody).length : null;
-
   const hasRows = rows.length > 0;
+
+  // Unit 4 (health-fidelity): unallocatable is WINDOW-scoped, the count of audit
+  // rows in the recent decision page whose outcome is unallocatable (an out-of-stock
+  // decision). The standing OOS-held backlog is NOT counted here; it rides in
+  // oosHeldCount below and never inflates failed_rate.
+  const windowUnallocatable = hasRows
+    ? decisions.filter((d) => d.outcome === 'unallocatable').length
+    : null;
+
+  // The STANDING OOS-held backlog from /api/oos-held: its size, and the age of the
+  // oldest held order (from its first-seen timestamp). A bare array (even empty) is
+  // a real reading; a non-array (degraded body) leaves both null.
+  const oosRows = Array.isArray(oosHeldBody) ? asRecordArray(oosHeldBody) : null;
+  const oosHeldCount = oosRows === null ? null : oosRows.length;
+  let oosHeldOldestAgeS: number | null = null;
+  if (oosRows !== null) {
+    let oldestMs: number | null = null;
+    for (const row of oosRows) {
+      const iso = toIso(pick(row, 'first_seen_at', 'firstSeenAt', 'held_since', 'heldSince', 'created_at', 'createdAt'));
+      if (iso === null) continue;
+      const ms = Date.parse(iso);
+      if (Number.isNaN(ms)) continue;
+      if (oldestMs === null || ms < oldestMs) oldestMs = ms;
+    }
+    if (oldestMs !== null) oosHeldOldestAgeS = Math.max(0, Math.round((now - oldestMs) / 1000));
+  }
+
   return {
     lastDecisionAt: newest,
     // Liveness proxy: the allocator has no heartbeat endpoint, so the recency of
@@ -540,11 +574,13 @@ export function mapAllocatorStatus(
     windowSeconds,
     decisionsWindow: hasRows ? rows.length : null,
     splitCount: hasRows ? splitCount : null,
-    unallocatableCount,
+    unallocatableCount: windowUnallocatable,
     failedCount: deriveAllocatorFailedCount(errorsBody),
     // Only a real count when the audit page carried rows; an empty page is
     // 'unknown' (no sample to classify), not a false zero.
     atpFallbackCount: hasRows ? countAtpFallbacks(rows) : null,
+    oosHeldCount,
+    oosHeldOldestAgeS,
     recentDecisions: decisions,
   };
 }
@@ -587,9 +623,15 @@ export function mapJobQueueHealthStatus(body: unknown): JobQueueHealthStatus {
 export function mapPriceSyncStatus(recentBody: unknown, settingsBody: unknown): PriceSyncStatus {
   const rows = asRecordArray(recentBody);
   const settings = asRecord(settingsBody);
+  // enabled from the settings flag (ADR-0008): the price-sync/settings body carries
+  // whether the feature is on. A missing flag is unknown (null), not false, so we
+  // never fabricate a 'disabled' state from absent data.
+  const enabledRaw = pick(settings, 'enabled', 'is_enabled', 'isEnabled', 'active');
+  const enabled = typeof enabledRaw === 'boolean' ? enabledRaw : null;
   return {
     lastReceivedAt: newestTimestamp(rows, 'synced_at', 'syncedAt', 'received_at', 'receivedAt'),
     lastRunAt: toIso(pick(settings, 'last_run_at', 'lastRunAt', 'last_received_at')),
+    enabled,
   };
 }
 
@@ -766,6 +808,8 @@ export class MiddlewareClientStub implements MiddlewareClient {
       unallocatableCount: null,
       failedCount: null,
       atpFallbackCount: null,
+      oosHeldCount: null,
+      oosHeldOldestAgeS: null,
       recentDecisions: [],
     };
   }
@@ -784,9 +828,11 @@ export class MiddlewareClientStub implements MiddlewareClient {
   }
   async getPriceSyncStatus(): Promise<PriceSyncStatus> {
     // Composed read: newest price-sync row (last-received) + settings.last_run_at
-    // (last-run). GET-only.
+    // (last-run) + settings.enabled. GET-only. enabled null here (unread) so the
+    // pipe reads unknown until provisioned; the live client returns enabled:false
+    // when the feature is deliberately disabled (ADR-0008).
     this.note(MIDDLEWARE_PATHS.priceSyncRecent);
-    return { lastReceivedAt: null, lastRunAt: null };
+    return { lastReceivedAt: null, lastRunAt: null, enabled: null };
   }
   async getShopifyWebhookStatus(): Promise<ShopifyWebhookStatus> {
     // Composed read: last webhook event per topic joined to the live subscription

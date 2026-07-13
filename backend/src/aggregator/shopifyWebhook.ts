@@ -74,14 +74,22 @@ export function computeShopifyWebhook(
 ): ShopifyWebhookResult {
   const topics: WebhookTopicHealth[] = input.topics.map((t) => {
     const ageS = ageSeconds(t.lastReceivedAt, nowMs);
-    const freshness = cycleBandVerdict(
-      ageS,
-      thresholds.cycleSeconds,
-      thresholds.freshnessAmberCycles,
-      thresholds.freshnessRedCycles,
-    );
-    // A removed subscription is amber-or-worse for that topic; it never reads
-    // greener than the topic's freshness would.
+    // ADR-0008: a SUBSCRIBED topic with no receipt in the window is quiet, not
+    // broken. It reads a neutral GREEN and is flagged idle_no_traffic, instead of
+    // 'unknown' (a null age) which dragged the whole pipe to unknown in the live
+    // run. A topic that HAS a last-received timestamp is graded on freshness as
+    // before, so a busy topic that goes stale still ambers/reds.
+    const idle = t.subscribed && t.lastReceivedAt === null;
+    const freshness = idle
+      ? 'green'
+      : cycleBandVerdict(
+          ageS,
+          thresholds.cycleSeconds,
+          thresholds.freshnessAmberCycles,
+          thresholds.freshnessRedCycles,
+        );
+    // A removed subscription is amber-or-worse for that topic (the real WAF-removal
+    // failure mode); it never reads greener than the topic's freshness would.
     const verdict = t.subscribed ? freshness : worstVerdict([freshness, 'amber']);
     return {
       topic: t.topic,
@@ -89,10 +97,12 @@ export function computeShopifyWebhook(
       last_received_age_s: ageS,
       subscribed: t.subscribed,
       verdict,
+      idle_no_traffic: idle,
     };
   });
 
   const freshnessVerdict = worstVerdict(topics.map((t) => t.verdict));
+  const idleTopicCount = topics.filter((t) => t.idle_no_traffic === true).length;
 
   const missingSubscriptionCount = topics.filter((t) => !t.subscribed).length;
   // Subscription-removal signal: amber-or-worse whenever any expected topic has
@@ -122,11 +132,23 @@ export function computeShopifyWebhook(
       ? null
       : receivedTimes.reduce((a, b) => (b.ms < a.ms ? b : a)).iso;
 
+  // The pipe is idle_no_traffic (neutral) only when EVERY subscribed topic is
+  // quiet and no subscription is missing: nothing to report, not a broken pipe.
+  // With any fresh traffic the pipe is 'active' (the fresh topics make it green);
+  // with a missing subscription it stays 'active' so the amber is not neutralized.
+  const subscribedCount = topics.filter((t) => t.subscribed).length;
+  const applicability =
+    missingSubscriptionCount === 0 && subscribedCount > 0 && idleTopicCount === subscribedCount
+      ? 'idle_no_traffic'
+      : 'active';
+
   const detail: ShopifyWebhookDetail = {
     topics,
     missing_subscription_count: missingSubscriptionCount,
     freshest_received_at: freshest,
     stalest_received_at: stalest,
+    applicability,
+    idle_topic_count: idleTopicCount,
   };
 
   return {

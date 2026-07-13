@@ -21,6 +21,7 @@ import type {
 import type {
   NavClient,
   NavInventoryAvailabilityRow,
+  NavJobQueueState,
   NavOrderLifecycleRow,
   NavShipmentHeader,
   NavWatermarkState,
@@ -51,9 +52,11 @@ export interface BoardSeed {
     status?: Partial<BackSyncStatus>;
     missed?: MissedShipment[] | null;
     shipments?: NavShipmentHeader[];
+    newestDtcShipmentAt?: string | null; // Unit 2 has-work gate (null => caught up default)
   };
   priceSync?: Partial<PriceSyncStatus>;
-  jobQueue?: Partial<JobQueueHealthStatus>;
+  jobQueue?: Partial<JobQueueHealthStatus>;       // middleware cross-check only (Unit 1)
+  jobQueueState?: Partial<NavJobQueueState>;      // NAV-authoritative job-queue signals (Unit 1)
   webhook?: ShopifyWebhookStatus;
   allocator?: Partial<AllocatorStatus>;
   orders?: NavOrderLifecycleRow[];
@@ -92,6 +95,23 @@ class SeededNavClient implements NavClient {
     // Seeded board leaves this empty; the dry-run divergence then falls back to
     // the seeded InventorySyncStatus.dryRunWouldPush (no live NAV read).
     return [];
+  }
+  async getJobQueueState(): Promise<NavJobQueueState> {
+    // Default healthy: auto-release firing minutes ago, no in-process job, an empty
+    // Status=0 pending-promotion backlog. A test overrides only what it exercises.
+    return {
+      autoReleaseFiredAt: agoIso(300, this.now),
+      oldestInProcessJobAt: null,
+      inProcessJobCount: 0,
+      pendingStagingCount: 0,
+      ...this.seed.jobQueueState,
+    };
+  }
+  async getNewestDtcShipmentAt(): Promise<string | null> {
+    // Default: a DTC shipment posted BEFORE the default back-sync watermark
+    // (agoIso 600), so the has-work gate reads caught-up (idle-green). A test
+    // overrides this to a time newer than the watermark to exercise unsynced work.
+    return this.seed.backSync?.newestDtcShipmentAt ?? agoIso(900, this.now);
   }
   async queryReadOnly<T>(): Promise<T[]> {
     return [];
@@ -143,6 +163,8 @@ class SeededMiddlewareClient implements MiddlewareClient {
       unallocatableCount: 0,
       failedCount: 0,
       atpFallbackCount: 2,
+      oosHeldCount: 0,
+      oosHeldOldestAgeS: null,
       recentDecisions: [],
       ...this.seed.allocator,
     };
@@ -161,6 +183,7 @@ class SeededMiddlewareClient implements MiddlewareClient {
     return {
       lastReceivedAt: agoIso(600, this.now),
       lastRunAt: agoIso(300, this.now),
+      enabled: true,
       ...this.seed.priceSync,
     };
   }

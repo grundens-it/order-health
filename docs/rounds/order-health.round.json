@@ -14,6 +14,17 @@
     "foundation_item": "issue 54 (read-only Shopify Admin API client + least-privilege credential; does not block NAV units)",
     "note": "branch pushed; PRs not opened, not merged to main, per the kickoff"
   },
+  "integration_round": {
+    "name": "health-fidelity-integration",
+    "brief": "docs/kickoffs/health-fidelity-integration-kickoff.md",
+    "evidence": "docs/business/order-health-validation-results-2026-07-13.md",
+    "regrade": "docs/business/health-fidelity-integration-regrade-2026-07-13.md",
+    "branch": "integration/health-fidelity (off round/integration)",
+    "umbrella_issue": 60,
+    "adrs": ["ADR-0007 precedence (Accepted)", "ADR-0008 applicability (Accepted)", "ADR-0009 read-only Shopify Admin API (Accepted)"],
+    "result": "live re-grade: 5 of 6 pipes read correctly green/neutral (was zero green); inventory_sync freshness+liveness green, remaining amber is the amber-capped divergence; order layer 989 false reds down to 40 genuine aged stalls. Real NAV + real middleware + live Shopify.",
+    "note": "branch pushed; PRs not opened, not merged to main, per the kickoff"
+  },
   "kickoff_pr": 1,
   "stack": {
     "adr": "ADR-0004",
@@ -41,7 +52,11 @@
     "HF-F": "health-fidelity foundation (2026-07-13): reconciliation ADR, applicability ADR, config + shared, one commit",
     "HF-W": "health-fidelity fan-out: per-pipe fidelity fixes, each pure-compute + node:test (healthy-green AND true-fault-fires)",
     "HF-R": "health-fidelity research-first: order-layer 98.9% red investigation then fix",
-    "HF-C": "health-fidelity convergence: typecheck + test, round.json, push (no PRs)"
+    "HF-C": "health-fidelity convergence: typecheck + test, round.json, push (no PRs)",
+    "INT-F": "integration foundation (2026-07-13): merge onto real middleware client, resolve, ADR housekeeping",
+    "INT-W": "integration fan-out: Shopify client + reconciliations, job-queue source fix",
+    "INT-R": "integration research-first: residual order red-rate verification then fix",
+    "INT-C": "integration convergence: typecheck + test, live end-to-end re-grade, push (no PRs)"
   },
   "units": [
     { "unit": 0, "issue": 3, "phase": "F", "name": "Foundation scaffold", "status": "done", "pr": 12, "merged": true },
@@ -64,6 +79,13 @@
     { "unit": "HF-4", "issue": 50, "phase": "HF-W", "name": "allocator: failed_rate over the sampled window, OOS-held backlog split out", "status": "done", "note": "standing OOS backlog no longer inflates the rate; surfaced as its own labelled count/age" },
     { "unit": "HF-5", "issue": 51, "phase": "HF-W", "name": "shopify_webhook + price_sync: truthful applicability states (ADR-0008)", "status": "done", "note": "disabled / idle_no_traffic read neutral and are excluded from the rollup; subscription-drop signal intact" },
     { "unit": "HF-6", "issue": 52, "phase": "HF-R", "name": "order layer: fix the 98.9% red rate (broken stage-timestamp join)", "status": "done", "note": "research-first finding docs/business/order-layer-red-rate-finding-2026-07-13.md; infer unobservable middleware hop completions from NAV evidence; bands were fine" },
-    { "unit": "HF-7", "issue": 53, "phase": "HF-W", "name": "frontend: distinguish backend-down from backend-up-error in the banner", "status": "done", "note": "typed ApiError kind network vs http; distinct message and remedy for each" }
+    { "unit": "HF-7", "issue": 53, "phase": "HF-W", "name": "frontend: distinguish backend-down from backend-up-error in the banner", "status": "done", "note": "typed ApiError kind network vs http; distinct message and remedy for each" },
+
+    { "unit": "INT-A", "issue": 56, "phase": "INT-F", "name": "Integrate the fidelity fixes with the real middleware client", "status": "done", "note": "merged fix/health-fidelity onto round/integration; real reconciled-route middleware client wins; AllocatorStatus window-scoped + oosHeld, PriceSyncStatus enabled adapted to real routes; NAV + middleware live" },
+    { "unit": "INT-E", "issue": 58, "phase": "INT-F", "name": "ADR housekeeping: renumber Shopify to 0009, accept 0007/0008/0009", "status": "done", "note": "ADR-0009 created; 0007/0008/0009 Accepted; cross-references updated" },
+    { "unit": "INT-B", "issue": 55, "phase": "INT-W", "name": "Read-only Shopify Admin client + reconciliations (ADR-0009)", "status": "done", "note": "GraphQL query-only, mutation guard, client-credentials token manager, live/stub factory; pure mappers + 4 reconcilers unit-tested; back_sync + inventory wired live; token verified live" },
+    { "unit": "INT-C", "issue": 47, "phase": "INT-W", "name": "nav_job_queue stuck-job from Job Queue Entry current state", "status": "done", "note": "sources the in-process signal from GRUS$Job Queue Entry (live), not the stale Job Queue Log Entry audit trail; regression test for the stale-log false RED" },
+    { "unit": "INT-D", "issue": 57, "phase": "INT-R", "name": "Verify + fix the residual order-layer red rate (~532)", "status": "done", "note": "research-first finding docs/business/order-layer-residual-red-finding-2026-07-13.md; staging Status=1 is normal (Not Auto-released), not a per-order fault; live red 533 -> 40 genuine aged stalls" },
+    { "unit": "INT-F", "issue": 59, "phase": "INT-C", "name": "End-to-end re-grade all six pipes on real sources", "status": "done", "note": "docs/business/health-fidelity-integration-regrade-2026-07-13.md; live real NAV + middleware + Shopify; 5 of 6 pipes correct green/neutral (was zero green), order layer 989 -> 40 genuine reds; remediation disarmed" }
   ]
 }

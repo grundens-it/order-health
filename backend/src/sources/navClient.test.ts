@@ -241,6 +241,7 @@ function navCfg(overrides: Partial<NavCfg>): NavCfg {
     aadClientId: '',
     aadClientSecret: '',
     company: 'GRUS',
+    orderIngestLimit: 1000,
     ...overrides,
   };
 }

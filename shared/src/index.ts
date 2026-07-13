@@ -19,6 +19,16 @@ export type ChannelFilter = Channel | 'all';
 // is provisioned by DevOps). The worst verdict wins in any rollup.
 export type Verdict = 'green' | 'amber' | 'red' | 'unknown';
 
+// A non-verdict DISPLAY state (ADR-0008) for a pipe that is correctly not
+// reporting, kept in the pipe's detail bag rather than in the Verdict union.
+//   active          - normal; the default when the field is absent.
+//   disabled        - the feature is deliberately off (e.g. price_sync disabled).
+//   idle_no_traffic - healthy and correctly configured but no work / traffic to
+//                     report in the window (a quiet webhook topic, an idle stretch).
+// The rollup treats disabled / idle_no_traffic as NEUTRAL: not unknown, not
+// red/amber, and it does not drag the leadership headline off healthy.
+export type PipeApplicability = 'active' | 'disabled' | 'idle_no_traffic';
+
 // Verdict ordering for "worst wins" rollups. Higher is worse.
 const VERDICT_SEVERITY: Record<Verdict, number> = {
   green: 0,
@@ -150,13 +160,20 @@ export interface AllocatorSplitSanity {
   decisions_window: number | null;    // total decisions counted in the window
   split_count: number | null;         // multi-warehouse splits
   split_rate: number | null;          // split_count / decisions_window
-  unallocatable_count: number | null; // decisions with no ATP anywhere
-  failed_count: number | null;        // errored decisions
-  failed_rate: number | null;         // (unallocatable + failed) / decisions_window
+  unallocatable_count: number | null; // decisions IN THE WINDOW with no ATP anywhere
+  failed_count: number | null;        // errored decisions IN THE WINDOW
+  failed_rate: number | null;         // (unallocatable + failed within window) / decisions_window
   atp_fallback_count: number | null;  // inventory-aware fallbacks
   // green/amber/red by failed_rate bands. Unlike inventory divergence this is
   // NOT amber-capped: a genuinely high un-allocatable rate is allowed to go RED.
   sanity_verdict: Verdict;
+  // Unit 4 (health-fidelity): the STANDING OOS-held / needs-operator backlog,
+  // surfaced as its own labelled count and age. This is a separate population from
+  // the in-window failed decisions above: an order held for lack of stock over
+  // days is NOT a recent allocation failure, so it must NOT inflate failed_rate.
+  // Kept out of the sanity band; it drives its own informational chip, not the verdict.
+  oos_held_count?: number | null;         // orders currently held out-of-stock / needs-operator / backorder
+  oos_held_oldest_age_s?: number | null;  // age of the oldest such held order (first-seen)
 }
 
 export interface AllocatorDetail {
@@ -171,19 +188,30 @@ export interface AllocatorDetail {
 // backend writes the shape; the panel casts detail to it. Snake_case matches
 // the JSONB column convention.
 
-// nav_job_queue: this pipe CONSUMES the middleware's already-computed job-queue
-// health verdict (design.md 6) and does NOT re-derive it. The detail carries the
-// middleware's supporting numbers (CU 50009 auto-release recency + stuck-job
-// tripwire) purely for context; adopted_verdict is the verdict as surfaced.
+// nav_job_queue (Unit 1, ADR-0007): this pipe now COMPUTES its verdict from
+// read-only NAV (last CU 50009 auto-release recency, a genuinely stuck in-process
+// CU 50007, and real Status=0 pending-promotion staging rows). The middleware's
+// own level and stuck-staging count are kept as a LABELLED CROSS-CHECK, not the
+// verdict. New NAV fields are optional so snapshots/tests that predate the compute
+// still type-check.
 export interface JobQueueDetail {
-  source: 'middleware:job-queue/health';
-  adopted_verdict: Verdict;               // the middleware verdict, surfaced unchanged
-  middleware_verdict_raw: string | null;  // the raw verdict string the endpoint returned
-  auto_release_fired_at: string | null;   // last CU 50009 auto-release firing
-  auto_release_age_s: number | null;      // wall-clock age of that firing
-  longest_running_job_s: number | null;   // age of the oldest running Job Queue Entry
-  stuck_job_count: number | null;         // jobs the middleware flags stuck (> its own threshold)
-  checked_at: string | null;              // when the middleware computed this health
+  source: 'nav:job-queue-log+staging' | 'middleware:job-queue/health';
+  // The three independent NAV-computed sub-verdicts.
+  liveness_verdict?: Verdict;   // recency of the last CU 50009 auto-release firing
+  stuck_job_verdict?: Verdict;  // a genuinely stuck in-process CU 50007 (>= ~60 min)
+  staging_verdict?: Verdict;    // real Status=0 pending-promotion staging backlog
+  auto_release_fired_at: string | null;   // last CU 50009 auto-release firing (NAV)
+  auto_release_age_s: number | null;       // wall-clock age of that firing
+  longest_running_job_s: number | null;    // oldest IN-PROCESS CU 50007 age (NAV)
+  in_process_job_count?: number | null;     // CU 50007 rows currently in process (NAV)
+  pending_staging_count?: number | null;    // real Status=0 rows pending promotion (NAV)
+  // Middleware cross-check (monitored, NOT authoritative for the verdict).
+  middleware_verdict_raw: string | null;          // the raw level the endpoint returned
+  middleware_stuck_staging_count?: number | null; // the endpoint's own count (for divergence)
+  stuck_job_count: number | null;                 // jobs the middleware flags stuck
+  checked_at: string | null;                      // when the middleware computed its view
+  // Legacy: the verdict this pipe adopted before Unit 1 (kept for old snapshots).
+  adopted_verdict?: Verdict;
 }
 
 // price_sync: freshness (last price-sync signal received) + liveness (last
@@ -193,6 +221,10 @@ export interface PriceSyncDetail {
   last_received_age_s: number | null;
   last_run_at: string | null;         // last price-sync run/loop completed (liveness)
   last_run_age_s: number | null;
+  // ADR-0008 applicability. 'disabled' when the middleware reports the feature off
+  // (all timestamps null AND an explicit disabled signal): a disabled feature reads
+  // as a labelled neutral state, not a broken-sensor 'unknown'. Absent => 'active'.
+  applicability?: PipeApplicability;
 }
 
 // shopify_webhook: last-received per topic plus the subscription-removal signal
@@ -203,6 +235,9 @@ export interface WebhookTopicHealth {
   last_received_age_s: number | null;
   subscribed: boolean;            // false = removed/absent subscription (amber-or-worse)
   verdict: Verdict;               // per-topic freshness verdict (subscription folds into the pipe)
+  // Subscribed but no receipt in the window: quiet, not broken (ADR-0008). A quiet
+  // topic contributes a neutral state, not an 'unknown', to the pipe rollup.
+  idle_no_traffic?: boolean;
 }
 
 export interface ShopifyWebhookDetail {
@@ -210,6 +245,13 @@ export interface ShopifyWebhookDetail {
   missing_subscription_count: number; // topics with subscribed === false
   freshest_received_at: string | null;
   stalest_received_at: string | null;
+  // ADR-0008 applicability. 'idle_no_traffic' when every subscribed topic is
+  // simply quiet (no receipt in the window) and no subscription is missing: the
+  // pipe reads a labelled neutral state rather than being dragged to 'unknown' by
+  // a quiet topic. A genuinely missing subscription is still amber-or-worse and
+  // keeps applicability 'active'. Absent => 'active'.
+  applicability?: PipeApplicability;
+  idle_topic_count?: number;          // subscribed topics with no receipt in the window
 }
 
 // --- Back-sync pipe detail (Unit 2, design.md 3.2 / 5 line "Missed back-sync") -
@@ -244,6 +286,13 @@ export interface BackSyncDetail {
   fulfillments_last_24h: number | null;
   errors_last_24h: number | null;
   missed_shipments: MissedShipment[]; // detail rows for the panel table
+  // Unit 2 (health-fidelity): the freshness/liveness clocks are gated on whether
+  // there is UNSYNCED work. When NAV shows no DTC shipment posted since the last
+  // back-sync record, the watcher is idle-not-behind: the age clocks do not run and
+  // the pipe reads a neutral state instead of aging to amber during a quiet stretch.
+  has_unsynced_work?: boolean;             // a NAV DTC shipment newer than the watermark exists
+  newest_unsynced_shipment_at?: string | null; // the shipment the watermark is aged against (null when idle)
+  applicability?: PipeApplicability;       // 'idle_no_traffic' during a quiet, caught-up stretch
 }
 
 export interface HealthTransition {

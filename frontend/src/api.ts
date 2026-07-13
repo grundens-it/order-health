@@ -9,10 +9,35 @@ import type {
   RollupResponse,
 } from '@order-health/shared';
 
+// A typed API error distinguishing the two failure modes an operator must tell
+// apart (Unit 7): a CONNECTION failure (the backend is down / unreachable) versus
+// a NON-2XX response (the backend is up but errored, for example its database is
+// down). The banner maps each to a different message and remedy.
+export type ApiErrorKind = 'network' | 'http';
+export class ApiError extends Error {
+  readonly kind: ApiErrorKind;
+  readonly status?: number;
+  constructor(kind: ApiErrorKind, message: string, status?: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.kind = kind;
+    this.status = status;
+  }
+}
+
 async function getJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch {
+    // fetch rejects (TypeError) only when the request never got a response: the
+    // backend is down, the port is closed, DNS/network failed. That is "unreachable".
+    throw new ApiError('network', `cannot reach the backend at ${url}`);
+  }
   if (!res.ok) {
-    throw new Error(`${url} responded ${res.status}`);
+    // The backend answered, just not with a 2xx: it is UP but errored (a 500 from a
+    // downed DB, a 4xx, etc.). This is NOT "unreachable".
+    throw new ApiError('http', `backend responded ${res.status}`, res.status);
   }
   return (await res.json()) as T;
 }

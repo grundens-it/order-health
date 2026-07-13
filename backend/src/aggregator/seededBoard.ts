@@ -50,6 +50,7 @@ export interface BoardSeed {
     status?: Partial<BackSyncStatus>;
     missed?: MissedShipment[] | null;
     shipments?: NavShipmentHeader[];
+    newestDtcShipmentAt?: string | null; // Unit 2 has-work gate (null => caught up default)
   };
   priceSync?: Partial<PriceSyncStatus>;
   jobQueue?: Partial<JobQueueHealthStatus>;       // middleware cross-check only (Unit 1)
@@ -98,6 +99,12 @@ class SeededNavClient implements NavClient {
       pendingStagingCount: 0,
       ...this.seed.jobQueueState,
     };
+  }
+  async getNewestDtcShipmentAt(): Promise<string | null> {
+    // Default: a DTC shipment posted BEFORE the default back-sync watermark
+    // (agoIso 600), so the has-work gate reads caught-up (idle-green). A test
+    // overrides this to a time newer than the watermark to exercise unsynced work.
+    return this.seed.backSync?.newestDtcShipmentAt ?? agoIso(900, this.now);
   }
   async queryReadOnly<T>(): Promise<T[]> {
     return [];

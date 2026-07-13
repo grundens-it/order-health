@@ -87,6 +87,11 @@ export interface NavClient {
   getOrderLifecycleRows(): Promise<NavOrderLifecycleRow[]>;
   getRecentShipments(limit: number): Promise<NavShipmentHeader[]>;
   getJobQueueState(): Promise<NavJobQueueState>;
+  // Unit 2 (back_sync has-work gate). The posting time of the newest DTC (WebId
+  // present) NAV shipment. Compared against the back-sync watermark to decide
+  // whether any UNSYNCED work exists: if the newest DTC shipment is not newer than
+  // the last back-sync, the watcher is idle-not-behind and the clocks must not age.
+  getNewestDtcShipmentAt(): Promise<string | null>;
   queryReadOnly<T>(templateName: string, params?: Record<string, unknown>): Promise<T[]>;
 }
 
@@ -131,6 +136,7 @@ export interface NavQueries {
   autoReleaseFiring: string; // Unit 1: newest completed CU 50009 auto-release firing
   inProcessJobs: string;     // Unit 1: in-process CU 50007 runs, oldest first (stuck-job)
   pendingStagingCount: string; // Unit 1: count of Status = 0 pending-promotion staging rows
+  newestDtcShipment: string; // Unit 2: posting time of the newest DTC (WebId) shipment
 }
 
 export function buildQueries(company: string): NavQueries {
@@ -191,6 +197,12 @@ ORDER BY [Start Date_Time] ASC;`,
     pendingStagingCount: `SELECT COUNT(*) AS pendingCount
 FROM ${staging}
 WHERE [Status] = @pendingStatus;`,
+    // Unit 2 has-work gate: posting time of the newest DTC (WebId present) shipment.
+    // Wholesale shipments have no Shopify back-sync leg, so they are excluded.
+    newestDtcShipment: `SELECT TOP 1 sh.[Posting Date] AS postedAt
+FROM ${shipment} sh
+WHERE sh.[WebId] IS NOT NULL AND sh.[WebId] <> ''
+ORDER BY sh.[Posting Date] DESC;`,
   };
 }
 
@@ -426,6 +438,12 @@ export class NavClientStub implements NavClient {
       pendingStagingCount: null,
     };
   }
+  async getNewestDtcShipmentAt(): Promise<string | null> {
+    this.note('newest DTC shipment posting time (back-sync has-work gate)');
+    // null => the has-work gate cannot detect unsynced work; the pipe rolls up to
+    // unknown via the missed-shipments signal rather than a false idle-green.
+    return null;
+  }
   async queryReadOnly<T>(templateName: string): Promise<T[]> {
     this.note(`read-only template ${templateName}`);
     return [];
@@ -555,6 +573,15 @@ class NavClientLive implements NavClient {
       return mapJobQueueState(autoRelease[0], inProcess, staging[0]);
     } catch (err) {
       return this.degrade('job-queue state', err, this.stub.getJobQueueState());
+    }
+  }
+
+  async getNewestDtcShipmentAt(): Promise<string | null> {
+    try {
+      const rows = await this.select(this.queries.newestDtcShipment);
+      return rows[0] ? toIso(rows[0].postedAt) : null;
+    } catch (err) {
+      return this.degrade('newest DTC shipment', err, this.stub.getNewestDtcShipmentAt());
     }
   }
 

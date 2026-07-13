@@ -235,10 +235,11 @@ export async function computeShopifyWebhookPipeline(sources: Sources): Promise<P
 // the pure computeBackSync, and maps the result to the PipelineHealth row. All reads
 // are currently stubbed (typed nulls/empties) until DevOps provisions the sources.
 export async function computeBackSyncPipeline(sources: Sources): Promise<PipelineHealth> {
-  const [status, missed, shipments] = await Promise.all([
+  const [status, missed, shipments, newestDtcShipmentAt] = await Promise.all([
     sources.middleware.getBackSyncStatus(),
     sources.middleware.getMissedShipmentDetail(),
     sources.nav.getRecentShipments(50),
+    sources.nav.getNewestDtcShipmentAt(), // Unit 2 has-work gate
   ]);
 
   // Enrich each missed row with NAV shipment header detail (carrier / tracking /
@@ -264,6 +265,7 @@ export async function computeBackSyncPipeline(sources: Sources): Promise<Pipelin
     fulfillmentsLast24h: status.fulfillmentsLast24h,
     errorsLast24h: status.errorsLast24h,
     missedShipments: enriched,
+    newestDtcShipmentAt,
   };
 
   const r = computeBackSync(input, config.backSync, Date.now());

@@ -144,6 +144,13 @@ export const NAV_JOB_STATUS_SUCCESS = 0;
 // genuinely stuck IABC job is a CU 50007 run still In Process past a real threshold.
 export const NAV_JOB_STATUS_IN_PROCESS = 1;
 export const NAV_AUTO_RELEASE_OBJECT_ID = 50009;
+// Unit C (health-fidelity integration). The CURRENT in-process truth is
+// GRUS$Job Queue Entry, whose [Status] = 1 is "In Process". The stuck-job signal
+// MUST read this live table, NOT the GRUS$Job Queue Log Entry audit trail: 108 log
+// rows are stale In-Process back to 2021 (crashed jobs whose log row never closed),
+// and the oldest of those false-flagged a 1,173-day stuck job (a false RED). A job
+// that is genuinely running still appears here; a crashed one does not.
+export const NAV_JQE_STATUS_IN_PROCESS = 1;
 // GRUS$Sales Header Staging [Status] = 0 is a real row pending promotion (the true
 // backlog). Status = 1 rows are old "Not Auto-released" rows and are NOT counted.
 export const NAV_STAGING_STATUS_PENDING_PROMOTION = 0;
@@ -172,6 +179,7 @@ export interface NavQueries {
 
 export function buildQueries(company: string): NavQueries {
   const jqLog = navTable(company, 'Job Queue Log Entry');
+  const jqEntry = navTable(company, 'Job Queue Entry');
   const salesHeader = navTable(company, 'Sales Header');
   const staging = navTable(company, 'Sales Header Staging');
   const shipment = navTable(company, 'Sales Shipment Header');
@@ -225,13 +233,20 @@ GROUP BY ile.[Item No_], ile.[Location Code];`,
 FROM ${jqLog}
 WHERE [Object ID to Run] = @autoReleaseObjectId AND [Status] = @successStatus
 ORDER BY [Entry No_] DESC;`,
-    // Unit 1 stuck-job: CU 50007 runs still In Process, oldest first. The oldest
-    // one's start time ages the "genuinely stuck IABC job" signal (a normal run is
-    // 20 to 47 min, so it only reds/ambers past the ~60 min threshold).
-    inProcessJobs: `SELECT [Entry No_] AS entryNo, [Start Date_Time] AS startAt
-FROM ${jqLog}
-WHERE [Object ID to Run] = @iabcObjectId AND [Status] = @inProcessStatus
-ORDER BY [Start Date_Time] ASC;`,
+    // Unit C stuck-job: CURRENTLY in-process jobs from GRUS$Job Queue Entry (the
+    // live state), scoped to the IABC / auto-release codeunits, oldest first. This
+    // replaces the Unit 1 read of GRUS$Job Queue Log Entry, whose stale In-Process
+    // rows (crashed jobs back to 2021) false-flagged a 1,173-day stuck job. Each
+    // in-process entry's actual start comes from its OWN current in-process log row
+    // (matched on [ID]); an entry with no such log row has a null start (unknown
+    // age), never a fabricated one. The oldest real start ages the stuck-job band.
+    inProcessJobs: `SELECT jqe.[ID] AS id, jqe.[Object ID to Run] AS objectId,
+       (SELECT MAX(l.[Start Date_Time]) FROM ${jqLog} l
+          WHERE l.[ID] = jqe.[ID] AND l.[Status] = @logInProcessStatus) AS startAt
+FROM ${jqEntry} jqe
+WHERE jqe.[Status] = @jqeInProcessStatus
+  AND jqe.[Object ID to Run] IN (@iabcObjectId, @autoReleaseObjectId)
+ORDER BY startAt ASC;`,
     // Unit 1 staging backlog: count of REAL pending-promotion rows (Status = 0),
     // NOT the old Status = 1 "Not Auto-released" rows the middleware endpoint counts.
     pendingStagingCount: `SELECT COUNT(*) AS pendingCount
@@ -626,7 +641,9 @@ class NavClientLive implements NavClient {
         }),
         this.select(this.queries.inProcessJobs, {
           iabcObjectId: NAV_IABC_OBJECT_ID,
-          inProcessStatus: NAV_JOB_STATUS_IN_PROCESS,
+          autoReleaseObjectId: NAV_AUTO_RELEASE_OBJECT_ID,
+          jqeInProcessStatus: NAV_JQE_STATUS_IN_PROCESS,
+          logInProcessStatus: NAV_JOB_STATUS_IN_PROCESS,
         }),
         this.select(this.queries.pendingStagingCount, {
           pendingStatus: NAV_STAGING_STATUS_PENDING_PROMOTION,

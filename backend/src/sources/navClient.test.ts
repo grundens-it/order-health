@@ -16,6 +16,7 @@ import {
   buildQueries,
   channelFromWebOrder,
   mapInventoryWalk,
+  mapJobQueueState,
   mapOrderLifecycleRow,
   mapShipmentHeader,
   mapWatermarkState,
@@ -71,6 +72,22 @@ test('IABC watermark query targets CU 50007 completions (Object 50007, Status 0 
   assert.match(q.iabcWatermark, /MAX|TOP 1[\s\S]*ORDER BY \[Entry No_\] DESC/);
 });
 
+test('Unit C: the in-process stuck-job query reads GRUS$Job Queue Entry (current state), not the stale Log Entry audit trail', () => {
+  // Regression for the false RED: 108 stale In-Process rows in GRUS$Job Queue Log
+  // Entry (crashed jobs back to 2021) flagged a 1,173-day stuck job. The fixed query
+  // must source the in-process signal from the LIVE GRUS$Job Queue Entry table
+  // (Status = 1 = In Process), scoped to the IABC / auto-release codeunits.
+  const q = buildQueries('GRUS');
+  // FROM the live entry table, filtered on its in-process status.
+  assert.match(q.inProcessJobs, /FROM \[GRUS\$Job Queue Entry\] jqe/);
+  assert.match(q.inProcessJobs, /jqe\.\[Status\] = @jqeInProcessStatus/);
+  // Scoped to the relevant codeunits (CU 50007 IABC + CU 50009 auto-release).
+  assert.match(q.inProcessJobs, /jqe\.\[Object ID to Run\] IN \(@iabcObjectId, @autoReleaseObjectId\)/);
+  // It must NOT scan the Log Entry as its driving table (the audit trail with stale
+  // In-Process rows). The Log Entry appears ONLY inside the start-time subquery.
+  assert.doesNotMatch(q.inProcessJobs, /FROM \[GRUS\$Job Queue Log Entry\][^)]*WHERE \[Object ID to Run\]/);
+});
+
 test('order lifecycle query selects WebId AND WebOrder from the Sales Header', () => {
   const q = buildQueries('GRUS');
   assert.match(q.orderLifecycle, /h\.\[WebId\] AS webId/);
@@ -82,6 +99,23 @@ test('order lifecycle query selects WebId AND WebOrder from the Sales Header', (
   assert.match(q.orderLifecycle, /SELECT MAX\(sh\.\[Posting Date\]\) FROM \[GRUS\$Sales Shipment Header\] sh WHERE sh\.\[Order No_\] = h\.\[No_\]/);
   // Bounded read.
   assert.match(q.orderLifecycle, /SELECT TOP \(@limit\)/);
+});
+
+test('Unit C: an empty in-process recordset (Job Queue Entry says 0 running) maps to count 0, no stuck age', () => {
+  // The live-fixed scenario: GRUS$Job Queue Entry has zero In-Process rows right now
+  // (the true current state), even though the Log Entry audit trail still holds 108
+  // stale In-Process rows from crashed jobs. The fixed query returns [], so the
+  // stuck-job signal is count 0 with a null oldest start => the compute reads GREEN,
+  // not a 1,173-day false stuck job.
+  const state = mapJobQueueState(
+    { entryNo: 5, startAt: new Date('2026-07-13T17:55:00Z'), endAt: new Date('2026-07-13T17:56:00Z') },
+    [],
+    { pendingCount: 0 },
+  );
+  assert.equal(state.inProcessJobCount, 0);
+  assert.equal(state.oldestInProcessJobAt, null);
+  assert.equal(state.pendingStagingCount, 0);
+  assert.ok(state.autoReleaseFiredAt); // liveness still read from the CU 50009 firing
 });
 
 test('toIso nulls the NAV 1753 sentinel date (avoids the 273-year lag overflow)', () => {

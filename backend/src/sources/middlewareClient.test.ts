@@ -210,12 +210,19 @@ test('mapAllocatorStatus composes split sample + window from the audit page and 
     { order_id: 900, status: 'needs_operator', class: 'transient', first_seen_at: '2026-07-05T09:00:00Z' },
     { order_id: 901, status: 'pending', class: 'backorder', first_seen_at: '2026-07-05T08:00:00Z' },
   ];
-  const r = mapAllocatorStatus(audit, oosHeld);
+  const now = Date.parse('2026-07-05T10:05:00Z');
+  const r = mapAllocatorStatus(audit, oosHeld, undefined, now);
   assert.equal(r.lastDecisionAt, '2026-07-05T10:05:00.000Z');
   assert.equal(r.decisionsWindow, 3);
   assert.equal(r.splitCount, 1);
   assert.equal(r.windowSeconds, 300); // 10:05:00 - 10:00:00
-  assert.equal(r.unallocatableCount, 2); // OOS-held backlog
+  // Unit 4: unallocatable is WINDOW-scoped now (audit rows with an out-of-stock
+  // outcome), NOT the OOS-held backlog. These audit reasons are rolled /
+  // order_level_pref, so zero in-window unallocatable.
+  assert.equal(r.unallocatableCount, 0);
+  // The standing OOS-held backlog is surfaced separately and NEVER in the rate.
+  assert.equal(r.oosHeldCount, 2);
+  assert.equal(r.oosHeldOldestAgeS, 2 * 3600 + 5 * 60); // oldest first_seen 08:00 vs now 10:05
   assert.equal(r.recentDecisions.length, 3);
   // Liveness proxy = recency of the newest decision (no heartbeat endpoint).
   assert.equal(r.serviceHeartbeatAt, '2026-07-05T10:05:00.000Z');
@@ -264,7 +271,9 @@ test('mapAllocatorStatus returns honest nulls when the audit page is empty and o
   assert.equal(r.decisionsWindow, null);
   assert.equal(r.splitCount, null);
   assert.equal(r.atpFallbackCount, null); // empty audit page -> unknown, not a false zero
-  assert.equal(r.unallocatableCount, null); // non-array oos body -> unknown, not a false zero
+  assert.equal(r.unallocatableCount, null); // empty audit page -> unknown, not a false zero
+  assert.equal(r.oosHeldCount, null); // non-array oos body -> unknown, not a false zero
+  assert.equal(r.oosHeldOldestAgeS, null);
 });
 
 // --- GET /api/nav/job-queue/health ------------------------------------------
@@ -307,7 +316,14 @@ test('mapPriceSyncStatus composes last-received (recent) + last-run (settings)',
   const r = mapPriceSyncStatus(recent, settings);
   assert.equal(r.lastReceivedAt, '2026-07-05T08:00:00.000Z'); // newest row
   assert.equal(r.lastRunAt, '2026-07-05T08:30:00.000Z');
-  assert.deepEqual(mapPriceSyncStatus({ rows: [] }, {}), { lastReceivedAt: null, lastRunAt: null });
+  assert.equal(r.enabled, true); // ADR-0008: the settings.enabled flag
+  // A disabled feature reports enabled:false; an absent flag stays unknown (null).
+  assert.equal(mapPriceSyncStatus({ rows: [] }, { enabled: false }).enabled, false);
+  assert.deepEqual(mapPriceSyncStatus({ rows: [] }, {}), {
+    lastReceivedAt: null,
+    lastRunAt: null,
+    enabled: null,
+  });
 });
 
 // --- GET /api/shopify/webhooks/subscriptions + /events ----------------------

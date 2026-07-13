@@ -12,6 +12,13 @@ import { config } from '../config';
 import { getPool } from '../db/pool';
 import type { MiddlewareClient } from '../sources/middlewareClient';
 import type { NavClient, NavOrderLifecycleRow } from '../sources/navClient';
+import type { ShopifyClient } from '../sources/shopifyClient';
+// back_sync + inventory_sync are wired live below (their join keys, order-ref and
+// SKU, are reliable). reconcilePrice and reconcileWebhookOutcome are delivered and
+// unit-tested but not wired here yet: price needs a NAV price read, and the webhook
+// outcome needs a reliable Shopify-order-name to NAV-order match, to avoid surfacing
+// false divergences. See shopifyReconcile.ts / ADR-0009.
+import { reconcileBackSync, reconcileInventory } from './shopifyReconcile';
 import {
   computeDryRunDivergence,
   computeInventorySync,
@@ -49,6 +56,7 @@ export const PIPES = [
 export interface Sources {
   middleware: MiddlewareClient;
   nav: NavClient;
+  shopify: ShopifyClient;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +97,18 @@ export async function computeInventorySyncPipeline(sources: Sources): Promise<Pi
   };
 
   const r = computeInventorySync(input, config.inventorySync, Date.now());
+
+  // Shopify reconciliation (ADR-0009): NAV availability vs the inventory level
+  // Shopify actually holds, for a bounded SKU sample. Surface-only (annotates the
+  // detail, never the verdict); an empty Shopify read reads unavailable (unknown).
+  const navBySku = new Map<string, number>();
+  for (const row of navAvailability) {
+    if (row.sku === null || row.availableQty === null) continue;
+    navBySku.set(row.sku, (navBySku.get(row.sku) ?? 0) + row.availableQty);
+  }
+  const sampleSkus = [...navBySku.keys()].slice(0, 50);
+  const levels = await sources.shopify.getInventoryLevels(sampleSkus);
+  r.detail.shopify_reconciliation = reconcileInventory(navBySku, levels);
 
   return {
     pipe: 'inventory_sync',
@@ -283,6 +303,17 @@ export async function computeBackSyncPipeline(sources: Sources): Promise<Pipelin
   };
 
   const r = computeBackSync(input, config.backSync, Date.now());
+
+  // Shopify reconciliation (ADR-0009): for the recently NAV-posted DTC shipments,
+  // does Shopify actually show a fulfillment? A NAV shipment with no Shopify
+  // fulfillment is the divergence to surface, regardless of the middleware feed.
+  // Surface-only; an empty Shopify read reads unavailable (unknown).
+  const navShippedDtcOrders = shipments
+    .filter((s) => s.webId !== null && s.orderRef !== null)
+    .map((s) => s.orderRef as string)
+    .slice(0, 50);
+  const states = await sources.shopify.getFulfillmentStates(navShippedDtcOrders);
+  r.detail.shopify_reconciliation = reconcileBackSync(navShippedDtcOrders, states);
 
   return {
     pipe: 'back_sync',

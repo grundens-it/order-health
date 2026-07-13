@@ -30,6 +30,18 @@ export interface Config {
   server: { host: string; port: number };
   database: { url: string };
   middleware: { baseUrl: string; authToken: string };
+  // Read-only Shopify Admin API (ADR-0009). Client-credentials custom-app token,
+  // least-privilege READ scopes only. The client is live only when shop + clientId
+  // + clientSecret are all present; otherwise the read-only stub answers and the
+  // storefront reconciliations read 'unknown'. The secret lives only in the
+  // gitignored .env / host secret store, never committed.
+  shopify: {
+    authMode: string;     // SHOPIFY_AUTH_MODE (client_credentials)
+    shop: string;         // SHOPIFY_SHOP (the myshopify domain)
+    apiVersion: string;   // SHOPIFY_API_VERSION (e.g. 2025-01)
+    clientId: string;     // SHOPIFY_CLIENT_ID
+    clientSecret: string; // SHOPIFY_CLIENT_SECRET (secret; gitignored)
+  };
   nav: {
     host: string;
     port: number;
@@ -158,6 +170,13 @@ export const config: Config = {
   middleware: {
     baseUrl: str('MIDDLEWARE_BASE_URL'),
     authToken: str('MIDDLEWARE_AUTH_TOKEN'),
+  },
+  shopify: {
+    authMode: str('SHOPIFY_AUTH_MODE', 'client_credentials'),
+    shop: str('SHOPIFY_SHOP'),
+    apiVersion: str('SHOPIFY_API_VERSION', '2025-01'),
+    clientId: str('SHOPIFY_CLIENT_ID'),
+    clientSecret: str('SHOPIFY_CLIENT_SECRET'),
   },
   nav: {
     host: str('NAV_HOST'),

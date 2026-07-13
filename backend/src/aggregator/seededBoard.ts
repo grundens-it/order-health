@@ -18,6 +18,7 @@ import type {
   PriceSyncStatus,
   ShopifyWebhookStatus,
 } from '../sources/middlewareClient';
+import { ShopifyClientStub } from '../sources/shopifyClient';
 import type {
   NavClient,
   NavInventoryAvailabilityRow,
@@ -213,11 +214,14 @@ class SeededMiddlewareClient implements MiddlewareClient {
 }
 
 // Build a whole-board read-only Sources from a seed. Omitted pipes default green.
+// The Shopify client is the read-only stub (empty reads): the reconciliations then
+// read 'unavailable' (surface-only) and never affect the seeded verdicts.
 export function makeSeededSources(seed: BoardSeed = {}): Sources {
   const now = seed.now ?? Date.now();
   return {
     nav: new SeededNavClient(seed, now),
     middleware: new SeededMiddlewareClient(seed, now),
+    shopify: new ShopifyClientStub(),
   };
 }
 

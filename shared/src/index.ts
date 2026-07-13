@@ -19,6 +19,27 @@ export type ChannelFilter = Channel | 'all';
 // is provisioned by DevOps). The worst verdict wins in any rollup.
 export type Verdict = 'green' | 'amber' | 'red' | 'unknown';
 
+// --- Shopify reconciliation (ADR-0007 / ADR-0009) -------------------------
+// The storefront side of a reconciliation: what the middleware CLAIMS vs what
+// Shopify (read-only) actually shows. Attached to a pipe's detail so the panel can
+// surface exactly WHERE they diverge (the SKU, the order), not just a colour. It is
+// surface-only: the verdict is still driven by NAV / the middleware; a divergence is
+// reported, and `available: false` means Shopify was not reached (unknown, never a
+// false green).
+export interface ShopifyDivergenceItem {
+  key: string;                        // the SKU / order / shipment that differs
+  nav: string | number | null;       // what NAV / the middleware claims
+  shopify: string | number | null;   // what Shopify actually holds
+  note: string;                       // human description of the divergence
+}
+export interface ShopifyReconciliation {
+  source: 'shopify-admin';
+  available: boolean;                 // false => Shopify not reached (unknown)
+  checked: number;                    // items compared
+  reconciled: boolean;                // checked > 0 and no divergence
+  divergences: ShopifyDivergenceItem[];
+}
+
 // A non-verdict DISPLAY state (ADR-0008) for a pipe that is correctly not
 // reporting, kept in the pipe's detail bag rather than in the Verdict union.
 //   active          - normal; the default when the field is absent.
@@ -135,6 +156,7 @@ export interface InventorySyncDetail {
   last_walk: InventoryWalk | null;
   recent_walks: InventoryWalk[];      // most-recent-first
   divergence: InventoryDivergence;
+  shopify_reconciliation?: ShopifyReconciliation; // NAV availability vs Shopify inventory levels (ADR-0009)
 }
 
 // --- Allocator (Warehouse Split) pipe detail (Unit 4, design.md 3.2 / 5) ------
@@ -225,6 +247,7 @@ export interface PriceSyncDetail {
   // (all timestamps null AND an explicit disabled signal): a disabled feature reads
   // as a labelled neutral state, not a broken-sensor 'unknown'. Absent => 'active'.
   applicability?: PipeApplicability;
+  shopify_reconciliation?: ShopifyReconciliation; // NAV price vs Shopify price spot-check (ADR-0009)
 }
 
 // shopify_webhook: last-received per topic plus the subscription-removal signal
@@ -252,6 +275,7 @@ export interface ShopifyWebhookDetail {
   // keeps applicability 'active'. Absent => 'active'.
   applicability?: PipeApplicability;
   idle_topic_count?: number;          // subscribed topics with no receipt in the window
+  shopify_reconciliation?: ShopifyReconciliation; // Shopify orders vs NAV arrival (outcome, ADR-0009)
 }
 
 // --- Back-sync pipe detail (Unit 2, design.md 3.2 / 5 line "Missed back-sync") -
@@ -293,6 +317,7 @@ export interface BackSyncDetail {
   has_unsynced_work?: boolean;             // a NAV DTC shipment newer than the watermark exists
   newest_unsynced_shipment_at?: string | null; // the shipment the watermark is aged against (null when idle)
   applicability?: PipeApplicability;       // 'idle_no_traffic' during a quiet, caught-up stretch
+  shopify_reconciliation?: ShopifyReconciliation; // NAV shipment vs Shopify fulfillment (ADR-0009)
 }
 
 export interface HealthTransition {

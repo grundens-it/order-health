@@ -13,6 +13,7 @@ import cron from 'node-cron';
 import { config } from '../config';
 import { createMiddlewareClient } from '../sources/middlewareClient';
 import { createNavClient } from '../sources/navClient';
+import { createShopifyClient } from '../sources/shopifyClient';
 import {
   computeOrders,
   computePipelines,
@@ -24,7 +25,11 @@ import {
 } from './writers';
 
 function sources(): Sources {
-  return { middleware: createMiddlewareClient(), nav: createNavClient() };
+  return {
+    middleware: createMiddlewareClient(),
+    nav: createNavClient(),
+    shopify: createShopifyClient(),
+  };
 }
 
 // One order-layer run. Exported so it can be invoked directly (tests / manual).

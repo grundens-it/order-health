@@ -31,10 +31,22 @@ export interface AllocatorStatus {
   serviceHeartbeatAt: string | null;  // allocator loop heartbeat
   windowSeconds: number | null;       // window the counts below cover
   decisionsWindow: number | null;     // total decisions in the window
-  splitCount: number | null;          // multi-warehouse splits
-  unallocatableCount: number | null;  // decisions with no ATP anywhere
-  failedCount: number | null;         // errored decisions
+  splitCount: number | null;          // multi-warehouse splits IN THE WINDOW
+  // Unit 4 (health-fidelity): WINDOW-scoped counts (decisions whose decided_at is
+  // inside the window), NOT the standing backlog. Composed as, for example:
+  //   SELECT COUNT(*) FILTER (WHERE outcome='unallocatable') AS unallocatable,
+  //          COUNT(*) FILTER (WHERE outcome='failed')        AS failed
+  //     FROM warehouse_allocation_log WHERE decided_at >= :windowStart
+  unallocatableCount: number | null;  // in-window decisions with no ATP anywhere
+  failedCount: number | null;         // in-window errored decisions
   atpFallbackCount: number | null;    // inventory-aware fallbacks
+  // The STANDING OOS-held / needs-operator / backorder backlog, from a SEPARATE
+  // (non-time-windowed) read over the held-orders view, for example:
+  //   SELECT COUNT(*) AS held, MIN(first_seen_at) AS oldest
+  //     FROM warehouse_allocation_log WHERE outcome IN ('unallocatable') AND held=1
+  // Surfaced beside the rate as its own labelled count/age; never in failed_rate.
+  oosHeldCount: number | null;        // orders currently held OOS / needs-operator / backorder
+  oosHeldOldestAgeS: number | null;   // age of the oldest such held order (first-seen)
   recentDecisions: AllocationDecision[]; // most-recent-first
 }
 
@@ -165,6 +177,8 @@ class MiddlewareClientStub implements MiddlewareClient {
       unallocatableCount: null,
       failedCount: null,
       atpFallbackCount: null,
+      oosHeldCount: null,
+      oosHeldOldestAgeS: null,
       recentDecisions: [],
     };
   }

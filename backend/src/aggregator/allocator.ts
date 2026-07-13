@@ -38,10 +38,20 @@ export interface AllocatorInput {
   serviceHeartbeatAt: string | null;  // allocator loop heartbeat -> liveness
   windowSeconds: number | null;       // the window the counts below cover
   decisionsWindow: number | null;     // total decisions counted in the window
-  splitCount: number | null;          // multi-warehouse splits
-  unallocatableCount: number | null;  // decisions with no ATP anywhere
-  failedCount: number | null;         // errored decisions
+  splitCount: number | null;          // multi-warehouse splits IN THE WINDOW
+  // Unit 4 (health-fidelity): these two are now WINDOW-scoped (decisions inside the
+  // sampled decision window), NOT the absolute standing backlog. The live run
+  // divided a weeks-deep OOS-held backlog (22 orders) by a 200-decision sample and
+  // sat amber forever; that backlog now rides in the oosHeld* fields below and does
+  // NOT touch failed_rate.
+  unallocatableCount: number | null;  // decisions IN THE WINDOW with no ATP anywhere
+  failedCount: number | null;         // errored decisions IN THE WINDOW
   atpFallbackCount: number | null;    // inventory-aware fallbacks
+  // The STANDING out-of-stock / needs-operator / backorder backlog: a separate
+  // population from the in-window failures above (held over days, not a recent
+  // allocation failure). Surfaced as its own labelled count/age; never in the rate.
+  oosHeldCount: number | null;        // orders currently held OOS / needs-operator / backorder
+  oosHeldOldestAgeS: number | null;   // age of the oldest such held order (first-seen)
   decisions: AllocationDecision[];    // recent split decisions, most-recent-first
 }
 
@@ -92,22 +102,27 @@ function ratioBandVerdict(
   return 'green';
 }
 
-// Split-sanity signal (the third verdict). Driven by the share of decisions the
-// allocator could not satisfy (unallocatable) or that errored (failed) over the
-// window. Structurally green/amber/red; not amber-capped.
+// Split-sanity signal (the third verdict). Driven ONLY by the share of decisions
+// the allocator could not satisfy (unallocatable) or that errored (failed) WITHIN
+// the sampled decision window. The standing OOS-held backlog is deliberately NOT
+// part of this ratio (Unit 4 fix): it is a different, weeks-deep population and is
+// surfaced separately. Structurally green/amber/red; not amber-capped.
 function computeSanity(
   input: AllocatorInput,
   thresholds: AllocatorThresholds,
 ): AllocatorSplitSanity {
   const window = input.decisionsWindow;
-  const unallocatable = input.unallocatableCount;
-  const failed = input.failedCount;
+  const unallocatable = input.unallocatableCount; // in-window (see AllocatorInput)
+  const failed = input.failedCount;               // in-window
 
   // Unknown only when we have no window to reason about.
   let failedRate: number | null = null;
   let splitRate: number | null = null;
   if (window !== null) {
     const denom = Math.max(window, 1);
+    // In-window failed/unallocatable over the window. The OOS-held backlog
+    // (oosHeldCount) is NOT added here: an order held for lack of stock over days is
+    // not a recent allocation failure, so it must not inflate the rate.
     failedRate = ((unallocatable ?? 0) + (failed ?? 0)) / denom;
     splitRate = input.splitCount !== null ? input.splitCount / denom : null;
   }
@@ -127,6 +142,10 @@ function computeSanity(
     failed_rate: failedRate,
     atp_fallback_count: input.atpFallbackCount,
     sanity_verdict: verdict,
+    // The standing backlog, surfaced beside the rate (its own labelled count/age),
+    // never folded into it.
+    oos_held_count: input.oosHeldCount,
+    oos_held_oldest_age_s: input.oosHeldOldestAgeS,
   };
 }
 

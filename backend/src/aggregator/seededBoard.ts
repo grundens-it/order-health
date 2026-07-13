@@ -152,6 +152,8 @@ class SeededMiddlewareClient implements MiddlewareClient {
       unallocatableCount: 0,
       failedCount: 0,
       atpFallbackCount: 2,
+      oosHeldCount: 0,
+      oosHeldOldestAgeS: null,
       recentDecisions: [],
       ...this.seed.allocator,
     };

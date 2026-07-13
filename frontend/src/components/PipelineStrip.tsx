@@ -130,9 +130,9 @@ function allocatorMetrics(p: PipelineHealth): Metric[] {
   const s = d?.sanity ?? null;
   return [
     { k: 'Decisions in window', v: s ? numOr(s.decisions_window) : PENDING },
+    { k: 'Failed rate (window)', v: s ? pctOr(s.failed_rate) : PENDING, cls: vClass(s?.sanity_verdict ?? 'unknown') },
     { k: 'Split rate', v: s ? pctOr(s.split_rate) : PENDING },
-    { k: 'Errors', v: s ? numOr(s.failed_count) : PENDING, cls: s && s.failed_count === 0 ? 'okv' : s && (s.failed_count ?? 0) > 0 ? 'redv' : '' },
-    { k: 'ATP fallbacks', v: s ? numOr(s.atp_fallback_count) : PENDING },
+    { k: 'OOS-held backlog', v: s && s.oos_held_count != null ? numOr(s.oos_held_count) : PENDING, cls: '' },
   ];
 }
 

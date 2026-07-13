@@ -111,6 +111,8 @@ export async function computeAllocatorPipeline(sources: Sources): Promise<Pipeli
     unallocatableCount: status.unallocatableCount,
     failedCount: status.failedCount,
     atpFallbackCount: status.atpFallbackCount,
+    oosHeldCount: status.oosHeldCount,
+    oosHeldOldestAgeS: status.oosHeldOldestAgeS,
     decisions: status.recentDecisions,
   };
 

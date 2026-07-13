@@ -56,9 +56,11 @@ function baseInput(overrides: Partial<AllocatorInput> = {}): AllocatorInput {
     windowSeconds: 86400,
     decisionsWindow: 1204,
     splitCount: 373, // ~31% split rate (demo)
-    unallocatableCount: 0,
+    unallocatableCount: 0, // in-window failures
     failedCount: 0,
     atpFallbackCount: 2,
+    oosHeldCount: 0,
+    oosHeldOldestAgeS: null,
     decisions: [decision(), decision({ order_ref: 'SP-319108', outcome: 'split' })],
     ...overrides,
   };
@@ -138,6 +140,42 @@ test('sanity: failure share at the red ratio goes RED (not amber-capped)', () =>
   assert.equal(r.pipeVerdict, 'red');
 });
 
+// --- The core fidelity fix: the OOS-held backlog is NOT in the rate ---------
+test('sanity: a standing OOS-held backlog does NOT amber the pipe (the live-run fix)', () => {
+  // The exact live scenario: 22 OOS-held orders (median 6.8 days) with a CLEAN
+  // 200-decision window. Old code did 22/200 = 0.11 => amber forever. Now the
+  // backlog rides in oosHeld* and the rate is 0 => green.
+  const r = computeAllocator(
+    baseInput({
+      decisionsWindow: 200,
+      unallocatableCount: 0, // no failures inside the sampled window
+      failedCount: 0,
+      oosHeldCount: 22,
+      oosHeldOldestAgeS: Math.round(10.9 * 86400),
+    }),
+    T,
+    NOW,
+  );
+  assert.equal(r.detail.sanity.failed_rate, 0);
+  assert.equal(r.sanityVerdict, 'green');
+  assert.equal(r.pipeVerdict, 'green');
+  // The backlog is surfaced separately as its own labelled count/age.
+  assert.equal(r.detail.sanity.oos_held_count, 22);
+  assert.equal(r.detail.sanity.oos_held_oldest_age_s, Math.round(10.9 * 86400));
+});
+
+test('sanity: a genuine in-window failure share still fires even with no backlog', () => {
+  // The true-fault boundary: 24 unallocatable decisions INSIDE a 200-decision
+  // window = 12% => amber (and no OOS-held backlog at all).
+  const r = computeAllocator(
+    baseInput({ decisionsWindow: 200, unallocatableCount: 24, failedCount: 0, oosHeldCount: 0 }),
+    T,
+    NOW,
+  );
+  assert.equal(r.detail.sanity.failed_rate, 0.12);
+  assert.equal(r.sanityVerdict, 'amber');
+});
+
 test('sanity: no window is unknown, not a false green', () => {
   const r = computeAllocator(baseInput({ decisionsWindow: null }), T, NOW);
   assert.equal(r.sanityVerdict, 'unknown');
@@ -191,6 +229,8 @@ test('rollup: empty inputs produce unknown, not a false green or red', () => {
       unallocatableCount: null,
       failedCount: null,
       atpFallbackCount: null,
+      oosHeldCount: null,
+      oosHeldOldestAgeS: null,
       decisions: [],
     },
     T,

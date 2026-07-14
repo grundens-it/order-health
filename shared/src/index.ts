@@ -421,12 +421,24 @@ export type RollupResponse = { as_of: string } & LeadershipRollup;
 // call from this service.
 export type RemediationKind = 'middleware_endpoint' | 'ops_runbook';
 
-// The existing authenticated middleware endpoint a tool invokes. Documented as a
-// shape only; the remediationClient is stubbed and never fires a live call.
+// The existing authenticated middleware endpoint a tool invokes. When the
+// executable path is DISARMED (the default, ADR-0010) this is documented as a
+// shape only and no live call is made. When ARMED, a middleware_endpoint tool
+// fires this exact POST with an Authorization: Bearer header.
 export interface RemediationEndpoint {
   method: 'POST' | 'GET';
   path: string;   // for example '/api/recovery/fulfillments'
   source: string; // the middleware function, for example 'recovery.rs :: submit_fulfillment_requests_for_order'
+  // GATED: the middleware requires its NAV write-gate password (NAV_TOGGLE_PASSWORD)
+  // on this endpoint. When true AND armed, the live POST adds the password to the
+  // body (never logged). Seed ONLY from documented evidence; where the middleware's
+  // per-endpoint auth shape is unconfirmed, leave it unset and confirm before arming.
+  gated?: boolean;
+  // HELD OUT of the Tier 1 live path even when armed + confirmed (ADR-0010): a
+  // destructive / irreversible action with no clear rollback story. It always
+  // returns 'would_trigger'; the live POST is never issued. heldReason explains why.
+  heldFromLivePath?: boolean;
+  heldReason?: string;
 }
 
 // A documented ops runbook reference (no live call, no middleware endpoint).
@@ -466,22 +478,58 @@ export interface RemediationRegistry {
 }
 export type RemediationRegistryResponse = { as_of: string } & RemediationRegistry;
 
-// The typed result of an operator trigger. STUBBED: status is always
-// 'would_trigger'; no live call is made (middleware auth is DevOps-gated). The
-// resolved call shape is echoed so an operator sees exactly what WOULD run.
+// The body an operator sends to POST /api/remediation/:tool/trigger. `confirmed`
+// is the per-action operator sign-off (ADR-0010): the live path fires ONLY when
+// confirmed is true. Absent / false returns the 'would_trigger' preview, so a stray
+// POST can never fire a mutation. subjectKind/subjectKey name the health subject to
+// resolve, if any.
+export interface RemediationTriggerInput {
+  subjectKind?: HealthTransition['subject_kind'];
+  subjectKey?: string;
+  confirmed?: boolean;
+}
+
+// The typed result of an operator trigger.
+//   'would_trigger' - DISARMED (or unconfirmed, kill-switched, ops_runbook, or a
+//                     held-out action): the exact call is echoed, NO live call made.
+//   'triggered'     - ARMED + confirmed: the authenticated middleware POST fired
+//                     and returned 2xx. `live` is true.
+//   'error'         - ARMED + confirmed but the live POST failed (non-2xx / network
+//                     / timeout). Typed, never thrown to the route. `error` carries
+//                     the reason; `httpStatus` the response code when there was one.
+// The resolved call shape is always echoed so an operator sees exactly what ran or
+// would run.
 export interface RemediationTriggerResult {
-  status: 'would_trigger';
+  status: 'would_trigger' | 'triggered' | 'error';
   as_of: string;
   toolId: string;
   toolName: string;
   kind: RemediationKind;
-  // The authenticated call that WOULD be issued (documented, not fired), or the
-  // ops runbook step to run by hand.
+  // The authenticated call that was issued, WOULD be issued (documented, not fired),
+  // or the ops runbook step to run by hand.
   wouldCall: string;
-  // Human confirmation line, matching the demo's "done" copy.
+  // Human confirmation line.
   message: string;
   // Whether an open health_transition row was resolved as a remediation event.
   resolvedSubject: { subjectKind: HealthTransition['subject_kind']; subjectKey: string } | null;
+  // True only when a live HTTP call was actually made (status 'triggered' or a
+  // live-attempt 'error'). False for every disarmed / preview outcome.
+  live: boolean;
+  httpStatus?: number; // the middleware response code, when a live call got one
+  error?: string;      // failure reason on status 'error' (no secrets)
+}
+
+// One append-only audit-log entry: recorded on EVERY operator execution (armed or
+// disarmed), the accountability artifact ADR-0010 requires. params holds the
+// non-secret call parameters only; the NAV toggle password and the bearer token
+// are NEVER recorded here.
+export interface RemediationAuditEntry {
+  at: string;          // ISO timestamp of the operator action
+  toolId: string;
+  subjectKind: HealthTransition['subject_kind'] | null;
+  subjectKey: string | null;
+  params: Record<string, unknown>; // non-secret call params (method, path, gated, confirmed, ...)
+  outcome: RemediationTriggerResult['status']; // would_trigger | triggered | error
 }
 
 // --- Failure-mode tool detection (issue #35) -------------------------------

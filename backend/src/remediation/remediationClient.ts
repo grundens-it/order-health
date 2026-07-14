@@ -65,5 +65,6 @@ export function triggerRemediation(
     wouldCall: wouldCallDescription(tool),
     message: `Would trigger "${tool.name}" (operator-confirmed). No live call is made in v1; DevOps wires the authenticated call.`,
     resolvedSubject,
+    live: false,
   };
 }

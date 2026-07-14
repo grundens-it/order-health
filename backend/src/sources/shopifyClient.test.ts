@@ -8,6 +8,7 @@ import {
   assertNoMutation,
   buildGraphqlUrl,
   buildTokenRequest,
+  mapFsInventory,
   mapFulfillmentStates,
   mapInventoryLevels,
   mapRecentOrders,
@@ -125,6 +126,66 @@ test('mapRecentOrders reads name + createdAt', () => {
   const r = mapRecentOrders(body);
   assert.equal(r[0]?.name, '#1024');
   assert.equal(r[0]?.createdAt, '2026-07-13T17:00:00Z');
+});
+
+// --- Round 3: FS-location inventory (floor-at-zero detection) ---------------
+test('mapFsInventory selects the FS location by NAME and reads available/on_hand/committed', () => {
+  const body = {
+    data: {
+      productVariants: {
+        edges: [
+          {
+            node: {
+              sku: '40074-416-0014',
+              inventoryItem: {
+                inventoryLevels: {
+                  edges: [
+                    { node: { location: { name: 'TAC' }, quantities: [{ name: 'available', quantity: 12 }] } },
+                    {
+                      node: {
+                        location: { name: 'Grundens Fulfillment Service' },
+                        quantities: [
+                          { name: 'available', quantity: -1 },
+                          { name: 'on_hand', quantity: 0 },
+                          { name: 'committed', quantity: 1 },
+                        ],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        ],
+      },
+    },
+  };
+  const r = mapFsInventory(body, 'Grundens Fulfillment Service');
+  assert.equal(r.length, 1);
+  assert.equal(r[0]?.sku, '40074-416-0014');
+  assert.equal(r[0]?.available, -1); // the floor-at-zero bug
+  assert.equal(r[0]?.onHand, 0);
+  assert.equal(r[0]?.committed, 1);
+});
+
+test('mapFsInventory reads all-null when the SKU has no FS-location level (unknown, not a false 0)', () => {
+  const body = {
+    data: {
+      productVariants: {
+        edges: [
+          {
+            node: {
+              sku: 'X',
+              inventoryItem: { inventoryLevels: { edges: [{ node: { location: { name: 'TAC' }, quantities: [{ name: 'available', quantity: 5 }] } }] } },
+            },
+          },
+        ],
+      },
+    },
+  };
+  const r = mapFsInventory(body, 'Grundens Fulfillment Service');
+  assert.equal(r[0]?.available, null);
+  assert.equal(r[0]?.onHand, null);
 });
 
 test('mapVariantPrices reads sku + price', () => {

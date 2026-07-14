@@ -11,8 +11,9 @@ import type { OrderHealth, PipelineHealth } from '@order-health/shared';
 import { config } from '../config';
 import { getPool } from '../db/pool';
 import type { MiddlewareClient } from '../sources/middlewareClient';
-import type { NavClient, NavOrderLifecycleRow } from '../sources/navClient';
+import type { NavClient, NavOrderLifecycleRow, NavOrderLine } from '../sources/navClient';
 import type { ShopifyClient } from '../sources/shopifyClient';
+import { classifyAwaitingShip } from './awaitingShipClass';
 // back_sync + inventory_sync are wired live below (their join keys, order-ref and
 // SKU, are reliable). reconcilePrice and reconcileWebhookOutcome are delivered and
 // unit-tested but not wired here yet: price needs a NAV price read, and the webhook
@@ -453,17 +454,127 @@ export function buildOrderInput(row: NavOrderLifecycleRow): OrderInput {
   };
 }
 
+// Round 3 (Unit 2). A Happy Return / non-sales record: GRUS$Sales Header Document
+// Type 5 (Return Order), which live NAV shows carry "HR-" numbers and an empty
+// customer. It is NOT an outbound shipment, so it must never be graded awaiting_ship.
+function isReturnRow(row: NavOrderLifecycleRow): boolean {
+  return row.documentType === 5 || (row.navOrderNo?.startsWith('HR-') ?? false);
+}
+
 export async function computeOrders(sources: Sources): Promise<OrderHealth[]> {
-  // READ-ONLY source reads (stubbed: NAV returns [] and the middleware errors
-  // view returns [] until DevOps provisions access). No live calls, no writes.
   const [rows] = await Promise.all([
     sources.nav.getOrderLifecycleRows(),
     sources.middleware.getErrors(), // errors view feeds latched hop errors in the live join
   ]);
+  const now = Date.now();
 
   const inputs = rows.map(buildOrderInput);
   // config.order carries the SLO bands and the orphan-grading flag (default OFF).
-  return computeOrderRows(inputs, config.order, Date.now());
+  const graded = computeOrderRows(inputs, config.order, now);
+  // graded[i] corresponds to rows[i] (1:1 map through buildOrderInput).
+  const paired = graded.map((health, i) => ({ health, row: rows[i]! }));
+
+  // Unit 2: reclassify returns out of awaiting_ship. A return is not a stall.
+  for (const { health, row } of paired) {
+    if (!isReturnRow(row)) continue;
+    health.order_verdict = 'green';
+    health.current_stage = 'complete';
+    health.oldest_stuck_age_s = null;
+    health.classification = 'return';
+    health.awaiting_ship_detail = {
+      classification: 'return',
+      age_s: null,
+      fs_available: null,
+      nav_warehouse_on_hand: null,
+      sample_sku: null,
+      why: 'Happy Return / non-sales record (Document Type 5); not an outbound shipment stall',
+    };
+    health.note = 'Return order (excluded from awaiting_ship grading)';
+  }
+
+  // Unit 1: classify the awaiting_ship red/amber orders by FS vs warehouse on-hand.
+  const awaiting = paired.filter(
+    (p) =>
+      !isReturnRow(p.row) &&
+      p.health.current_stage === 'awaiting_ship' &&
+      (p.health.order_verdict === 'red' || p.health.order_verdict === 'amber'),
+  );
+  if (awaiting.length > 0) {
+    await classifyAwaitingShipOrders(sources, awaiting.map((a) => a.health));
+  }
+  return graded;
+}
+
+// Round 3 (Unit 1). Gather the FS-location available (Shopify) and NAV warehouse
+// on-hand for the awaiting_ship orders' SKUs, then classify each in place. The
+// classifier is pure; this is the I/O glue. Read-only everywhere.
+async function classifyAwaitingShipOrders(sources: Sources, orders: OrderHealth[]): Promise<void> {
+  const orderNos = new Set(orders.map((o) => o.nav_order_no).filter((x): x is string => x !== null));
+  const [lines, navAvail] = await Promise.all([
+    sources.nav.getOutstandingOrderLines(5000),
+    sources.nav.getInventoryAvailability(),
+  ]);
+
+  const linesByOrder = new Map<string, NavOrderLine[]>();
+  for (const l of lines) {
+    if (l.orderNo === null || l.sku === null || !orderNos.has(l.orderNo)) continue;
+    const arr = linesByOrder.get(l.orderNo) ?? [];
+    arr.push(l);
+    linesByOrder.set(l.orderNo, arr);
+  }
+
+  // NAV warehouse on-hand per SKU (summed across NAV locations; the FS location is
+  // a Shopify virtual location, absent from NAV, so all NAV locations are warehouses).
+  const navOnHandBySku = new Map<string, number>();
+  for (const a of navAvail) {
+    if (a.sku === null || a.availableQty === null) continue;
+    navOnHandBySku.set(a.sku, (navOnHandBySku.get(a.sku) ?? 0) + a.availableQty);
+  }
+
+  // FS-location available per SKU, for the SKUs on these orders (bounded).
+  const skuSet = new Set<string>();
+  for (const arr of linesByOrder.values()) for (const l of arr) if (l.sku) skuSet.add(l.sku);
+  const fsLevels = await sources.shopify.getFsInventory([...skuSet].slice(0, 250));
+  const fsBySku = new Map<string, number | null>();
+  for (const f of fsLevels) fsBySku.set(f.sku, f.available);
+
+  for (const o of orders) {
+    const orderLines = o.nav_order_no !== null ? (linesByOrder.get(o.nav_order_no) ?? []) : [];
+    // Pick the representative SKU: an FS-floored line first (FS < 0 while warehouse
+    // stocked), else a warehouse-short line, else the first line.
+    let repSku: string | null = null;
+    let repFs: number | null = null;
+    let repWh: number | null = null;
+    let backorder = false;
+    for (const l of orderLines) {
+      if (l.sku === null) continue;
+      const fs = fsBySku.has(l.sku) ? (fsBySku.get(l.sku) ?? null) : null;
+      const wh = navOnHandBySku.has(l.sku) ? navOnHandBySku.get(l.sku)! : null;
+      if (fs !== null && fs < 0 && wh !== null && wh > 0) {
+        repSku = l.sku; repFs = fs; repWh = wh; backorder = false;
+        break; // FS floor-at-zero dominates; stop at the first.
+      }
+      if (wh !== null && wh <= 0) {
+        if (repSku === null) { repSku = l.sku; repFs = fs; repWh = wh; }
+        backorder = true;
+      } else if (repSku === null) {
+        repSku = l.sku; repFs = fs; repWh = wh;
+      }
+    }
+    const detail = classifyAwaitingShip({
+      ageS: o.oldest_stuck_age_s,
+      fsAvailable: repFs,
+      navWarehouseOnHand: repWh,
+      sampleSku: repSku,
+      hasNavOrder: o.nav_order_no !== null,
+      hasShopifyOrder: o.shopify_order_id !== null,
+      isReturn: false,
+      backorder,
+    });
+    o.classification = detail.classification;
+    o.awaiting_ship_detail = detail;
+    o.note = detail.why;
+  }
 }
 
 // Persist one order-layer snapshot run, all rows stamped with the same as_of.
@@ -479,12 +590,13 @@ export async function writeOrderSnapshot(asOf: string, orders: OrderHealth[]): P
       `INSERT INTO order_health_snapshot
          (as_of, channel, nav_order_no, shopify_order_id, shopify_order_name,
           customer_ref, current_stage, order_verdict, oldest_stuck_age_s,
-          is_orphan_suspect, note)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          is_orphan_suspect, note, classification, awaiting_ship_detail)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         asOf, o.channel, o.nav_order_no, o.shopify_order_id, o.shopify_order_name,
         o.customer_ref, o.current_stage, o.order_verdict, o.oldest_stuck_age_s,
-        o.is_orphan_suspect, o.note,
+        o.is_orphan_suspect, o.note, o.classification ?? null,
+        o.awaiting_ship_detail ? JSON.stringify(o.awaiting_ship_detail) : null,
       ],
     );
   }

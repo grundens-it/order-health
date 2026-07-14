@@ -53,6 +53,21 @@ export interface NavOrderLifecycleRow {
   navShipmentAt: string | null;    // GRUS$Sales Shipment Header [Posting Date] (3PL shipped)
   backSyncAt: string | null;       // DTC only: shopify_fulfillment_id present in nav_shipment_sync (middleware)
   missedBackSync: boolean;         // DTC only: NAV shipment exists, no fulfillment id => RED (design.md 5)
+  // Round 3 (Unit 2). GRUS$Sales Header [Document Type]: 1 = Order (outbound sale),
+  // 5 = Return Order. Happy Returns are Document Type 5 (No_ like "HR-...", empty
+  // customer); they are NOT outbound stalls and must never be graded awaiting_ship.
+  documentType: number | null;
+}
+
+// Round 3 (Unit 1). One outstanding sales-order line, used to map an awaiting_ship
+// order to its item SKU(s) so the FS-location available can be reconciled against
+// NAV warehouse on-hand. GRUS$Sales Line: [Document Type] = 1 (Order), [Type] = 2
+// (Item), [Outstanding Quantity] <> 0. SELECT-only.
+export interface NavOrderLine {
+  orderNo: string | null;      // [Document No_]
+  sku: string | null;          // [No_] (item)
+  location: string | null;     // [Location Code]
+  outstandingQty: number | null; // [Outstanding Quantity]
 }
 
 // Unit 3b (inventory dry-run reconstruction). Current NAV available-to-promise
@@ -121,6 +136,10 @@ export interface NavClient {
   // whether any UNSYNCED work exists: if the newest DTC shipment is not newer than
   // the last back-sync, the watcher is idle-not-behind and the clocks must not age.
   getNewestDtcShipmentAt(): Promise<string | null>;
+  // Round 3 (Unit 1). Outstanding item lines for open sales orders (Document Type 1,
+  // Type 2, Outstanding Quantity <> 0), bounded, so an awaiting_ship order can be
+  // mapped to its SKU(s) for the FS-vs-warehouse reconciliation.
+  getOutstandingOrderLines(limit: number): Promise<NavOrderLine[]>;
   // Read-only SQL passthrough for curated templates (design.md section 2).
   queryReadOnly<T>(templateName: string, params?: Record<string, unknown>): Promise<T[]>;
 }
@@ -175,12 +194,14 @@ export interface NavQueries {
   inProcessJobs: string;     // Unit 1: in-process CU 50007 runs, oldest first (stuck-job)
   pendingStagingCount: string; // Unit 1: count of Status = 0 pending-promotion staging rows
   newestDtcShipment: string; // Unit 2: posting time of the newest DTC (WebId) shipment
+  outstandingOrderLines: string; // Round 3: outstanding item lines for open sales orders
 }
 
 export function buildQueries(company: string): NavQueries {
   const jqLog = navTable(company, 'Job Queue Log Entry');
   const jqEntry = navTable(company, 'Job Queue Entry');
   const salesHeader = navTable(company, 'Sales Header');
+  const salesLine = navTable(company, 'Sales Line');
   const staging = navTable(company, 'Sales Header Staging');
   const shipment = navTable(company, 'Sales Shipment Header');
   const itemLedger = navTable(company, 'Item Ledger Entry');
@@ -209,6 +230,7 @@ ORDER BY [Entry No_] DESC;`,
     // stays ONE row instead of fanning out into duplicates.
     orderLifecycle: `SELECT TOP (@limit) h.[No_] AS navOrderNo, h.[Sell-to Customer No_] AS customerRef,
        h.[Order Date] AS orderDate, h.[WebId] AS webId, h.[WebOrder] AS webOrder,
+       h.[Document Type] AS documentType,
        st.[Status] AS navStagingStatus,
        (SELECT MAX(sh.[Posting Date]) FROM ${shipment} sh WHERE sh.[Order No_] = h.[No_]) AS navShipmentAt
 FROM ${salesHeader} h
@@ -258,6 +280,14 @@ WHERE [Status] = @pendingStatus;`,
 FROM ${shipment} sh
 WHERE sh.[WebId] IS NOT NULL AND sh.[WebId] <> ''
 ORDER BY sh.[Posting Date] DESC;`,
+    // Round 3 (Unit 1): outstanding ITEM lines (Type = 2) for open sales orders
+    // (Document Type = 1) with unshipped quantity, most-recent-first. Maps an
+    // awaiting_ship order to its SKU(s) for the FS-vs-warehouse reconciliation.
+    outstandingOrderLines: `SELECT TOP (@limit) sl.[Document No_] AS orderNo, sl.[No_] AS sku,
+       sl.[Location Code] AS location, sl.[Outstanding Quantity] AS outstandingQty
+FROM ${salesLine} sl
+WHERE sl.[Document Type] = 1 AND sl.[Type] = 2 AND sl.[Outstanding Quantity] <> 0
+ORDER BY sl.[Document No_] DESC;`,
   };
 }
 
@@ -366,6 +396,17 @@ export function mapOrderLifecycleRow(row: Row): NavOrderLifecycleRow {
     navShipmentAt: toIso(row.navShipmentAt),
     backSyncAt: null,
     missedBackSync: false,
+    documentType: toNum(row.documentType),
+  };
+}
+
+// Round 3 (Unit 1). Map a GRUS$Sales Line row to a NavOrderLine.
+export function mapOrderLine(row: Row): NavOrderLine {
+  return {
+    orderNo: toStr(row.orderNo),
+    sku: toStr(row.sku),
+    location: toStr(row.location),
+    outstandingQty: toNum(row.outstandingQty),
   };
 }
 
@@ -511,6 +552,10 @@ export class NavClientStub implements NavClient {
     // null => the has-work gate cannot detect unsynced work; the pipe rolls up to
     // unknown via the missed-shipments signal rather than a false idle-green.
     return null;
+  }
+  async getOutstandingOrderLines(limit: number): Promise<NavOrderLine[]> {
+    this.note(`outstanding order lines (limit ${limit})`);
+    return [];
   }
   async queryReadOnly<T>(templateName: string): Promise<T[]> {
     this.note(`read-only template ${templateName}`);
@@ -661,6 +706,15 @@ class NavClientLive implements NavClient {
       return rows[0] ? toIso(rows[0].postedAt) : null;
     } catch (err) {
       return this.degrade('newest DTC shipment', err, this.stub.getNewestDtcShipmentAt());
+    }
+  }
+
+  async getOutstandingOrderLines(limit: number): Promise<NavOrderLine[]> {
+    try {
+      const rows = await this.select(this.queries.outstandingOrderLines, { limit });
+      return rows.map(mapOrderLine);
+    } catch (err) {
+      return this.degrade('outstanding order lines', err, this.stub.getOutstandingOrderLines(limit));
     }
   }
 

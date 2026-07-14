@@ -18,12 +18,13 @@ import type {
   PriceSyncStatus,
   ShopifyWebhookStatus,
 } from '../sources/middlewareClient';
-import { ShopifyClientStub } from '../sources/shopifyClient';
+import { ShopifyClientStub, type ShopifyClient, type ShopifyFsInventory } from '../sources/shopifyClient';
 import type {
   NavClient,
   NavInventoryAvailabilityRow,
   NavJobQueueState,
   NavOrderLifecycleRow,
+  NavOrderLine,
   NavShipmentHeader,
   NavWatermarkState,
 } from '../sources/navClient';
@@ -61,6 +62,20 @@ export interface BoardSeed {
   webhook?: ShopifyWebhookStatus;
   allocator?: Partial<AllocatorStatus>;
   orders?: NavOrderLifecycleRow[];
+  orderLines?: NavOrderLine[]; // Round 3: outstanding order lines for FS classification
+  inventoryAvailability?: NavInventoryAvailabilityRow[]; // Round 3: NAV warehouse on-hand
+  fsInventory?: ShopifyFsInventory[]; // Round 3: Shopify FS-location available per SKU
+}
+
+// A read-only Shopify client backed by the seed: only the FS-inventory read is
+// seeded (the classification test needs it); the reconciliation reads return empty.
+class SeededShopifyClient extends ShopifyClientStub implements ShopifyClient {
+  constructor(private readonly fsSeed: ShopifyFsInventory[]) {
+    super();
+  }
+  override async getFsInventory(): Promise<ShopifyFsInventory[]> {
+    return this.fsSeed;
+  }
 }
 
 function greenWalks(now: number): InventoryWalk[] {
@@ -93,9 +108,9 @@ class SeededNavClient implements NavClient {
     return this.seed.backSync?.shipments ?? [];
   }
   async getInventoryAvailability(): Promise<NavInventoryAvailabilityRow[]> {
-    // Seeded board leaves this empty; the dry-run divergence then falls back to
-    // the seeded InventorySyncStatus.dryRunWouldPush (no live NAV read).
-    return [];
+    // Default empty (the dry-run divergence falls back to the seeded
+    // InventorySyncStatus.dryRunWouldPush); a test seeds it for FS classification.
+    return this.seed.inventoryAvailability ?? [];
   }
   async getJobQueueState(): Promise<NavJobQueueState> {
     // Default healthy: auto-release firing minutes ago, no in-process job, an empty
@@ -113,6 +128,9 @@ class SeededNavClient implements NavClient {
     // (agoIso 600), so the has-work gate reads caught-up (idle-green). A test
     // overrides this to a time newer than the watermark to exercise unsynced work.
     return this.seed.backSync?.newestDtcShipmentAt ?? agoIso(900, this.now);
+  }
+  async getOutstandingOrderLines(): Promise<NavOrderLine[]> {
+    return this.seed.orderLines ?? [];
   }
   async queryReadOnly<T>(): Promise<T[]> {
     return [];
@@ -221,7 +239,7 @@ export function makeSeededSources(seed: BoardSeed = {}): Sources {
   return {
     nav: new SeededNavClient(seed, now),
     middleware: new SeededMiddlewareClient(seed, now),
-    shopify: new ShopifyClientStub(),
+    shopify: new SeededShopifyClient(seed.fsInventory ?? []),
   };
 }
 
@@ -244,6 +262,7 @@ export function greenDtcOrder(navOrderNo: string, now: number = Date.now()): Nav
     navShipmentAt: agoIso(3600, now),
     backSyncAt: agoIso(1800, now),
     missedBackSync: false,
+    documentType: 1,
   };
 }
 
@@ -269,6 +288,7 @@ export function greenWholesaleOrder(
     navShipmentAt: agoIso(3600, now),
     backSyncAt: null,
     missedBackSync: false,
+    documentType: 1,
   };
 }
 
@@ -295,5 +315,29 @@ export function stuckStagingDtcOrder(
     navShipmentAt: null, // still unshipped => aged red at awaiting_ship
     backSyncAt: null,
     missedBackSync: false,
+    documentType: 1,
+  };
+}
+
+// A Happy Return (Round 3, Unit 2): Document Type 5, HR- number, empty customer, no
+// Shopify WebId. Old and unshipped, so the naive grader would red it awaiting_ship;
+// the returns exclusion must reclassify it as 'return', never a stall.
+export function happyReturnOrder(hrNo: string, now: number = Date.now()): NavOrderLifecycleRow {
+  return {
+    channel: 'wholesale',
+    navOrderNo: hrNo,
+    webId: null,
+    webOrder: 0,
+    shopifyOrderName: null,
+    customerRef: '',
+    shopifyOrderAt: agoIso(6 * 86400, now),
+    allocatorSplitAt: null,
+    navStagingAt: null,
+    navStagingStatus: null,
+    navPromotionAt: null,
+    navShipmentAt: null,
+    backSyncAt: null,
+    missedBackSync: false,
+    documentType: 5, // Return Order
   };
 }

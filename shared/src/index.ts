@@ -107,6 +107,35 @@ export interface OrderHealth {
   oldest_stuck_age_s: number | null;
   is_orphan_suspect: boolean;
   note: string | null;
+  // Round 3: the FS-aware classification of an awaiting_ship stall, plus a return
+  // marker so a Happy Return is never graded as a stall. Optional / additive; the
+  // read API serves them from the order snapshot detail column (0002 migration).
+  classification?: AwaitingShipClass | null;
+  awaiting_ship_detail?: AwaitingShipDetail | null;
+}
+
+// Round 3 (Unit 1). Why an awaiting_ship order has not shipped, reconciled between
+// the Shopify Fulfillment Service (FS) location and NAV warehouse on-hand.
+//   fs_floor_at_zero : FS available < 0 while a NAV warehouse is stocked (> 0). The
+//                      Symmetry FS floor-at-zero bug (dominant today). NOT a 3PL delay.
+//   backordered      : a line is genuinely warehouse-short / on a future IABC date.
+//   genuine_3pl_delay: in stock, FS available >= 0, unshipped past the SLO (real chase).
+//   orphan_or_return : no NAV order behind the record.
+//   return           : a Happy Return / non-sales record; never an awaiting_ship stall.
+export type AwaitingShipClass =
+  | 'fs_floor_at_zero'
+  | 'backordered'
+  | 'genuine_3pl_delay'
+  | 'orphan_or_return'
+  | 'return';
+
+export interface AwaitingShipDetail {
+  classification: AwaitingShipClass;
+  age_s: number | null;                 // how long the order has been awaiting shipment
+  fs_available: number | null;          // Shopify FS-location available (negative = floor-at-zero)
+  nav_warehouse_on_hand: number | null; // NAV warehouse on-hand (> 0 while FS < 0 = the bug)
+  sample_sku: string | null;            // a representative SKU driving the classification
+  why: string;                          // human "why this is red/amber", for the UI
 }
 
 // The three-verdict inventory-sync contract (design.md 5A.2), generalized so

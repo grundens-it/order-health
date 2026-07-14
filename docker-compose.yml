@@ -46,17 +46,22 @@ services:
     volumes:
       - ./db/migrations:/migrations:ro
     entrypoint: ["/bin/sh", "-c"]
-    # Idempotent: only applies the migration when the schema is not already there,
-    # so re-running the stack does not error on the CREATE TYPE / CREATE TABLE.
+    # Apply every migration in order. 0001 is guarded on the base schema; later
+    # migrations (0002+, additive ALTERs) are idempotent (ADD COLUMN IF NOT EXISTS)
+    # so re-running the stack is always safe.
     command:
       - |
         set -e
         if psql "$$DATABASE_URL" -tAc "SELECT to_regclass('public.order_health_snapshot')" | grep -q order_health_snapshot; then
-          echo "migration already applied, skipping"
+          echo "base schema already applied, skipping 0001"
         else
           echo "applying db/migrations/0001_init.sql"
           psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f /migrations/0001_init.sql
         fi
+        for m in $$(ls /migrations/*.sql | sort | grep -v 0001_init); do
+          echo "applying $$m"
+          psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$$m"
+        done
     restart: "no"
 
   backend:

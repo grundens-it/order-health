@@ -45,6 +45,20 @@ export interface ShopifyVariantPrice {
   currency: string | null;
 }
 
+// Round 3 (Unit 1). The inventory Shopify holds at the FULFILLMENT SERVICE location,
+// per SKU. available < 0 is the Symmetry FS floor-at-zero bug. The FS location is
+// HIDDEN from Shopify locations(); it is reached via inventoryItem -> inventoryLevel
+// and identified by NAME ("Grundens Fulfillment Service"), never a hardcoded id.
+export interface ShopifyFsInventory {
+  sku: string;
+  available: number | null;   // FS-location available (negative = floor-at-zero bug)
+  onHand: number | null;      // FS-location on hand
+  committed: number | null;   // FS-location committed
+}
+
+// The name of the Fulfillment Service location, resolved dynamically (not by id).
+export const FS_LOCATION_NAME = 'Grundens Fulfillment Service';
+
 export interface ShopifyClient {
   // back_sync: for a set of NAV-shipped orders, does Shopify show a fulfillment?
   getFulfillmentStates(orderNames: string[]): Promise<ShopifyFulfillmentState[]>;
@@ -54,6 +68,8 @@ export interface ShopifyClient {
   getRecentOrders(sinceIso: string): Promise<ShopifyOrderArrival[]>;
   // price_sync: Shopify variant prices for a set of SKUs (spot-check vs NAV).
   getVariantPrices(skus: string[]): Promise<ShopifyVariantPrice[]>;
+  // Round 3: FS-location available/on-hand/committed per SKU (floor-at-zero detection).
+  getFsInventory(skus: string[]): Promise<ShopifyFsInventory[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +225,47 @@ export function mapVariantPrices(body: unknown): ShopifyVariantPrice[] {
   });
 }
 
+// Round 3 (Unit 1). Map a productVariants body to per-SKU FS-location inventory,
+// selecting the inventory level whose location NAME matches the Fulfillment Service
+// (the FS location is hidden from locations(); it is identified by name here, not a
+// hardcoded id). Shape:
+// { data: { productVariants: { edges: [{ node: { sku, inventoryItem: {
+//   inventoryLevels: { edges: [{ node: { location: { name },
+//     quantities: [{ name: 'available'|'on_hand'|'committed', quantity }] } }] } } } }] } } }
+export function mapFsInventory(body: unknown, fsLocationName: string): ShopifyFsInventory[] {
+  const variants = pick(pick(body, 'data'), 'productVariants');
+  const out: ShopifyFsInventory[] = [];
+  for (const ve of edges(variants)) {
+    const v = node(ve);
+    const sku = str(pick(v, 'sku')) ?? '';
+    const levels = edges(pick(pick(v, 'inventoryItem'), 'inventoryLevels'));
+    let fs: ShopifyFsInventory | null = null;
+    for (const le of levels) {
+      const l = node(le);
+      const name = str(pick(pick(l, 'location'), 'name'));
+      if (name !== fsLocationName) continue;
+      const qs = pick(l, 'quantities');
+      const byName = new Map<string, number | null>();
+      if (Array.isArray(qs)) {
+        for (const q of qs) {
+          const qn = str(pick(q, 'name'));
+          if (qn !== null) byName.set(qn, num(pick(q, 'quantity')));
+        }
+      }
+      fs = {
+        sku,
+        available: byName.has('available') ? byName.get('available')! : num(pick(l, 'available')),
+        onHand: byName.has('on_hand') ? byName.get('on_hand')! : num(pick(l, 'on_hand')),
+        committed: byName.has('committed') ? byName.get('committed')! : num(pick(l, 'committed')),
+      };
+      break;
+    }
+    // A SKU with no FS-location level reads all-null (unknown), never a false 0.
+    out.push(fs ?? { sku, available: null, onHand: null, committed: null });
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // STUB (kept forever). Returned when Shopify is not configured, and the fallback
 // the live client degrades to on failure. Every method returns empty so the
@@ -233,6 +290,10 @@ export class ShopifyClientStub implements ShopifyClient {
   }
   async getVariantPrices(skus: string[]): Promise<ShopifyVariantPrice[]> {
     this.note(`variant prices (${skus.length} skus)`);
+    return [];
+  }
+  async getFsInventory(skus: string[]): Promise<ShopifyFsInventory[]> {
+    this.note(`FS-location inventory (${skus.length} skus)`);
     return [];
   }
 }
@@ -356,6 +417,22 @@ class ShopifyClientLive implements ShopifyClient {
       return mapVariantPrices(await this.query(gql, { q }));
     } catch (err) {
       return this.degrade('variant prices', err, this.stub.getVariantPrices(skus));
+    }
+  }
+
+  async getFsInventory(skus: string[]): Promise<ShopifyFsInventory[]> {
+    if (skus.length === 0) return [];
+    const q = skus.map((s) => `sku:${JSON.stringify(s)}`).join(' OR ');
+    // The FS location is hidden from locations(); we read each variant's inventory
+    // levels (which DO include the FS location) and select it by name downstream.
+    const gql =
+      `query($q: String!) { productVariants(first: 100, query: $q) { edges { node { sku ` +
+      `inventoryItem { inventoryLevels(first: 20) { edges { node { location { name } ` +
+      `quantities(names: ["available", "on_hand", "committed"]) { name quantity } } } } } } } } }`;
+    try {
+      return mapFsInventory(await this.query(gql, { q }), FS_LOCATION_NAME);
+    } catch (err) {
+      return this.degrade('FS-location inventory', err, this.stub.getFsInventory(skus));
     }
   }
 }

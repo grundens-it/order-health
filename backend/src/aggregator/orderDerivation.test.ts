@@ -44,6 +44,7 @@ function navRow(overrides: Partial<NavOrderLifecycleRow> = {}): NavOrderLifecycl
     navShipmentAt: null, // not shipped yet
     backSyncAt: null,
     missedBackSync: false,
+    documentType: 1, // outbound sales order (Round 3)
     ...overrides,
   };
 }

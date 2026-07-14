@@ -7,6 +7,7 @@ import type {
   PipelineHealth,
   RemediationRegistry,
 } from '@order-health/shared';
+import { detectRemediationTool } from '@order-health/shared';
 import { ApiError, fetchOrders, fetchPipelines, fetchRemediationRegistry, fetchRollup } from './api';
 import { LeadershipStrip } from './components/LeadershipStrip';
 import { PipelineStrip } from './components/PipelineStrip';
@@ -178,10 +179,16 @@ export function App(): JSX.Element {
     allocator: 'Allocator split',
   };
   const openPipeRemediation = (pipe: PipelineHealth): void => {
+    // Inspect the observed failure mode (issue #35). When a distinct signal is
+    // present the detected tool becomes "Recommended"; otherwise the modal falls
+    // back to the static primary. Pure, read-only: NAMES a tool, triggers nothing.
+    const detected = detectRemediationTool(pipe.pipe, pipe);
     setRemediationSubject({
       subjectKind: 'pipe',
       subjectKey: pipe.pipe,
       label: PIPE_LABELS[pipe.pipe] ?? pipe.pipe,
+      detectedToolId: detected?.toolId,
+      detectionReason: detected?.reason,
     });
   };
 

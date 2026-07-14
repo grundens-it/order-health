@@ -20,6 +20,12 @@ export interface RemediationSubject {
   subjectKind: 'pipe' | 'signal' | 'order';
   subjectKey: string;
   label: string; // human label for the header (for example the pipe display name)
+  // Failure-mode detection (issue #35): when the opener observed a runtime failure
+  // mode, it names the detected tool here and why. The modal marks THAT tool
+  // "Recommended" (overriding the static primary) and shows the reason. Absent =>
+  // fall back to the static primary mapping.
+  detectedToolId?: string;
+  detectionReason?: string;
 }
 
 function toolFor(registry: RemediationRegistry, toolId: string): RemediationTool | null {
@@ -41,11 +47,15 @@ function ToolCard({
   mapping,
   tool,
   subject,
+  recommended,
+  detectionReason,
   onResult,
 }: {
   mapping: RemediationMapping;
   tool: RemediationTool;
   subject: RemediationSubject;
+  recommended: boolean;      // marked "Recommended" (detected tool, or static primary)
+  detectionReason?: string;  // set only on the failure-mode-detected recommended card
   onResult: (r: RemediationTriggerResult) => void;
 }): JSX.Element {
   const [busy, setBusy] = useState(false);
@@ -71,7 +81,7 @@ function ToolCard({
     <div className="rm-tool">
       <div className="rm-tool-hd">
         <div>
-          <div className="rm-kicker">{mapping.primary ? 'Recommended tool' : 'Alternative'}</div>
+          <div className="rm-kicker">{recommended ? 'Recommended tool' : 'Alternative'}</div>
           <h4>{tool.name}</h4>
         </div>
         <span className={`rm-kind ${tool.writeCapable ? 'w' : 'r'}`}>
@@ -80,6 +90,9 @@ function ToolCard({
         </span>
       </div>
       <p className="rm-desc">{tool.description}</p>
+      {recommended && detectionReason !== undefined && (
+        <p className="rm-when">Detected: {detectionReason}</p>
+      )}
       <p className="rm-when">Applies when: {mapping.appliesWhen}</p>
       <pre className="rm-call">{callShape(tool)}</pre>
       {error !== null && <div className="rm-err">{error}</div>}
@@ -105,14 +118,20 @@ export function RemediationModal({
   const closeRef = useRef<HTMLButtonElement>(null);
   const [result, setResult] = useState<RemediationTriggerResult | null>(null);
 
-  // Resolve the mapped tools for this subject (primary first).
+  // Resolve the mapped tools for this subject, recommended first. The recommended
+  // tool is the failure-mode-DETECTED one (issue #35) when the opener supplied it,
+  // otherwise the static primary mapping (previous behaviour).
   const cards = useMemo(() => {
     if (subject === null || registry === null) return [];
-    return registry.mappings
+    const mapped = registry.mappings
       .filter((m) => m.subjectKey === subject.subjectKey)
-      .sort((a, b) => Number(b.primary) - Number(a.primary))
       .map((m) => ({ mapping: m, tool: toolFor(registry, m.toolId) }))
       .filter((x): x is { mapping: RemediationMapping; tool: RemediationTool } => x.tool !== null);
+    const staticPrimaryId = mapped.find((c) => c.mapping.primary)?.tool.id ?? null;
+    const recommendedId = subject.detectedToolId ?? staticPrimaryId;
+    return mapped
+      .map((c) => ({ ...c, recommended: c.tool.id === recommendedId }))
+      .sort((a, b) => Number(b.recommended) - Number(a.recommended));
   }, [subject, registry]);
 
   // Reset the shown result whenever the subject changes.
@@ -201,12 +220,16 @@ export function RemediationModal({
           ) : cards.length === 0 ? (
             <p className="rm-desc">No remediation is mapped for this signal.</p>
           ) : (
-            cards.map(({ mapping, tool }) => (
+            cards.map(({ mapping, tool, recommended }) => (
               <ToolCard
                 key={tool.id}
                 mapping={mapping}
                 tool={tool}
                 subject={subject}
+                recommended={recommended}
+                detectionReason={
+                  recommended && tool.id === subject.detectedToolId ? subject.detectionReason : undefined
+                }
                 onResult={setResult}
               />
             ))

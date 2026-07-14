@@ -46,11 +46,16 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       'Idempotent: already-submitted orders are reported, never double-fulfilled.',
     kind: 'middleware_endpoint',
     // The EXISTING authenticated middleware endpoint (recovery.rs). No new path.
+    // GATED: recovery.rs::handle_replay documents `password + set_by`, so the armed
+    // live POST adds NAV_TOGGLE_PASSWORD (the only tool with documented evidence of
+    // the NAV write-gate; the other middleware_endpoint tools' per-endpoint auth
+    // shape is unconfirmed and must be verified before arming - see the PR notes).
     endpoint: {
       method: 'POST',
       path: '/api/recovery/replay-fulfillment-requests',
       source:
         'recovery.rs::handle_replay -> submit_fulfillment_requests_for_order (orders_updated.rs) -> Shopify fulfillmentCreate',
+      gated: true,
     },
     writeCapable: true,
   },
@@ -186,10 +191,17 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       'SKU) via the middleware, so CU 50009 auto-release can promote the single remaining row. NAV ' +
       'item data itself stays read-only; the middleware owns the dedupe.',
     kind: 'middleware_endpoint',
+    // HELD OUT of the Tier 1 live path (ADR-0010): the dedupe DELETES NAV staging
+    // rows and there is no documented rollback (a deleted staging row cannot be
+    // restored). It stays disarmed - always 'would_trigger', never a live POST -
+    // and is never part of any bulk action, pending a rollback story. Surfaced in
+    // the PR. This is a per-order, destructive action; do not arm it here.
     endpoint: {
       method: 'POST',
       path: '/api/nav/stuck-staging/dedupe',
       source: 'main.rs:570 -> stuck-staging dedupe',
+      heldFromLivePath: true,
+      heldReason: 'deletes NAV staging rows with no documented rollback; per ADR-0010 held disarmed pending a rollback story',
     },
     writeCapable: true,
   },

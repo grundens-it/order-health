@@ -2,7 +2,7 @@
   "round": "order-health-observability",
   "repo": "grundens-it/order-health",
   "brief": "docs/kickoffs/order-health-observability.md",
-  "updated": "2026-07-13 (health-fidelity round: stop the dashboard crying wolf; branch fix/health-fidelity off main; ADR-0007 source precedence + reconciliation, ADR-0008 applicability display state; per-pipe fidelity fixes, all pure-compute with node:test)",
+  "updated": "2026-07-14 (executable remediation Tier 1, ADR-0010: give remediationClient a live authenticated POST path behind REMEDIATION_LIVE_ENABLED + REMEDIATION_KILL_SWITCH, per-action Confirm-and-run, append-only audit log; disarmed by default; stuck_staging_dedupe held out; branch exec-remediation/tier1 off round-3/fs-ui, #70, not merged)",
   "umbrella_issue": 2,
   "fidelity_round": {
     "name": "health-fidelity-fixes",
@@ -32,6 +32,20 @@
     "umbrella_context": "issues #61-#65",
     "result": "live-confirmed: 32 of 34 awaiting_ship reds classify fs_floor_at_zero (Shopify FS-location available < 0 while NAV warehouse stocked; the Symmetry floor-at-zero bug), the other 2 are genuine 3PL delays; 8 Happy Returns (Document Type 5) reclassified out of awaiting_ship (0 graded a stall); fs_floor_at_zero maps to an FS re-floor runbook (ADR-0003), not back_sync; the modal always shows the why first; every leadership card drills through. Real NAV + live Shopify.",
     "note": "Unit 5 fanned out to a background worktree agent while Units 3+4 ran in the main context. Branch pushed; PRs not opened, not merged to main."
+  },
+  "exec_remediation_round": {
+    "name": "executable-remediation-tier1",
+    "brief": "docs/kickoffs/executable-remediation-tier1-kickoff.md",
+    "adr": "ADR-0010 executable-remediation actor mode (Accepted 2026-07-13)",
+    "branch": "exec-remediation/tier1 (off round-3/fs-ui)",
+    "umbrella_issue": 69,
+    "issue": 70,
+    "result": "remediationClient gains a live authenticated POST path for middleware_endpoint tools, DISARMED by default (REMEDIATION_LIVE_ENABLED false) with a REMEDIATION_KILL_SWITCH; per-action Confirm-and-run in the modal showing the exact method/path/target/params; append-only audit log (no secrets); gated tools add NAV_TOGGLE_PASSWORD (recovery_sweep is the only documented gate). stuck_staging_dedupe held out of the live path (deletes NAV staging rows, no rollback). Aggregator no-auto-fire invariant preserved. 8 node:test safety invariants added (275 pass). typecheck + test green.",
+    "surfaced": [
+      "Per-endpoint auth shape: only recovery_sweep documents the NAV write-gate (password + set_by). The other middleware_endpoint tools (submit_fulfillment_request, back_sync_run_now, back_sync_rescan_from, close_unfulfilled_fos) are marked non-gated; their per-endpoint auth + request-body shape must be confirmed against the middleware before REMEDIATION_LIVE_ENABLED is ever set true.",
+      "stuck_staging_dedupe is held disarmed pending a documented rollback story for the staging-row delete (ADR-0010)."
+    ],
+    "note": "Single coupled unit, one phased pass in a worktree off round-3/fs-ui. Branch pushed; PR NOT opened, not merged; REMEDIATION_LIVE_ENABLED never armed in a committed env. Tier 2 runner (#71) not built."
   },
   "kickoff_pr": 1,
   "stack": {
@@ -67,7 +81,8 @@
     "INT-C": "integration convergence: typecheck + test, live end-to-end re-grade, push (no PRs)",
     "R3-F": "round 3 foundation: FS classifier + returns exclusion (shared order ingest)",
     "R3-W": "round 3 fan-out: remediation fold-in + FS re-floor, why-modal, leadership drill-through (Unit 5 a background agent)",
-    "R3-C": "round 3 convergence: typecheck + test, live FS-classification confirm, push (no PRs)"
+    "R3-C": "round 3 convergence: typecheck + test, live FS-classification confirm, push (no PRs)",
+    "EXR": "executable remediation Tier 1 (ADR-0010): single coupled unit in a worktree off round-3/fs-ui; disarmed live path + confirm + audit, no PR, not armed"
   },
   "units": [
     { "unit": 0, "issue": 3, "phase": "F", "name": "Foundation scaffold", "status": "done", "pr": 12, "merged": true },
@@ -103,6 +118,8 @@
     { "unit": "R3-2", "issue": 63, "phase": "R3-F", "name": "Exclude Happy Returns / non-sales from awaiting_ship", "status": "done", "note": "Document Type 5 (HR-) reclassified as return, never a stall; live: 8 reclassified, 0 graded a stall" },
     { "unit": "R3-3", "issue": 61, "phase": "R3-W", "name": "Fold remediation tool-detection + FS re-floor + 3 findings", "status": "done", "note": "detect engine folded in; fs_floor_at_zero -> FS re-floor runbook (ADR-0003), not back_sync; nav_staging_stuck Not-Auto-released gap, close_unfulfilled_fos safety, webhook_resubscribe vs outcome closed" },
     { "unit": "R3-4", "issue": 62, "phase": "R3-W", "name": "Clicking any unhealthy/at-risk item always explains WHY", "status": "done", "note": "RemediationModal renders a why block first from verdict+detail; plain next-step when no tool; FS-floored order routes to the FS re-floor" },
-    { "unit": "R3-5", "issue": 65, "phase": "R3-W", "name": "Every LeadershipStrip card a keyboard-focusable drill-through", "status": "done", "note": "background worktree agent; DrillTarget union + onDrill; App wires orders->table, oldest-stuck->why, inventory->panel" }
+    { "unit": "R3-5", "issue": 65, "phase": "R3-W", "name": "Every LeadershipStrip card a keyboard-focusable drill-through", "status": "done", "note": "background worktree agent; DrillTarget union + onDrill; App wires orders->table, oldest-stuck->why, inventory->panel" },
+
+    { "unit": "EXR-1", "issue": 70, "phase": "EXR", "name": "Executable remediation Tier 1: live path for existing middleware endpoints (ADR-0010)", "status": "review", "note": "disarmed by default (REMEDIATION_LIVE_ENABLED false + REMEDIATION_KILL_SWITCH); live authenticated POST for middleware_endpoint tools, per-action Confirm-and-run, append-only audit log (no secrets); gated tools add NAV_TOGGLE_PASSWORD (recovery_sweep only documented gate); stuck_staging_dedupe held out (row delete, no rollback); ops_runbook never mutates; aggregator no-auto-fire preserved; 8 node:test invariants, 275 pass. Branch exec-remediation/tier1 off round-3/fs-ui; PR not opened, not merged; not armed. Tier 2 runner #71 not built." }
   ]
 }

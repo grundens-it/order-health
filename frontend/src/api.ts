@@ -60,17 +60,21 @@ export function fetchRemediationRegistry(): Promise<RemediationRegistryResponse>
   return getJson<RemediationRegistryResponse>('/api/remediation/registry');
 }
 
-// Operator trigger. Fires ONLY on an explicit operator action (a button press in
-// the modal). The backend invokes the middleware's EXISTING endpoint via a stubbed
-// client and returns a typed 'would_trigger' result; no live call is made in v1.
+// Operator trigger. Fires ONLY on an explicit operator action in the modal. The
+// backend is DISARMED by default (ADR-0010): with confirmed:true it fires the
+// middleware's EXISTING authenticated endpoint when the path is armed, otherwise it
+// returns a typed 'would_trigger' preview and makes no live call. `confirmed` is the
+// per-action operator sign-off; the modal only sets it on the explicit second-step
+// "Confirm and run" click.
 export async function triggerRemediation(
   toolId: string,
   subject: { subjectKind: 'pipe' | 'signal' | 'order'; subjectKey: string } | null,
+  confirmed: boolean,
 ): Promise<RemediationTriggerResult> {
   const res = await fetch(`/api/remediation/${encodeURIComponent(toolId)}/trigger`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(subject ?? {}),
+    body: JSON.stringify({ ...(subject ?? {}), confirmed }),
   });
   if (!res.ok) {
     throw new Error(`remediation trigger responded ${res.status}`);

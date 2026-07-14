@@ -58,6 +58,71 @@ function callShape(tool: RemediationTool): string {
   return '';
 }
 
+// The exact call an operator is about to authorise, spelled out for the two-step
+// confirm (method / path / target / params). No native confirm() is ever used.
+function ConfirmPanel({
+  tool,
+  subject,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  tool: RemediationTool;
+  subject: RemediationSubject;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}): JSX.Element {
+  const ep = tool.endpoint;
+  const held = ep?.heldFromLivePath === true;
+  const gated = ep?.gated === true;
+  return (
+    <div className="rm-confirm" role="group" aria-label="Confirm and run">
+      <div className="rm-confirm-hd">Confirm and run</div>
+      <p className="rm-confirm-lead">
+        This authorises the exact call below. It runs only if remediation is armed on
+        the server; otherwise the server returns a disarmed preview and makes no live call.
+      </p>
+      <div className="rm-confirm-rows">
+        <div className="rm-why-row">
+          <span className="rm-k">Method</span>
+          <span className="rm-v mono">{ep ? ep.method : 'ops runbook (no live call)'}</span>
+        </div>
+        <div className="rm-why-row">
+          <span className="rm-k">Path</span>
+          <span className="rm-v mono">{ep ? ep.path : tool.runbook?.ref ?? '—'}</span>
+        </div>
+        <div className="rm-why-row">
+          <span className="rm-k">Target</span>
+          <span className="rm-v mono">
+            {subject.subjectKind}:{subject.subjectKey}
+          </span>
+        </div>
+        <div className="rm-why-row">
+          <span className="rm-k">Params</span>
+          <span className="rm-v mono">
+            set_by=order-health-operator{gated ? ' + NAV_TOGGLE_PASSWORD (write-gate)' : ''}
+          </span>
+        </div>
+      </div>
+      {held && (
+        <div className="rm-err">
+          Held out of the live path: {ep?.heldReason ?? 'destructive action, no rollback'}. This
+          returns a preview only and never fires.
+        </div>
+      )}
+      <div className="rm-actions">
+        <button className="rm-btn" onClick={onConfirm} disabled={busy}>
+          {busy ? 'Running...' : 'Confirm and run'}
+        </button>
+        <button className="rm-btn ghost" onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ToolCard({
   mapping,
   tool,
@@ -75,20 +140,25 @@ function ToolCard({
 }): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Two-step confirm: the first click arms this card's Confirm panel; only the
+  // explicit "Confirm and run" click POSTs with confirmed:true (ADR-0010).
+  const [confirming, setConfirming] = useState(false);
 
-  async function onTrigger(): Promise<void> {
+  async function onConfirmRun(): Promise<void> {
     setBusy(true);
     setError(null);
     try {
-      const result = await triggerRemediation(tool.id, {
-        subjectKind: subject.subjectKind,
-        subjectKey: subject.subjectKey,
-      });
+      const result = await triggerRemediation(
+        tool.id,
+        { subjectKind: subject.subjectKind, subjectKey: subject.subjectKey },
+        true, // confirmed: this is the explicit second-step sign-off
+      );
       onResult(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'trigger failed');
     } finally {
       setBusy(false);
+      setConfirming(false);
     }
   }
 
@@ -111,11 +181,21 @@ function ToolCard({
       <p className="rm-when">Applies when: {mapping.appliesWhen}</p>
       <pre className="rm-call">{callShape(tool)}</pre>
       {error !== null && <div className="rm-err">{error}</div>}
-      <div className="rm-actions">
-        <button className="rm-btn" onClick={() => void onTrigger()} disabled={busy}>
-          {busy ? 'Triggering...' : `Trigger: ${tool.name}`}
-        </button>
-      </div>
+      {confirming ? (
+        <ConfirmPanel
+          tool={tool}
+          subject={subject}
+          busy={busy}
+          onConfirm={() => void onConfirmRun()}
+          onCancel={() => setConfirming(false)}
+        />
+      ) : (
+        <div className="rm-actions">
+          <button className="rm-btn" onClick={() => setConfirming(true)} disabled={busy}>
+            {`Trigger: ${tool.name}`}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -227,8 +307,17 @@ export function RemediationModal({
           )}
           {result !== null ? (
             <div className="rm-result" role="status">
-              <div className="rm-result-badge">would trigger</div>
+              <div className={`rm-result-badge s-${result.status}`}>
+                {result.status === 'triggered'
+                  ? 'triggered'
+                  : result.status === 'error'
+                    ? 'trigger failed'
+                    : 'would trigger'}
+              </div>
               <p className="rm-result-msg">{result.message}</p>
+              {result.status === 'error' && result.error !== undefined && (
+                <div className="rm-err">{result.error}</div>
+              )}
               <div className="rm-result-row">
                 <span className="rm-k">Tool</span>
                 <span className="rm-v">{result.toolName}</span>

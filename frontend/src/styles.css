@@ -51,6 +51,11 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-size: 14px; lin
 .kpi .edge { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--slate); }
 .kpi.g .edge { background: var(--green); } .kpi.a .edge { background: var(--amber); } .kpi.r .edge { background: var(--red); }
 .kpi.g .val { color: var(--green); } .kpi.a .val { color: var(--amber); } .kpi.r .val { color: var(--red); }
+/* Drill-through cards (Unit 5, #65): each KPI is a real <button>. Reset the
+   button chrome back to the card look, then add a pointer + hover + focus ring. */
+.kpi.kpi-drill { font: inherit; text-align: left; color: inherit; width: 100%; cursor: pointer; transition: border-color .12s ease, background .12s ease; }
+.kpi.kpi-drill:hover { border-color: var(--dash); background: var(--hover); }
+.kpi.kpi-drill:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
 
 /* --- Pipe card metric rows (ported from the demo) ------------------------- */
 .pipe .metrics { margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }

@@ -422,18 +422,27 @@ class ShopifyClientLive implements ShopifyClient {
 
   async getFsInventory(skus: string[]): Promise<ShopifyFsInventory[]> {
     if (skus.length === 0) return [];
-    const q = skus.map((s) => `sku:${JSON.stringify(s)}`).join(' OR ');
-    // The FS location is hidden from locations(); we read each variant's inventory
-    // levels (which DO include the FS location) and select it by name downstream.
+    // The Admin GraphQL productVariants(first: 100) caps each query at 100 variants,
+    // so chunk the SKU set into batches of 100 and merge. The FS location is hidden
+    // from locations(); we read each variant's inventory levels (which DO include the
+    // FS location) and select it by name downstream.
     const gql =
       `query($q: String!) { productVariants(first: 100, query: $q) { edges { node { sku ` +
       `inventoryItem { inventoryLevels(first: 20) { edges { node { location { name } ` +
       `quantities(names: ["available", "on_hand", "committed"]) { name quantity } } } } } } } } }`;
-    try {
-      return mapFsInventory(await this.query(gql, { q }), FS_LOCATION_NAME);
-    } catch (err) {
-      return this.degrade('FS-location inventory', err, this.stub.getFsInventory(skus));
+    const out: ShopifyFsInventory[] = [];
+    for (let i = 0; i < skus.length; i += 100) {
+      const batch = skus.slice(i, i + 100);
+      const q = batch.map((s) => `sku:${JSON.stringify(s)}`).join(' OR ');
+      try {
+        out.push(...mapFsInventory(await this.query(gql, { q }), FS_LOCATION_NAME));
+      } catch (err) {
+        // Degrade this batch once to the stub (empty), but keep any batches that did
+        // succeed so a partial Shopify failure never zeroes the whole read.
+        this.degrade('FS-location inventory', err, this.stub.getFsInventory(batch));
+      }
     }
+    return out;
   }
 }
 

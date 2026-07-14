@@ -531,10 +531,26 @@ async function classifyAwaitingShipOrders(sources: Sources, orders: OrderHealth[
     navOnHandBySku.set(a.sku, (navOnHandBySku.get(a.sku) ?? 0) + a.availableQty);
   }
 
-  // FS-location available per SKU, for the SKUs on these orders (bounded).
-  const skuSet = new Set<string>();
-  for (const arr of linesByOrder.values()) for (const l of arr) if (l.sku) skuSet.add(l.sku);
-  const fsLevels = await sources.shopify.getFsInventory([...skuSet].slice(0, 250));
+  // FS-location available per SKU. Prioritize the RED (genuine stall) orders' SKUs so
+  // the FS floor-at-zero bug is always detected for them even under a bounded read;
+  // amber orders fill the remainder. The client chunks the read by 100 (the GraphQL
+  // productVariants cap), so a larger bound is a few queries, not a truncation.
+  const ordered = [...orders].sort(
+    (a, b) => Number(b.order_verdict === 'red') - Number(a.order_verdict === 'red'),
+  );
+  const skuList: string[] = [];
+  const seen = new Set<string>();
+  for (const o of ordered) {
+    const arr = o.nav_order_no !== null ? (linesByOrder.get(o.nav_order_no) ?? []) : [];
+    for (const l of arr) {
+      if (l.sku !== null && !seen.has(l.sku)) {
+        seen.add(l.sku);
+        skuList.push(l.sku);
+      }
+    }
+    if (skuList.length >= 500) break;
+  }
+  const fsLevels = await sources.shopify.getFsInventory(skuList);
   const fsBySku = new Map<string, number | null>();
   for (const f of fsLevels) fsBySku.set(f.sku, f.available);
 

@@ -66,12 +66,19 @@ export interface Config {
     orderLayerCron: string;
     inventoryLayerCron: string;
   };
-  // Remediation (Unit 7, design.md 5A.4). OPERATOR-triggered only. The operator
-  // token gates the POST trigger endpoint in THIS service; the actual middleware
-  // call is DevOps-gated and stubbed. When operatorToken is empty (scaffold), the
-  // gate logs and allows so the demo works without provisioning.
+  // Remediation (Unit 7 + ADR-0010 executable Tier 1). OPERATOR-triggered only.
+  // The operator token gates the POST trigger endpoint in THIS service. The
+  // executable path is DISARMED by default: liveEnabled must be explicitly true
+  // AND killSwitch false for any live middleware call to fire; otherwise every
+  // trigger returns 'would_trigger' exactly as the stub did. togglePassword is the
+  // NAV write-gate the middleware requires on its gated endpoints (recovery
+  // replay), sent ONLY on those and NEVER logged. This service never arms itself:
+  // arming is a deliberate, out-of-band posture (ADR-0010), never a UI toggle.
   remediation: {
     operatorToken: string;
+    liveEnabled: boolean;   // REMEDIATION_LIVE_ENABLED (default false = disarmed)
+    killSwitch: boolean;    // REMEDIATION_KILL_SWITCH (default false; true forces disarmed)
+    togglePassword: string; // NAV_TOGGLE_PASSWORD (sent only on gated endpoints; never logged)
   };
   // Inventory Sync Monitor thresholds (design.md 5A). Never hardcoded: the three
   // verdict bands (freshness, liveness, dry-run divergence) are all tuned here so
@@ -202,6 +209,12 @@ export const config: Config = {
   },
   remediation: {
     operatorToken: str('REMEDIATION_OPERATOR_TOKEN'),
+    // DISARMED by default (ADR-0010). Both must line up for a live call: armed
+    // (liveEnabled true) AND not kill-switched. Never armed in a committed .env.
+    liveEnabled: bool('REMEDIATION_LIVE_ENABLED', false),
+    killSwitch: bool('REMEDIATION_KILL_SWITCH', false),
+    // The middleware's NAV write-gate password; empty until DevOps provisions it.
+    togglePassword: str('NAV_TOGGLE_PASSWORD'),
   },
   inventorySync: {
     // Defaults: green under one cycle, amber one to two cycles, red beyond.

@@ -9,7 +9,7 @@ import type {
 } from '@order-health/shared';
 import { detectRemediationTool } from '@order-health/shared';
 import { ApiError, fetchOrders, fetchPipelines, fetchRemediationRegistry, fetchRollup } from './api';
-import { LeadershipStrip } from './components/LeadershipStrip';
+import { LeadershipStrip, type DrillTarget } from './components/LeadershipStrip';
 import { PipelineStrip } from './components/PipelineStrip';
 import { RemediationModal, type RemediationSubject } from './components/RemediationModal';
 import { InventoryPanel } from './components/InventoryPanel';
@@ -124,7 +124,9 @@ export function App(): JSX.Element {
   const [pipelines, setPipelines] = useState<PipelineHealth[]>([]);
   const [orders, setOrders] = useState<OrderHealth[]>([]);
   const [rollup, setRollup] = useState<LeadershipRollup | null>(null);
-  const [rollupAsOf, setRollupAsOf] = useState<string | null>(null);
+  // The rollup snapshot time is still tracked for the fetch flow; the strip no
+  // longer displays it (the band's "Snapshot as of" shows it), so only the setter is kept.
+  const [, setRollupAsOf] = useState<string | null>(null);
   const [asOf, setAsOf] = useState<string | null>(null);
   // Health-fidelity Unit 7: carry the failure MODE, not just a message, so the
   // banner can tell "backend down / unreachable" apart from "backend up but errored
@@ -271,6 +273,28 @@ export function App(): JSX.Element {
     });
   };
 
+  // Unit 5: drill through from a leadership card to the underlying items, carrying
+  // the "why". An orders card jumps to the order table filtered to that verdict; the
+  // oldest-stuck card opens the oldest red order's why; the inventory card opens its panel.
+  const onDrill = (t: DrillTarget): void => {
+    if (t.kind === 'inventory_sync') {
+      setTab('inventory');
+      return;
+    }
+    if (t.kind === 'orders') {
+      setTab('orderhealth');
+      setAttention(t.verdict === 'green' ? 'all' : 'attn');
+      return;
+    }
+    // oldest_stuck: jump to the order table and open the oldest red order's why.
+    setTab('orderhealth');
+    const reds = orders.filter((o) => o.order_verdict === 'red' && o.oldest_stuck_age_s !== null);
+    if (reds.length > 0) {
+      const oldest = reds.reduce((a, b) => ((b.oldest_stuck_age_s ?? 0) > (a.oldest_stuck_age_s ?? 0) ? b : a));
+      openOrderRemediation(oldest);
+    }
+  };
+
   return (
     <>
       <div className="band">
@@ -341,7 +365,7 @@ export function App(): JSX.Element {
 
         {tab === 'orderhealth' && (
           <>
-            <LeadershipStrip rollup={rollup} asOf={rollupAsOf} />
+            <LeadershipStrip rollup={rollup} onDrill={onDrill} />
             <PipelineStrip pipelines={pipelines} onRemediate={openPipeRemediation} />
 
             <div className="sec">

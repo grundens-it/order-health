@@ -50,6 +50,21 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-size: 14px; lin
 .searchctl { background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 12.5px; min-width: 190px; }
 .searchctl:focus-visible, .selctl select:focus-visible { outline: 2px solid var(--orange); outline-offset: -1px; }
 
+/* --- Leadership rollup KPI cards (ported from the demo) -------------------- */
+.rollup { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+.kpi { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 15px; position: relative; overflow: hidden; }
+.kpi .lab { font-size: 11.5px; color: var(--muted); font-weight: 600; letter-spacing: .02em; }
+.kpi .val { font-size: 26px; font-weight: 700; margin-top: 8px; letter-spacing: -.01em; }
+.kpi .sub { font-size: 11.5px; color: var(--faint); margin-top: 3px; }
+.kpi .edge { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--slate); }
+.kpi.g .edge { background: var(--green); } .kpi.a .edge { background: var(--amber); } .kpi.r .edge { background: var(--red); }
+.kpi.g .val { color: var(--green); } .kpi.a .val { color: var(--amber); } .kpi.r .val { color: var(--red); }
+/* Drill-through cards (Unit 5, #65): each KPI is a real <button>. Reset the
+   button chrome back to the card look, then add a pointer + hover + focus ring. */
+.kpi.kpi-drill { font: inherit; text-align: left; color: inherit; width: 100%; cursor: pointer; transition: border-color .12s ease, background .12s ease; }
+.kpi.kpi-drill:hover { border-color: var(--dash); background: var(--hover); }
+.kpi.kpi-drill:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+
 /* Clickable order rows -> remediation. */
 tr.clickable { cursor: pointer; }
 tr.clickable:hover { background: var(--sunken); }

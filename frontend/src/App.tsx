@@ -68,6 +68,56 @@ const STAGE_OPTIONS: ReadonlyArray<readonly [LifecycleStage, string]> = [
 type RowCount = 25 | 50 | 100 | 'all';
 const ROW_COUNTS: readonly RowCount[] = [25, 50, 100, 'all'];
 
+// Unit 4 "why" builders. Turn a subject's verdict + detail into a one-line reason
+// plus supporting rows the modal shows FIRST. Read-only, pure UI derivation.
+function humanAgeShort(s: number | null): string {
+  if (s === null) return 'n/a';
+  const d = s / 86400;
+  if (d >= 1) return `${d.toFixed(1)}d`;
+  const h = s / 3600;
+  if (h >= 1) return `${h.toFixed(1)}h`;
+  return `${Math.round(s / 60)}m`;
+}
+
+function pipeWhy(pipe: PipelineHealth, label: string): { why: string; details: { k: string; v: string }[] } {
+  const parts: string[] = [];
+  if (pipe.freshness_verdict !== 'green' && pipe.freshness_verdict !== 'unknown') {
+    parts.push(`freshness ${pipe.freshness_verdict}`);
+  }
+  if (pipe.liveness_verdict !== 'green' && pipe.liveness_verdict !== 'unknown') {
+    parts.push(`liveness ${pipe.liveness_verdict}`);
+  }
+  const why = `${label} is ${pipe.pipe_verdict}${parts.length > 0 ? ': ' + parts.join(', ') : ''}`;
+  const details: { k: string; v: string }[] = [
+    { k: 'Freshness', v: pipe.freshness_verdict },
+    { k: 'Liveness', v: pipe.liveness_verdict },
+  ];
+  if (pipe.watermark_lag_s !== null) details.push({ k: 'Watermark lag', v: humanAgeShort(pipe.watermark_lag_s) });
+  if (pipe.heartbeat_age_s !== null) details.push({ k: 'Heartbeat age', v: humanAgeShort(pipe.heartbeat_age_s) });
+  return { why, details };
+}
+
+function orderWhy(o: OrderHealth): { why: string; details: { k: string; v: string }[]; nextStep?: string } {
+  const d = o.awaiting_ship_detail ?? null;
+  const why = d?.why ?? o.note ?? `${o.current_stage} - ${o.order_verdict}`;
+  const details: { k: string; v: string }[] = [
+    { k: 'Stage', v: o.current_stage },
+    { k: 'Age', v: humanAgeShort(o.oldest_stuck_age_s) },
+  ];
+  if (d !== null) {
+    details.push({ k: 'Classification', v: d.classification });
+    if (d.fs_available !== null) details.push({ k: 'FS available', v: String(d.fs_available) });
+    if (d.nav_warehouse_on_hand !== null) details.push({ k: 'Warehouse on-hand', v: String(d.nav_warehouse_on_hand) });
+    if (d.sample_sku !== null) details.push({ k: 'SKU', v: d.sample_sku });
+  }
+  // A plain next step for the classifications with no automated tool.
+  let nextStep: string | undefined;
+  if (o.classification === 'genuine_3pl_delay') nextStep = 'chase the 3PL: the order is in stock and past the SLO.';
+  else if (o.classification === 'backordered') nextStep = 'restock the short SKU; no fulfillment can ship missing stock.';
+  else if (o.classification === 'orphan_or_return') nextStep = 'no NAV order backs this record; hand it to the returns / data team.';
+  return { why, details, nextStep };
+}
+
 export function App(): JSX.Element {
   const [tab, setTab] = useState<TabKey>('orderhealth');
   const [channel, setChannel] = useState<ChannelFilterValue>('all');
@@ -183,28 +233,41 @@ export function App(): JSX.Element {
     // present the detected tool becomes "Recommended"; otherwise the modal falls
     // back to the static primary. Pure, read-only: NAMES a tool, triggers nothing.
     const detected = detectRemediationTool(pipe.pipe, pipe);
+    const w = pipeWhy(pipe, PIPE_LABELS[pipe.pipe] ?? pipe.pipe);
     setRemediationSubject({
       subjectKind: 'pipe',
       subjectKey: pipe.pipe,
       label: PIPE_LABELS[pipe.pipe] ?? pipe.pipe,
       detectedToolId: detected?.toolId,
       detectionReason: detected?.reason,
+      verdict: pipe.pipe_verdict,
+      why: w.why,
+      details: w.details,
     });
   };
 
-  // Clicking an order opens its remediation tool. The order-level signal is
-  // derived from the stage it is stuck at (matches the registry's signal keys).
+  // Clicking an order opens its "why" (always) plus any mapped tool. Unit 4: an
+  // FS-floored awaiting_ship order routes to the FS re-floor (subjectKey
+  // fs_floor_at_zero), not a fulfillment tool; other orders derive the signal from
+  // the stage they are stuck at (matching the registry's signal keys).
   const openOrderRemediation = (o: OrderHealth): void => {
     const signal =
-      o.current_stage === 'back_sync'
-        ? 'missed_back_sync'
-        : o.current_stage === 'nav_staging'
-          ? 'nav_staging_stuck'
-          : o.current_stage;
+      o.classification === 'fs_floor_at_zero'
+        ? 'fs_floor_at_zero'
+        : o.current_stage === 'back_sync'
+          ? 'missed_back_sync'
+          : o.current_stage === 'nav_staging'
+            ? 'nav_staging_stuck'
+            : o.current_stage;
+    const w = orderWhy(o);
     setRemediationSubject({
       subjectKind: 'order',
       subjectKey: signal,
       label: o.nav_order_no ?? o.shopify_order_name ?? o.customer_ref ?? 'order',
+      verdict: o.order_verdict,
+      why: w.why,
+      details: w.details,
+      nextStep: w.nextStep,
     });
   };
 

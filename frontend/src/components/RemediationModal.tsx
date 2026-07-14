@@ -4,6 +4,7 @@ import type {
   RemediationRegistry,
   RemediationTool,
   RemediationTriggerResult,
+  Verdict,
 } from '@order-health/shared';
 import { triggerRemediation } from '../api';
 
@@ -26,6 +27,20 @@ export interface RemediationSubject {
   // fall back to the static primary mapping.
   detectedToolId?: string;
   detectionReason?: string;
+  // Round 3 (Unit 4): the HEALTH reason, so the modal always explains WHY first.
+  // The opener builds these from the subject's verdict + detail (pipe: the failing
+  // sub-verdict + numbers + threshold; order: stage + age + the FS classification).
+  verdict?: Verdict;                     // the subject's verdict (red / amber / ...)
+  why?: string;                          // one-line "why this is red/amber"
+  details?: { k: string; v: string }[]; // supporting numbers (age, FS available, threshold, ...)
+  nextStep?: string;                     // a plain next step, shown when no tool is mapped
+}
+
+function verdictWord(v: Verdict | undefined): string {
+  if (v === 'red') return 'red';
+  if (v === 'amber') return 'amber';
+  if (v === 'green') return 'green';
+  return 'flagged';
 }
 
 function toolFor(registry: RemediationRegistry, toolId: string): RemediationTool | null {
@@ -191,6 +206,25 @@ export function RemediationModal({
           </button>
         </div>
         <div className="rm-mb">
+          {/* Unit 4: the "why" block is ALWAYS first, built from the subject's verdict
+              + detail, so clicking any red/amber item explains itself even when no
+              remediation tool is mapped. */}
+          {subject.why !== undefined && (
+            <div className={`rm-why v-${verdictWord(subject.verdict)}`}>
+              <div className="rm-why-hd">Why this is {verdictWord(subject.verdict)}</div>
+              <p className="rm-why-text">{subject.why}</p>
+              {subject.details !== undefined && subject.details.length > 0 && (
+                <div className="rm-why-rows">
+                  {subject.details.map((d) => (
+                    <div className="rm-why-row" key={d.k}>
+                      <span className="rm-k">{d.k}</span>
+                      <span className="rm-v">{d.v}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {result !== null ? (
             <div className="rm-result" role="status">
               <div className="rm-result-badge">would trigger</div>
@@ -218,7 +252,12 @@ export function RemediationModal({
               </div>
             </div>
           ) : cards.length === 0 ? (
-            <p className="rm-desc">No remediation is mapped for this signal.</p>
+            <div className="rm-nostep">
+              <p className="rm-desc">No automated remediation tool is mapped for this item.</p>
+              <p className="rm-when">
+                Next step: {subject.nextStep ?? 'investigate the item above and hand it to the owning team; nothing here can be triggered.'}
+              </p>
+            </div>
           ) : (
             cards.map(({ mapping, tool, recommended }) => (
               <ToolCard

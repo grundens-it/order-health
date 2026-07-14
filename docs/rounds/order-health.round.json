@@ -25,6 +25,14 @@
     "result": "live re-grade: 5 of 6 pipes read correctly green/neutral (was zero green); inventory_sync freshness+liveness green, remaining amber is the amber-capped divergence; order layer 989 false reds down to 40 genuine aged stalls. Real NAV + real middleware + live Shopify.",
     "note": "branch pushed; PRs not opened, not merged to main, per the kickoff"
   },
+  "round3": {
+    "name": "fs-classification-remediation-why-ui",
+    "brief": "docs/kickoffs/round-3-fs-classification-ui-kickoff.md",
+    "branch": "round-3/fs-ui (off integration/health-fidelity)",
+    "umbrella_context": "issues #61-#65",
+    "result": "live-confirmed: 32 of 34 awaiting_ship reds classify fs_floor_at_zero (Shopify FS-location available < 0 while NAV warehouse stocked; the Symmetry floor-at-zero bug), the other 2 are genuine 3PL delays; 8 Happy Returns (Document Type 5) reclassified out of awaiting_ship (0 graded a stall); fs_floor_at_zero maps to an FS re-floor runbook (ADR-0003), not back_sync; the modal always shows the why first; every leadership card drills through. Real NAV + live Shopify.",
+    "note": "Unit 5 fanned out to a background worktree agent while Units 3+4 ran in the main context. Branch pushed; PRs not opened, not merged to main."
+  },
   "kickoff_pr": 1,
   "stack": {
     "adr": "ADR-0004",
@@ -56,7 +64,10 @@
     "INT-F": "integration foundation (2026-07-13): merge onto real middleware client, resolve, ADR housekeeping",
     "INT-W": "integration fan-out: Shopify client + reconciliations, job-queue source fix",
     "INT-R": "integration research-first: residual order red-rate verification then fix",
-    "INT-C": "integration convergence: typecheck + test, live end-to-end re-grade, push (no PRs)"
+    "INT-C": "integration convergence: typecheck + test, live end-to-end re-grade, push (no PRs)",
+    "R3-F": "round 3 foundation: FS classifier + returns exclusion (shared order ingest)",
+    "R3-W": "round 3 fan-out: remediation fold-in + FS re-floor, why-modal, leadership drill-through (Unit 5 a background agent)",
+    "R3-C": "round 3 convergence: typecheck + test, live FS-classification confirm, push (no PRs)"
   },
   "units": [
     { "unit": 0, "issue": 3, "phase": "F", "name": "Foundation scaffold", "status": "done", "pr": 12, "merged": true },
@@ -86,6 +97,12 @@
     { "unit": "INT-B", "issue": 55, "phase": "INT-W", "name": "Read-only Shopify Admin client + reconciliations (ADR-0009)", "status": "done", "note": "GraphQL query-only, mutation guard, client-credentials token manager, live/stub factory; pure mappers + 4 reconcilers unit-tested; back_sync + inventory wired live; token verified live" },
     { "unit": "INT-C", "issue": 47, "phase": "INT-W", "name": "nav_job_queue stuck-job from Job Queue Entry current state", "status": "done", "note": "sources the in-process signal from GRUS$Job Queue Entry (live), not the stale Job Queue Log Entry audit trail; regression test for the stale-log false RED" },
     { "unit": "INT-D", "issue": 57, "phase": "INT-R", "name": "Verify + fix the residual order-layer red rate (~532)", "status": "done", "note": "research-first finding docs/business/order-layer-residual-red-finding-2026-07-13.md; staging Status=1 is normal (Not Auto-released), not a per-order fault; live red 533 -> 40 genuine aged stalls" },
-    { "unit": "INT-F", "issue": 59, "phase": "INT-C", "name": "End-to-end re-grade all six pipes on real sources", "status": "done", "note": "docs/business/health-fidelity-integration-regrade-2026-07-13.md; live real NAV + middleware + Shopify; 5 of 6 pipes correct green/neutral (was zero green), order layer 989 -> 40 genuine reds; remediation disarmed" }
+    { "unit": "INT-F", "issue": 59, "phase": "INT-C", "name": "End-to-end re-grade all six pipes on real sources", "status": "done", "note": "docs/business/health-fidelity-integration-regrade-2026-07-13.md; live real NAV + middleware + Shopify; 5 of 6 pipes correct green/neutral (was zero green), order layer 989 -> 40 genuine reds; remediation disarmed" },
+
+    { "unit": "R3-1", "issue": 64, "phase": "R3-F", "name": "FS-location-aware awaiting_ship classification", "status": "done", "note": "shopifyClient getFsInventory resolves the FS location by name (hidden from locations()); pure classifier fs_floor_at_zero / backordered / genuine_3pl_delay / orphan_or_return; live: 32 of 34 reds classify fs_floor_at_zero" },
+    { "unit": "R3-2", "issue": 63, "phase": "R3-F", "name": "Exclude Happy Returns / non-sales from awaiting_ship", "status": "done", "note": "Document Type 5 (HR-) reclassified as return, never a stall; live: 8 reclassified, 0 graded a stall" },
+    { "unit": "R3-3", "issue": 61, "phase": "R3-W", "name": "Fold remediation tool-detection + FS re-floor + 3 findings", "status": "done", "note": "detect engine folded in; fs_floor_at_zero -> FS re-floor runbook (ADR-0003), not back_sync; nav_staging_stuck Not-Auto-released gap, close_unfulfilled_fos safety, webhook_resubscribe vs outcome closed" },
+    { "unit": "R3-4", "issue": 62, "phase": "R3-W", "name": "Clicking any unhealthy/at-risk item always explains WHY", "status": "done", "note": "RemediationModal renders a why block first from verdict+detail; plain next-step when no tool; FS-floored order routes to the FS re-floor" },
+    { "unit": "R3-5", "issue": 65, "phase": "R3-W", "name": "Every LeadershipStrip card a keyboard-focusable drill-through", "status": "done", "note": "background worktree agent; DrillTarget union + onDrill; App wires orders->table, oldest-stuck->why, inventory->panel" }
   ]
 }

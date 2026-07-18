@@ -7,6 +7,7 @@ import Fastify from 'fastify';
 import { config } from './config';
 import { registerHealthRoutes } from './api/health';
 import { registerRemediationRoutes } from './api/remediation';
+import { registerStaticServing } from './api/static';
 import { startAggregator } from './aggregator';
 
 async function main(): Promise<void> {
@@ -20,6 +21,9 @@ async function main(): Promise<void> {
 
   await registerHealthRoutes(app);
   await registerRemediationRoutes(app);
+  // Production static serving of the built frontend (ADR-0011 single container).
+  // Registered AFTER the API routes so /api/* always wins; a no-op in dev.
+  await registerStaticServing(app);
 
   const tasks = startAggregator();
 

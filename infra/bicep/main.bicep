@@ -61,6 +61,9 @@ param imageTag string = 'latest'
 @description('Key Vault holding this service secrets. Created by this template; own vault in this RG.')
 param keyVaultName string = 'kv-order-health-prod-01'
 
+@description('Operator/ops object id to keep get/list/set access on the vault across deploys. Object ids are not secret. Empty skips the operator policy.')
+param operatorObjectId string = ''
+
 @description('KV secret holding the full DATABASE_URL. The URL embeds the password, so the whole URL is the secret.')
 param databaseUrlSecretName string = 'order-health-database-url'
 
@@ -224,19 +227,35 @@ resource app 'Microsoft.Web/sites@2023-12-01' = {
 // vaults/accessPolicies 'add' referencing the app principalId, which only
 // resolves after the app exists: kv -> app -> this. No cycle, and the deploy
 // identity needs only Contributor (no Key Vault data-plane role).
+// One 'add' resource carries every policy we want present after each deploy: the
+// app identity (get/list) and, when provided, the operator (get/list/set/delete)
+// so a redeploy never strips human access from the vault. 'add' appends, but the
+// vault above is created with accessPolicies [], so the net after each deploy is
+// exactly this set: deterministic and non-destructive to these principals.
 resource kvAppPolicy 'Microsoft.KeyVault/vaults/accessPolicies@2023-07-01' = {
   parent: kv
   name: 'add'
   properties: {
-    accessPolicies: [
-      {
-        tenantId: subscription().tenantId
-        objectId: app.identity.principalId
-        permissions: {
-          secrets: [ 'get', 'list' ]
+    accessPolicies: concat(
+      [
+        {
+          tenantId: subscription().tenantId
+          objectId: app.identity.principalId
+          permissions: {
+            secrets: [ 'get', 'list' ]
+          }
         }
-      }
-    ]
+      ],
+      empty(operatorObjectId) ? [] : [
+        {
+          tenantId: subscription().tenantId
+          objectId: operatorObjectId
+          permissions: {
+            secrets: [ 'get', 'list', 'set', 'delete' ]
+          }
+        }
+      ]
+    )
   }
 }
 

@@ -18,6 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { config, hasDatabase } from '../config.js';
+import { pgConnectionConfig } from './pgConfig.js';
 
 // The migrations ship at <image>/db/migrations. This module lives at
 // backend/src/db/migrate.ts, so three levels up is the repo/app root in both the
@@ -83,7 +84,7 @@ export async function runMigrations(
     return;
   }
 
-  const client = new pg.Client({ connectionString: config.database.url });
+  const client = new pg.Client(pgConnectionConfig(config.database.url));
   await client.connect();
   try {
     const reg = await client.query<{ reg: string | null }>(

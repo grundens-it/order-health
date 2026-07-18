@@ -52,15 +52,14 @@ param imageRepository string = 'order-health'
 param imageTag string = 'latest'
 
 // --- Key Vault -----------------------------------------------------------
-// Order health OWNS its vault, in its own resource group. The deploy script
-// creates it (access-policy model) and grants the app identity get/list secrets
-// in -Stage grant. Bicep only references it and wires the KV references, so the
-// deploy identity needs no Key Vault permissions of its own.
-@description('Key Vault holding this service secrets. Created by the deploy script; own vault in this RG.')
+// Order health OWNS its vault, in its own resource group. Bicep now CREATES the
+// vault (access-policy model) AND grants the app's system-assigned identity
+// get/list on secrets in this same template, so the KV structure and the app
+// grant are pipeline-native. Only the secret VALUES are seeded out of band
+// (bootstrap), since their origin is inherently a secret (the generated Postgres
+// password and the Shopify client secret). See the reconcile note in the PR.
+@description('Key Vault holding this service secrets. Created by this template; own vault in this RG.')
 param keyVaultName string = 'kv-order-health-prod-01'
-
-@description('Resource group of the Key Vault. Same as the app RG (own vault).')
-param keyVaultResourceGroup string = resourceGroup().name
 
 @description('KV secret holding the full DATABASE_URL. The URL embeds the password, so the whole URL is the secret.')
 param databaseUrlSecretName string = 'order-health-database-url'
@@ -118,9 +117,23 @@ resource plan 'Microsoft.Web/serverfarms@2023-12-01' = if (empty(existingPlanRes
 
 var planId = empty(existingPlanResourceId) ? plan.id : existingPlanResourceId
 
-resource kv 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
+// Order health's OWN vault, created here (access-policy model, NOT RBAC, to match
+// the house shared vaults). The app-identity access policy is added below, after
+// the app exists, so principalId resolves without a cycle. Secret VALUES are
+// seeded out of band (bootstrap); this template never carries a secret value.
+resource kv 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: keyVaultName
-  scope: resourceGroup(keyVaultResourceGroup)
+  location: location
+  properties: {
+    tenantId: subscription().tenantId
+    sku: { family: 'A', name: 'standard' }
+    enableRbacAuthorization: false
+    enableSoftDelete: true
+    softDeleteRetentionInDays: 90
+    // Empty at create time. The app-identity get/list policy is added by the
+    // child resource below (kv -> app -> accessPolicies add: no cycle).
+    accessPolicies: []
+  }
 }
 
 resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
@@ -206,10 +219,26 @@ resource app 'Microsoft.Web/sites@2023-12-01' = {
   }
 }
 
-// The app identity is granted get/list on its own vault by the deploy script
-// (-Stage grant, az keyvault set-policy) because the vault uses the access-policy
-// model, not RBAC. No role assignment here, so the deploy identity needs no Key
-// Vault permissions and Bicep stays runnable under plain Contributor.
+// Grant the app's system-assigned identity get/list on secrets, in this same
+// template. Access-policy model (not RBAC), so this is a management-plane
+// vaults/accessPolicies 'add' referencing the app principalId, which only
+// resolves after the app exists: kv -> app -> this. No cycle, and the deploy
+// identity needs only Contributor (no Key Vault data-plane role).
+resource kvAppPolicy 'Microsoft.KeyVault/vaults/accessPolicies@2023-07-01' = {
+  parent: kv
+  name: 'add'
+  properties: {
+    accessPolicies: [
+      {
+        tenantId: subscription().tenantId
+        objectId: app.identity.principalId
+        permissions: {
+          secrets: [ 'get', 'list' ]
+        }
+      }
+    ]
+  }
+}
 
 output appName string = app.name
 output defaultHostname string = app.properties.defaultHostName

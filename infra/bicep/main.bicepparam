@@ -20,11 +20,10 @@ param imageRepository = 'order-health'
 // imageTag is passed on the command line by the workflow (commit SHA).
 param imageTag = 'latest'
 
-// Key Vault: order health owns its own vault in its own RG. The deploy script
-// creates it (access-policy model) and populates the secrets. No REPLACE-ME,
-// nothing to look up: the defaults are correct.
+// Key Vault: order health owns its own vault in this RG. Bicep CREATES the vault
+// (access-policy model) and grants the app identity get/list here; bootstrap only
+// seeds the secret VALUES. No REPLACE-ME, nothing to look up.
 param keyVaultName = 'kv-order-health-prod-01'
-param keyVaultResourceGroup = 'rg-order-health-prod-01'
 
 param databaseUrlSecretName = 'order-health-database-url'
 param shopifyClientSecretName = 'order-health-shopify-client-secret'

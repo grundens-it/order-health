@@ -197,7 +197,10 @@ if ($Stage -eq 'provision') {
         Ok "app registration + sp created ($appId)"
     } else { Ok "exists ($appId)" }
     $tenant = az account show --query tenantId -o tsv
-    $fics = az ad app federated-credential list --id $appId --query "[].name" -o tsv 2>$null
+    # Out-String forces a scalar: `-notmatch` against an empty ARRAY returns an
+    # empty array (falsy), which would wrongly take the "exists" branch on a
+    # brand-new app that has NO federated credentials yet. A string behaves.
+    $fics = (az ad app federated-credential list --id $appId --query "[].name" -o tsv 2>$null | Out-String)
     if ($fics -notmatch 'gh-main') {
         $p = '{\"name\":\"gh-main\",\"issuer\":\"https://token.actions.githubusercontent.com\",\"subject\":\"repo:' + $REPO + ':ref:refs/heads/main\",\"audiences\":[\"api://AzureADTokenExchange\"]}'
         Inv @('az','ad','app','federated-credential','create','--id',$appId,'--parameters',$p) | Out-Null; Ok "fic gh-main"

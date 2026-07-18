@@ -115,6 +115,23 @@ export interface Config {
     failedAmberRatio: number;      // (unallocatable + failed) / decisions above this => AMBER
     failedRedRatio: number;        // ...above this => RED
   };
+  // OOS-held backlog thresholds (WI1 #87). The ALERTING population is transient
+  // rows that are not resolved; backorder-class rows are legitimate and never red.
+  // Depth bands the count of alerting rows; age bands the oldest needs_operator row.
+  oosHeld: {
+    depthAmberCount: number;   // alerting held rows >= this => AMBER
+    depthRedCount: number;     // ...>= this => RED
+    ageAmberSeconds: number;   // oldest needs_operator row age >= this => AMBER
+    ageRedSeconds: number;     // ...>= this => RED
+  };
+  // Per-location availability divergence thresholds (WI2 #88). Count of SKUs NAV
+  // shows stocked at the FS-fed warehouse location (Qty Available > 0) but whose
+  // middleware FS-location availability reads <= 0. Count-banded, allowed to RED.
+  fsDivergence: {
+    navLocationCode: string;    // the NAV location compared against FS (HF1FTZ / Holman)
+    divergedAmberCount: number; // diverged SKUs >= this => AMBER
+    divergedRedCount: number;   // ...>= this => RED
+  };
   // Unit 3 thresholds. Ops owns the numbers; the code reads them.
   // price_sync (design.md 3): freshness (last received) + liveness (last run),
   // both cycle-banded like inventory-sync.
@@ -250,6 +267,24 @@ export const config: Config = {
     // Un-allocatable / failed split share: amber above 5%, red above 15%.
     failedAmberRatio: num('ALLOCATOR_FAILED_AMBER_RATIO', 0.05),
     failedRedRatio: num('ALLOCATOR_FAILED_RED_RATIO', 0.15),
+  },
+  // WI1 (#87): OOS-held backlog. Depth mirrors the job-queue staging bands (a
+  // standing queue of 25 is amber, 100 is red), so the 2026-07-17 backlog of ~173
+  // held reads RED. Age mirrors the awaiting-ship SLO (24h amber, 72h red) applied
+  // to the oldest needs_operator row. backorder-class rows never enter these counts.
+  oosHeld: {
+    depthAmberCount: num('OOS_HELD_DEPTH_AMBER_COUNT', 25),
+    depthRedCount: num('OOS_HELD_DEPTH_RED_COUNT', 100),
+    ageAmberSeconds: num('OOS_HELD_AGE_AMBER_SECONDS', 86400),   // 24h
+    ageRedSeconds: num('OOS_HELD_AGE_RED_SECONDS', 259200),      // 72h
+  },
+  // WI2 (#88): per-location availability divergence. A single diverging SKU is the
+  // leading indicator, so amber fires at 1; a cluster (the limited-edition drop had
+  // a full size run diverging) reds at 5. HF1FTZ (Holman) is the FS-fed warehouse.
+  fsDivergence: {
+    navLocationCode: str('FS_DIVERGENCE_NAV_LOCATION', 'HF1FTZ'),
+    divergedAmberCount: num('FS_DIVERGENCE_AMBER_COUNT', 1),
+    divergedRedCount: num('FS_DIVERGENCE_RED_COUNT', 5),
   },
   // Unit 3: price_sync. Default cycle 1h; green under 1 cycle, amber 1 to 2, red beyond.
   priceSync: {

@@ -7,10 +7,11 @@
 // opens a socket, and nothing here can write upstream (design.md section 0 / 7:
 // sources stay read-only). It is not a `.test.ts` file, so the runner never
 // executes it directly; the test files import makeSeededSources() from it.
-import type { InventoryWalk, MissedShipment } from '@order-health/shared';
+import type { InventoryWalk, MissedShipment, OosHeldOrder } from '@order-health/shared';
 import type {
   AllocatorStatus,
   BackSyncStatus,
+  FsLocationAvailability,
   InventorySyncFeedRow,
   InventorySyncStatus,
   JobQueueHealthStatus,
@@ -65,6 +66,8 @@ export interface BoardSeed {
   orderLines?: NavOrderLine[]; // Round 3: outstanding order lines for FS classification
   inventoryAvailability?: NavInventoryAvailabilityRow[]; // Round 3: NAV warehouse on-hand
   fsInventory?: ShopifyFsInventory[]; // Round 3: Shopify FS-location available per SKU
+  oosHeld?: OosHeldOrder[] | null;    // WI1 (#87): OOS-held backlog rows (default [] => green)
+  fsInfo?: FsLocationAvailability[] | null; // WI2 (#88): FS-location availability (default [] => green)
 }
 
 // A read-only Shopify client backed by the seed: only the FS-inventory read is
@@ -228,6 +231,14 @@ class SeededMiddlewareClient implements MiddlewareClient {
   async getMissedShipmentDetail(): Promise<MissedShipment[] | null> {
     // Default: queried and found none (a genuine green), not null (unknown).
     return this.seed.backSync?.missed ?? [];
+  }
+  async getOosHeldOrders(): Promise<OosHeldOrder[] | null> {
+    // WI1: default queried-and-empty (a genuine green), not null (unknown).
+    return this.seed.oosHeld ?? [];
+  }
+  async getFulfillmentServiceInfo(): Promise<FsLocationAvailability[] | null> {
+    // WI2: default present-and-empty (no divergence => green), not null (unknown).
+    return this.seed.fsInfo ?? [];
   }
 }
 

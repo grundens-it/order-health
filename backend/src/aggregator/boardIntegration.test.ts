@@ -44,7 +44,7 @@ function missed(n: number): MissedShipment[] {
 }
 
 // --- All-green board: healthy headline --------------------------------------
-test('all-green board: every one of the six pipes is green and the headline is healthy/green', async () => {
+test('all-green board: every one of the eight pipes is green and the headline is healthy/green', async () => {
   const now = Date.now();
   const sources = makeSeededSources({
     now,
@@ -55,9 +55,19 @@ test('all-green board: every one of the six pipes is green and the headline is h
   const orders = await computeOrders(sources);
   const rollup = computeRollup(pipes, orders);
 
-  // Every pipe in the fixed strip order is present and green.
-  assert.equal(pipes.length, 6);
-  for (const key of ['inventory_sync', 'back_sync', 'price_sync', 'nav_job_queue', 'shopify_webhook', 'allocator']) {
+  // Every pipe in the fixed strip order is present and green (WI1 oos_held + WI2
+  // fs_location_divergence are added additively; their seeded defaults are green).
+  assert.equal(pipes.length, 8);
+  for (const key of [
+    'inventory_sync',
+    'back_sync',
+    'price_sync',
+    'nav_job_queue',
+    'shopify_webhook',
+    'allocator',
+    'oos_held',
+    'fs_location_divergence',
+  ]) {
     assert.equal(byPipe(pipes, key).pipe_verdict, 'green', `${key} green`);
   }
   // inventory_sync's three sub-verdicts are each green (freshness + liveness green).

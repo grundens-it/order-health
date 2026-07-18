@@ -20,10 +20,11 @@ param imageRepository = 'order-health'
 // imageTag is passed on the command line by the workflow (commit SHA).
 param imageTag = 'latest'
 
-// Key Vault. rg-kv-shared-prod-01 holds the shared prod vault (West US 3).
-// Set keyVaultName to the vault in that group before the first deploy.
-param keyVaultName = 'REPLACE-ME-kv-shared-prod'
-param keyVaultResourceGroup = 'rg-kv-shared-prod-01'
+// Key Vault: order health owns its own vault in its own RG. The deploy script
+// creates it (access-policy model) and populates the secrets. No REPLACE-ME,
+// nothing to look up: the defaults are correct.
+param keyVaultName = 'kv-order-health-prod-01'
+param keyVaultResourceGroup = 'rg-order-health-prod-01'
 
 param databaseUrlSecretName = 'order-health-database-url'
 param shopifyClientSecretName = 'order-health-shopify-client-secret'

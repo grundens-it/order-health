@@ -1,0 +1,152 @@
+# Order Health Observability: build + deploy (ADR-0011).
+#
+# Grundens house pattern, matching func-invsync-monitor-prod-01 and
+# nav-trace-viewer: OIDC federation to Azure (no PATs, no stored client
+# secrets), Bicep with what-if surfaced before apply, Key Vault for every
+# secret. There is NO VM and no SSH: ADR-0011 superseded ADR-0005.
+#
+# Sources are public endpoints (middleware.grundens.com, Azure SQL + Entra), so
+# there is no VPN and no VNet integration. NAV is reached by the App Service's
+# system-assigned managed identity (NAV_AUTH_MODE=aad-msi), so no NAV credential
+# exists anywhere.
+#
+# ROLLBACK: run manually and set image_tag to a previously built commit SHA.
+# The build is skipped and the existing ACR image is redeployed.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', 'README.md', 'CHANGELOG.md']
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Commit SHA to deploy. Blank = build and deploy this commit. A PREVIOUS SHA rolls back to that already-built image (build skipped)."
+        required: false
+        default: ""
+
+permissions:
+  id-token: write # OIDC federation to Azure. No PATs, no client secrets.
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false # never cancel a deploy mid-apply
+
+env:
+  AZURE_RESOURCE_GROUP: rg-order-health-prod-01
+  ACR_NAME: grundens
+  ACR_LOGIN_SERVER: grundens.azurecr.io
+  IMAGE_REPOSITORY: order-health
+  APP_NAME: app-order-health-prod-01
+
+jobs:
+  build:
+    name: Build and push image to ACR
+    runs-on: ubuntu-latest
+    # Skip on rollback: a manual run naming an existing tag redeploys it.
+    if: ${{ github.event_name == 'push' || inputs.image_tag == '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC, no stored secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # ACR lives in the grundies-corp-dev subscription (rg-kv-corp-dev-01),
+      # so the push targets a registry outside the app's subscription. The
+      # deploy identity needs AcrPush there. See docs/deploy.md.
+      - name: ACR login
+        run: az acr login --name "$ACR_NAME"
+
+      - name: Build and push
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile \
+            -t "$ACR_LOGIN_SERVER/$IMAGE_REPOSITORY:${{ github.sha }}" \
+            -t "$ACR_LOGIN_SERVER/$IMAGE_REPOSITORY:latest" .
+          docker push "$ACR_LOGIN_SERVER/$IMAGE_REPOSITORY:${{ github.sha }}"
+          docker push "$ACR_LOGIN_SERVER/$IMAGE_REPOSITORY:latest"
+
+  deploy:
+    name: Deploy to App Service
+    needs: build
+    # Run after a successful build, or when the build was skipped (rollback).
+    if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: production # human gate; required reviewers live here
+    env:
+      IMAGE_TAG: ${{ inputs.image_tag != '' && inputs.image_tag || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need history to diff infra between commits
+
+      - name: Azure login (OIDC, no stored secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Bicep is the slowest step and is pure overhead on a code-only change.
+      # Run it only when infra/ or this workflow changed, or on a manual run.
+      - name: Detect infra changes
+        uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            infra:
+              - 'infra/**'
+              - '.github/workflows/deploy.yml'
+
+      - name: Bicep what-if (surface the infra diff before applying)
+        if: steps.changes.outputs.infra == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          az deployment group what-if \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file infra/bicep/main.bicep \
+            --parameters infra/bicep/main.bicepparam \
+            --parameters imageTag="$IMAGE_TAG"
+
+      - name: Deploy infra (Bicep, idempotent)
+        if: steps.changes.outputs.infra == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          az deployment group create \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --template-file infra/bicep/main.bicep \
+            --parameters infra/bicep/main.bicepparam \
+            --parameters imageTag="$IMAGE_TAG"
+
+      # Code-only path: point the app at the new tag without a full Bicep run.
+      - name: Set container image to the built tag
+        run: |
+          az webapp config container set \
+            --name "$APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --container-image-name "$ACR_LOGIN_SERVER/$IMAGE_REPOSITORY:$IMAGE_TAG"
+
+      # Post-deploy smoke. An App Service container restart normally takes 2 to
+      # 4 minutes to warm up; that is expected, not a hang (Pattern 7). Retry
+      # with backoff before calling the deploy failed.
+      - name: Validate health
+        run: |
+          set -euo pipefail
+          host=$(az webapp show --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" \
+                   --query defaultHostName -o tsv)
+          echo "Probing https://$host/api/health/ping (warmup can take 2 to 4 minutes) ..."
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 10 "https://$host/api/health/ping" | grep -q '"ok":true'; then
+              echo "Healthy after ${i} attempt(s)."
+              exit 0
+            fi
+            echo "  attempt ${i}/30: not ready, sleeping 10s"
+            sleep 10
+          done
+          echo "::error::Backend did not report healthy within ~5 minutes. Deploy failed."
+          az webapp log tail --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --provider docker &
+          sleep 15
+          exit 1

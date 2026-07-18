@@ -35,6 +35,7 @@ concurrency:
 
 env:
   AZURE_RESOURCE_GROUP: rg-order-health-prod-01
+  AZURE_LOCATION: westus3
   ACR_NAME: grundens
   ACR_LOGIN_SERVER: grundens.azurecr.io
   IMAGE_REPOSITORY: order-health
@@ -91,6 +92,20 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Own the resource group in the pipeline (idempotent). Bicep is scoped to
+      # this RG, so it must exist before the deployment. The deploy identity has
+      # Contributor here (bootstrap grant), which is enough to create the group.
+      - name: Ensure resource group (idempotent)
+        run: az group create -n "$AZURE_RESOURCE_GROUP" -l "$AZURE_LOCATION"
+
+      # NOTE ON SECURE PARAMS: this template carries NO @secure() params. The
+      # only secret at deploy time would be the Postgres admin password, but
+      # Postgres and its DATABASE_URL secret stay in bootstrap (their origin is
+      # inherently a secret), so nothing needs to be sourced from Key Vault and
+      # masked here. See the reconcile note in PR #82. If a future change adds a
+      # secure param, source it with `az keyvault secret show` and pass it with
+      # `--parameters name=$VALUE` after `echo "::add-mask::$VALUE"`.
 
       # Bicep is the slowest step and is pure overhead on a code-only change.
       # Run it only when infra/ or this workflow changed, or on a manual run.

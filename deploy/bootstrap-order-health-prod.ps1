@@ -1,24 +1,28 @@
 <#
 .SYNOPSIS
-  Provision the Azure + GitHub resources for the Order Health production deploy
-  (ADR-0011, App Service for Containers). Fully non-interactive and idempotent.
+  One-time BOOTSTRAP for the Order Health production deploy (ADR-0011, App Service
+  for Containers). Only the genuinely non-pipeline steps live here; everything
+  automatable now runs from the pipeline (push to main).
 
 .DESCRIPTION
-  One command, nothing to fill in:
-    - generates the Postgres admin password (random, stored only in Key Vault),
-    - reads the Shopify client secret (and the optional middleware/NAV secrets)
-      straight from your existing backend/.env, so you never paste them,
-    - creates order-health's OWN Key Vault in its resource group (access-policy
-      model, granted to the app identity), so nothing depends on a shared vault,
-    - sets you as the required reviewer on the production environment
-      automatically (resolved from your gh identity).
+  What the PIPELINE owns now (deploy.yml + main.bicep), NOT this script:
+    - the resource group (az group create, idempotent),
+    - the Key Vault kv-order-health-prod-01 and the app-identity get/list access
+      policy (created in Bicep),
+    - Log Analytics, App Insights, the App Service + its settings,
+    - the container image tag and the post-deploy health smoke.
 
-  STAGES (some steps only work after the App Service exists):
-    provision : RG, Postgres, own Key Vault + secrets, OIDC deploy identity +
-                grants, repo vars, production environment. Zero prompts.
-    grant     : after the first deploy created app-order-health-prod-01, grant
-                its identity AcrPull + Key Vault access + (prints) the NAV
-                db_datareader SQL, then restart.
+  What stays here, because its origin is inherently a one-time secret or a
+  cross-subscription privileged grant:
+    provision : the OIDC deploy identity (app registration + federated creds),
+                the deploy role grants (Contributor on the RG, AcrPush on the
+                ACR), the three AZURE_* repo variables, and the production
+                environment with you as reviewer. Also creates the RG so the
+                Contributor scope exists before the first push. Zero prompts.
+    grant     : after the first deploy created the app + the Bicep Key Vault,
+                create Postgres (admin password generated, stored only in KV),
+                seed the KV secret VALUES (DATABASE_URL etc.), grant the app
+                identity AcrPull (cross-sub) and NAV db_datareader, then restart.
     enable    : verify health, then flip AGGREGATOR_ENABLED=true.
 
   Nothing here is destructive. Remediation stays DISARMED throughout.
@@ -27,21 +31,18 @@
   provision (default) | grant | enable
 
 .PARAMETER EnvFile
-  Path to a backend/.env holding SHOPIFY_CLIENT_SECRET etc. Defaults to the
-  running local checkout's env. Secrets are read at runtime on your machine and
-  piped straight to Key Vault; they are never printed or stored elsewhere.
+  Path to a backend/.env holding SHOPIFY_CLIENT_SECRET etc. Secrets are read at
+  runtime on your machine and piped straight to Key Vault; never printed.
 
 .PARAMETER DryRun
   Print every az/gh command instead of running it. Nothing is changed.
 
 .EXAMPLE
-  .\deploy-order-health-prod.ps1                     # provision, zero input
+  .\bootstrap-order-health-prod.ps1                  # provision (identity), zero input
 .EXAMPLE
-  .\deploy-order-health-prod.ps1 -DryRun
+  .\bootstrap-order-health-prod.ps1 -Stage grant     # after the first deploy
 .EXAMPLE
-  .\deploy-order-health-prod.ps1 -Stage grant
-.EXAMPLE
-  .\deploy-order-health-prod.ps1 -Stage enable
+  .\bootstrap-order-health-prod.ps1 -Stage enable
 #>
 [CmdletBinding()]
 param(
@@ -56,14 +57,13 @@ if ([string]::IsNullOrWhiteSpace($env:ProgramData)) { $env:ProgramData = 'C:\Pro
 
 # ---------------------------------------------------------------- constants ---
 $APP_SUB  = 'c63b42ea-eb59-4b94-ac15-f97c6d902000'   # grundies-corp-prod (app)
-$NAV_SUB  = 'ba95a0a4-97ac-4f71-b00c-8c6f72966759'   # grus-prd-01 (NAV Azure SQL)
 $ACR_SUB  = '4dafd997-8b1e-41ea-b9bc-06d499bef766'   # grundies-corp-dev (ACR)
 $RG       = 'rg-order-health-prod-01'
 $LOC      = 'westus3'
 $PG       = 'psql-order-health-prod-01'
 $PG_DB    = 'order_health'
 $PG_ADMIN = 'oh_admin'
-$KV_NAME  = 'kv-order-health-prod-01'                 # order-health OWNS this vault
+$KV_NAME  = 'kv-order-health-prod-01'                 # CREATED BY BICEP; seeded here
 $APP_NAME = 'app-order-health-prod-01'
 $ACR_NAME = 'grundens'
 $REPO     = 'grundens-it/order-health'
@@ -134,62 +134,18 @@ if ($DryRun) { Note "DRY RUN: no changes will be made." }
 Inv @('az','account','set','--subscription',$APP_SUB) | Out-Null
 
 # ================================================================ PROVISION ===
+# Identity + repo wiring only. No Postgres, no Key Vault, no secrets here: the
+# pipeline creates the RG and (via Bicep) the vault + app on the first push.
 if ($Stage -eq 'provision') {
 
-    # 1. Resource group -----------------------------------------------------
+    # 1. Resource group (so the Contributor scope exists before the first push;
+    #    the pipeline also creates it idempotently). ------------------------
     Step "1. Resource group $RG"
     if ((az group exists -n $RG --subscription $APP_SUB) -eq 'true') { Ok "exists" }
     else { Inv @('az','group','create','-n',$RG,'-l',$LOC,'--subscription',$APP_SUB) | Out-Null; Ok "created" }
 
-    # 2. Postgres (password auto-generated) ---------------------------------
-    Step "2. Postgres flexible server $PG"
-    $pgExists = Get-AzValue @('az','postgres','flexible-server','show','-g',$RG,'-n',$PG,'--subscription',$APP_SUB,'--query','name','-o','tsv')
-    $pgPw = New-StrongPassword
-    if ($pgExists) {
-        Note "server already exists. Rotating the admin password so the stored DATABASE_URL is valid..."
-        if (-not $DryRun) { $null = az postgres flexible-server update --subscription $APP_SUB -g $RG -n $PG --admin-password $pgPw 2>&1 }
-        else { Note "[dry] az postgres flexible-server update ... (password hidden)" }
-        Ok "password rotated"
-    } else {
-        if ($DryRun) { Note "[dry] az postgres flexible-server create ... (password auto-generated, hidden)" }
-        else {
-            $null = az postgres flexible-server create --subscription $APP_SUB -g $RG -l $LOC --name $PG --version 16 `
-                --tier Burstable --sku-name Standard_B1ms --storage-size 32 `
-                --admin-user $PG_ADMIN --admin-password $pgPw --public-access 0.0.0.0 --yes 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "postgres create failed" }
-            $null = az postgres flexible-server db create --subscription $APP_SUB -g $RG -s $PG -d $PG_DB 2>&1
-            Ok "server + database created (admin password generated, stored only in Key Vault)"
-        }
-    }
-
-    # 3. Own Key Vault (access-policy model) --------------------------------
-    Step "3. Key Vault $KV_NAME (order-health owns this, in $RG)"
-    $kvExists = Get-AzValue @('az','keyvault','show','-g',$RG,'-n',$KV_NAME,'--subscription',$APP_SUB,'--query','name','-o','tsv')
-    if ($kvExists) { Ok "exists" }
-    else {
-        # Access-policy model (enable-rbac-authorization false), matching the house
-        # shared vaults. The app identity gets a get/list access policy in -Stage grant.
-        Inv @('az','keyvault','create','--subscription',$APP_SUB,'-g',$RG,'-n',$KV_NAME,'-l',$LOC,'--enable-rbac-authorization','false','--retention-days','90') | Out-Null
-        Ok "vault created"
-    }
-
-    # 4. Secrets (auto-sourced from $EnvFile; DB URL auto-built) -------------
-    Step "4. Key Vault secrets"
-    $pgFqdn = Get-AzValue @('az','postgres','flexible-server','show','--subscription',$APP_SUB,'-g',$RG,'-n',$PG,'--query','fullyQualifiedDomainName','-o','tsv')
-    if (-not $pgFqdn) { $pgFqdn = "$PG.postgres.database.azure.com" }
-    $dbUrl = "postgres://$PG_ADMIN`:$pgPw@$pgFqdn`:5432/$PG_DB`?sslmode=require"
-    Set-KvSecretPlain $KV_NAME 'order-health-database-url' $dbUrl
-    $dbUrl = $null; $pgPw = $null
-
-    if (Test-Path $EnvFile) { Ok "sourcing app secrets from $EnvFile" } else { Note "env file not found at $EnvFile; secrets left empty (set before arming)." }
-    $shopify = Read-EnvValue $EnvFile 'SHOPIFY_CLIENT_SECRET'
-    if (-not $shopify) { Note "SHOPIFY_CLIENT_SECRET not in env; enter it (or leave blank to set later):"; $sec = Read-Host -AsSecureString "    Shopify client secret"; $shopify = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)) }
-    Set-KvSecretPlain $KV_NAME 'order-health-shopify-client-secret' $shopify; $shopify = $null
-    Set-KvSecretPlain $KV_NAME 'order-health-middleware-auth-token' (Read-EnvValue $EnvFile 'MIDDLEWARE_AUTH_TOKEN')
-    Set-KvSecretPlain $KV_NAME 'order-health-nav-toggle-password'   (Read-EnvValue $EnvFile 'NAV_TOGGLE_PASSWORD')
-
-    # 5. OIDC deploy identity + grants + repo vars --------------------------
-    Step "5. OIDC deploy identity gh-order-health-deploy"
+    # 2. OIDC deploy identity + federated credentials -----------------------
+    Step "2. OIDC deploy identity gh-order-health-deploy"
     $appId = Get-AzValue @('az','ad','app','list','--display-name','gh-order-health-deploy','--query','[0].appId','-o','tsv')
     if (-not $appId) {
         $appId = Inv @('az','ad','app','create','--display-name','gh-order-health-deploy','--query','appId','-o','tsv')
@@ -210,21 +166,23 @@ if ($Stage -eq 'provision') {
         Inv @('az','ad','app','federated-credential','create','--id',$appId,'--parameters',$p) | Out-Null; Ok "fic gh-env-prod"
     } else { Ok "fic gh-env-prod exists" }
 
-    Step "5b. Deploy identity role grants"
+    # 3. Deploy identity role grants ----------------------------------------
+    Step "3. Deploy identity role grants"
     Inv @('az','role','assignment','create','--assignee',$appId,'--role','Contributor','--scope',"/subscriptions/$APP_SUB/resourceGroups/$RG") | Out-Null
-    Ok "Contributor on $RG"
+    Ok "Contributor on $RG (lets the pipeline create the vault + app via Bicep)"
     $acrId = Get-AzValue @('az','acr','show','--subscription',$ACR_SUB,'-n',$ACR_NAME,'--query','id','-o','tsv')
     if ($acrId) { Inv @('az','role','assignment','create','--assignee',$appId,'--role','AcrPush','--scope',$acrId) | Out-Null; Ok "AcrPush on $ACR_NAME (dev sub)" }
     else { Note "ACR $ACR_NAME not found; grant AcrPush manually." }
 
-    Step "5c. Repo variables"
+    # 4. Repo variables -----------------------------------------------------
+    Step "4. Repo variables"
     Inv @('gh','variable','set','AZURE_CLIENT_ID','-R',$REPO,'-b',$appId) | Out-Null
     Inv @('gh','variable','set','AZURE_TENANT_ID','-R',$REPO,'-b',$tenant) | Out-Null
     Inv @('gh','variable','set','AZURE_SUBSCRIPTION_ID','-R',$REPO,'-b',$APP_SUB) | Out-Null
     Ok "AZURE_CLIENT_ID / TENANT_ID / SUBSCRIPTION_ID set"
 
-    # 6. production environment WITH you as reviewer (auto) ------------------
-    Step "6. production GitHub Environment (auto reviewer = you)"
+    # 5. production environment WITH you as reviewer (auto) -----------------
+    Step "5. production GitHub Environment (auto reviewer = you)"
     $myId = gh api user --jq '.id' 2>$null
     if ($myId -and -not $DryRun) {
         $body = @{ reviewers=@(@{ type='User'; id=[int]$myId }); deployment_branch_policy=$null } | ConvertTo-Json -Depth 5
@@ -234,28 +192,75 @@ if ($Stage -eq 'provision') {
     else { if (-not $DryRun) { gh api -X PUT "repos/$REPO/environments/production" | Out-Null }; Note "could not resolve your gh id; add yourself as reviewer in the UI." }
 
     Step "Provision done. Zero manual entry."
-    Ok "Now: merge PR #81 (or run the deploy workflow). Approve the production gate."
+    Ok "Now: merge to main (or run the deploy workflow). Approve the production gate."
+    Ok "The pipeline creates the RG, the Key Vault (+ app access policy), and the App Service."
     Ok "The FIRST deploy will fail to pull the image (app identity has no AcrPull yet). Expected."
-    Ok "Then:  .\deploy-order-health-prod.ps1 -Stage grant"
+    Ok "Then:  .\bootstrap-order-health-prod.ps1 -Stage grant"
 }
 
 # =================================================================== GRANT ====
+# Runs after the first deploy created the app + the Bicep-created Key Vault.
+# Creates Postgres (its admin password is inherently a one-time secret), seeds
+# the KV secret VALUES, and makes the two cross-subscription / data-plane grants
+# the pipeline deliberately does not: AcrPull (cross-sub) and NAV db_datareader.
 if ($Stage -eq 'grant') {
-    Step "Post-creation grants for the app identity"
+    Step "Post-creation bootstrap for the app identity + data plane"
     $mi = Get-AzValue @('az','webapp','show','--subscription',$APP_SUB,'-g',$RG,'-n',$APP_NAME,'--query','identity.principalId','-o','tsv')
-    if (-not $mi) { throw "$APP_NAME not found yet. Run the first deploy (merge PR #81 + approve the gate), then re-run -Stage grant." }
+    if (-not $mi) { throw "$APP_NAME not found yet. Run the first deploy (merge to main + approve the gate), then re-run -Stage grant." }
     Ok "app managed identity: $mi"
 
-    Step "Key Vault access policy (get/list secrets) for the app identity"
-    Inv @('az','keyvault','set-policy','--subscription',$APP_SUB,'-n',$KV_NAME,'--object-id',$mi,'--secret-permissions','get','list') | Out-Null
-    Ok "app can now read its secrets from $KV_NAME"
+    # 1. Postgres (admin password auto-generated, stored only in Key Vault) --
+    Step "1. Postgres flexible server $PG"
+    $pgExists = Get-AzValue @('az','postgres','flexible-server','show','-g',$RG,'-n',$PG,'--subscription',$APP_SUB,'--query','name','-o','tsv')
+    $pgPw = New-StrongPassword
+    if ($pgExists) {
+        Note "server already exists. Rotating the admin password so the stored DATABASE_URL is valid..."
+        if (-not $DryRun) { $null = az postgres flexible-server update --subscription $APP_SUB -g $RG -n $PG --admin-password $pgPw 2>&1 }
+        else { Note "[dry] az postgres flexible-server update ... (password hidden)" }
+        Ok "password rotated"
+    } else {
+        if ($DryRun) { Note "[dry] az postgres flexible-server create ... (password auto-generated, hidden)" }
+        else {
+            $null = az postgres flexible-server create --subscription $APP_SUB -g $RG -l $LOC --name $PG --version 16 `
+                --tier Burstable --sku-name Standard_B1ms --storage-size 32 `
+                --admin-user $PG_ADMIN --admin-password $pgPw --public-access 0.0.0.0 --yes 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "postgres create failed" }
+            $null = az postgres flexible-server db create --subscription $APP_SUB -g $RG -s $PG -d $PG_DB 2>&1
+            Ok "server + database created (admin password generated, stored only in Key Vault)"
+        }
+    }
 
-    Step "AcrPull for the app identity (dev sub)"
+    # 2. Grant yourself set-secret on the Bicep-created vault, then seed the
+    #    secret VALUES. The vault ships with only the app-identity get/list
+    #    policy (from Bicep), so add a set policy for yourself first. ---------
+    Step "2. Key Vault secret VALUES ($KV_NAME, created by Bicep)"
+    $meObj = Get-AzValue @('az','ad','signed-in-user','show','--query','id','-o','tsv')
+    if ($meObj) { Inv @('az','keyvault','set-policy','--subscription',$APP_SUB,'-n',$KV_NAME,'--object-id',$meObj,'--secret-permissions','set','get','list') | Out-Null; Ok "you can set secrets on $KV_NAME" }
+    else { Note "could not resolve your object id; ensure you have set-secret on $KV_NAME." }
+
+    $pgFqdn = Get-AzValue @('az','postgres','flexible-server','show','--subscription',$APP_SUB,'-g',$RG,'-n',$PG,'--query','fullyQualifiedDomainName','-o','tsv')
+    if (-not $pgFqdn) { $pgFqdn = "$PG.postgres.database.azure.com" }
+    $dbUrl = "postgres://$PG_ADMIN`:$pgPw@$pgFqdn`:5432/$PG_DB`?sslmode=require"
+    Set-KvSecretPlain $KV_NAME 'order-health-database-url' $dbUrl
+    $dbUrl = $null; $pgPw = $null
+
+    if (Test-Path $EnvFile) { Ok "sourcing app secrets from $EnvFile" } else { Note "env file not found at $EnvFile; secrets left empty (set before arming)." }
+    $shopify = Read-EnvValue $EnvFile 'SHOPIFY_CLIENT_SECRET'
+    if (-not $shopify) { Note "SHOPIFY_CLIENT_SECRET not in env; enter it (or leave blank to set later):"; $sec = Read-Host -AsSecureString "    Shopify client secret"; $shopify = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)) }
+    Set-KvSecretPlain $KV_NAME 'order-health-shopify-client-secret' $shopify; $shopify = $null
+    Set-KvSecretPlain $KV_NAME 'order-health-middleware-auth-token' (Read-EnvValue $EnvFile 'MIDDLEWARE_AUTH_TOKEN')
+    Set-KvSecretPlain $KV_NAME 'order-health-nav-toggle-password'   (Read-EnvValue $EnvFile 'NAV_TOGGLE_PASSWORD')
+
+    # 3. AcrPull for the app identity (cross-subscription: ACR in dev sub) ----
+    #    Kept in bootstrap: this is a role assignment in the DEV subscription,
+    #    which the pipeline's deploy identity has no rights to make. See the PR.
+    Step "3. AcrPull for the app identity (dev sub)"
     $acrId = Get-AzValue @('az','acr','show','--subscription',$ACR_SUB,'-n',$ACR_NAME,'--query','id','-o','tsv')
     Inv @('az','role','assignment','create','--assignee-object-id',$mi,'--assignee-principal-type','ServicePrincipal','--role','AcrPull','--scope',$acrId) | Out-Null
     Ok "AcrPull granted"
 
-    Step "NAV db_datareader (SQL grant, run as an Entra admin on NAV)"
+    # 4. NAV db_datareader (SQL grant, run as an Entra admin on NAV) ----------
+    Step "4. NAV db_datareader (SQL grant, run as an Entra admin on NAV)"
     $sql = "CREATE USER [$APP_NAME] FROM EXTERNAL PROVIDER;`nALTER ROLE db_datareader ADD MEMBER [$APP_NAME];"
     $sqlcmd = Get-Command sqlcmd -ErrorAction SilentlyContinue
     if ($sqlcmd -and -not $DryRun) {
@@ -266,9 +271,10 @@ if ($Stage -eq 'grant') {
         if ($LASTEXITCODE -eq 0) { Ok "NAV db_datareader granted" } else { Bad "sqlcmd failed; run this SQL as a NAV Entra admin:"; Write-Host $sql -ForegroundColor White }
     } else { Note "Run this SQL against $NAV_SQL_DB on $NAV_SQL_SERVER as an Entra admin:"; Write-Host $sql -ForegroundColor White }
 
-    Step "Restart the app"
+    # 5. Restart so the app picks up its secrets + pullable image ------------
+    Step "5. Restart the app"
     Inv @('az','webapp','restart','--subscription',$APP_SUB,'-g',$RG,'-n',$APP_NAME) | Out-Null
-    Ok "restarted. Next:  .\deploy-order-health-prod.ps1 -Stage enable"
+    Ok "restarted. On boot the backend applies db/migrations against Postgres. Next:  .\bootstrap-order-health-prod.ps1 -Stage enable"
 }
 
 # ================================================================== ENABLE ====

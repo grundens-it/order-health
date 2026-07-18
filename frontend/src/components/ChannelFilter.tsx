@@ -1,7 +1,7 @@
 import type { ChannelFilter as ChannelFilterValue } from '@order-health/shared';
 
 const OPTIONS: { value: ChannelFilterValue; label: string }[] = [
-  { value: 'all', label: 'All channels' },
+  { value: 'all', label: 'All' },
   { value: 'dtc', label: 'DTC' },
   { value: 'wholesale', label: 'Wholesale' },
 ];

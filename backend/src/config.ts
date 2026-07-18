@@ -30,6 +30,18 @@ export interface Config {
   server: { host: string; port: number };
   database: { url: string };
   middleware: { baseUrl: string; authToken: string };
+  // Read-only Shopify Admin API (ADR-0009). Client-credentials custom-app token,
+  // least-privilege READ scopes only. The client is live only when shop + clientId
+  // + clientSecret are all present; otherwise the read-only stub answers and the
+  // storefront reconciliations read 'unknown'. The secret lives only in the
+  // gitignored .env / host secret store, never committed.
+  shopify: {
+    authMode: string;     // SHOPIFY_AUTH_MODE (client_credentials)
+    shop: string;         // SHOPIFY_SHOP (the myshopify domain)
+    apiVersion: string;   // SHOPIFY_API_VERSION (e.g. 2025-01)
+    clientId: string;     // SHOPIFY_CLIENT_ID
+    clientSecret: string; // SHOPIFY_CLIENT_SECRET (secret; gitignored)
+  };
   nav: {
     host: string;
     port: number;
@@ -54,12 +66,19 @@ export interface Config {
     orderLayerCron: string;
     inventoryLayerCron: string;
   };
-  // Remediation (Unit 7, design.md 5A.4). OPERATOR-triggered only. The operator
-  // token gates the POST trigger endpoint in THIS service; the actual middleware
-  // call is DevOps-gated and stubbed. When operatorToken is empty (scaffold), the
-  // gate logs and allows so the demo works without provisioning.
+  // Remediation (Unit 7 + ADR-0010 executable Tier 1). OPERATOR-triggered only.
+  // The operator token gates the POST trigger endpoint in THIS service. The
+  // executable path is DISARMED by default: liveEnabled must be explicitly true
+  // AND killSwitch false for any live middleware call to fire; otherwise every
+  // trigger returns 'would_trigger' exactly as the stub did. togglePassword is the
+  // NAV write-gate the middleware requires on its gated endpoints (recovery
+  // replay), sent ONLY on those and NEVER logged. This service never arms itself:
+  // arming is a deliberate, out-of-band posture (ADR-0010), never a UI toggle.
   remediation: {
     operatorToken: string;
+    liveEnabled: boolean;   // REMEDIATION_LIVE_ENABLED (default false = disarmed)
+    killSwitch: boolean;    // REMEDIATION_KILL_SWITCH (default false; true forces disarmed)
+    togglePassword: string; // NAV_TOGGLE_PASSWORD (sent only on gated endpoints; never logged)
   };
   // Inventory Sync Monitor thresholds (design.md 5A). Never hardcoded: the three
   // verdict bands (freshness, liveness, dry-run divergence) are all tuned here so
@@ -106,11 +125,22 @@ export interface Config {
     livenessAmberCycles: number;
     livenessRedCycles: number;
   };
-  // nav_job_queue (design.md 6): verdict is CONSUMED from the middleware, never
-  // recomputed. This knob only documents the middleware's own stuck-job age so
-  // the panel can label the supporting number; it does not gate any verdict.
+  // nav_job_queue (ADR-0007, health-fidelity Unit 1): the verdict is COMPUTED
+  // from read-only NAV, not adopted from the middleware. Three independent bands:
+  //   liveness    - recency of the last CU 50009 auto-release firing.
+  //   stuck-job   - a genuinely stuck in-process CU 50007 (a normal IABC run is
+  //                 20 to 47 min, so the threshold sits near 60 min, never under).
+  //   staging     - real GRUS$Sales Header Staging rows with Status = 0 pending
+  //                 promotion (NOT the Status = 1 "Not Auto-released" old rows).
+  // The middleware's own number is kept only as a labelled cross-check.
   jobQueue: {
-    stuckJobWarnSeconds: number;
+    stuckJobWarnSeconds: number;         // legacy label for the middleware cross-check
+    autoReleaseAmberSeconds: number;     // last CU 50009 auto-release age >= this => AMBER
+    autoReleaseRedSeconds: number;       // ...>= this => RED
+    inProcessAmberSeconds: number;       // CU 50007 in-process age >= this => AMBER (>= ~60 min)
+    inProcessRedSeconds: number;         // ...>= this => RED
+    pendingStagingAmberCount: number;    // real Status=0 pending-promotion rows >= this => AMBER
+    pendingStagingRedCount: number;      // ...>= this => RED
   };
   // shopify_webhook (design.md 5): per-topic last-received freshness bands. A
   // removed subscription is amber-or-worse by rule (not a tunable band).
@@ -148,6 +178,13 @@ export const config: Config = {
     baseUrl: str('MIDDLEWARE_BASE_URL'),
     authToken: str('MIDDLEWARE_AUTH_TOKEN'),
   },
+  shopify: {
+    authMode: str('SHOPIFY_AUTH_MODE', 'client_credentials'),
+    shop: str('SHOPIFY_SHOP'),
+    apiVersion: str('SHOPIFY_API_VERSION', '2025-01'),
+    clientId: str('SHOPIFY_CLIENT_ID'),
+    clientSecret: str('SHOPIFY_CLIENT_SECRET'),
+  },
   nav: {
     host: str('NAV_HOST'),
     port: Number(str('NAV_PORT', '1433')),
@@ -172,14 +209,25 @@ export const config: Config = {
   },
   remediation: {
     operatorToken: str('REMEDIATION_OPERATOR_TOKEN'),
+    // DISARMED by default (ADR-0010). Both must line up for a live call: armed
+    // (liveEnabled true) AND not kill-switched. Never armed in a committed .env.
+    liveEnabled: bool('REMEDIATION_LIVE_ENABLED', false),
+    killSwitch: bool('REMEDIATION_KILL_SWITCH', false),
+    // The middleware's NAV write-gate password; empty until DevOps provisions it.
+    togglePassword: str('NAV_TOGGLE_PASSWORD'),
   },
   inventorySync: {
     // Defaults: green under one cycle, amber one to two cycles, red beyond.
     cycleSeconds: num('INVENTORY_CYCLE_SECONDS', 7200), // ~2h IABC cycle
     freshnessAmberCycles: num('INVENTORY_FRESHNESS_AMBER_CYCLES', 1),
     freshnessRedCycles: num('INVENTORY_FRESHNESS_RED_CYCLES', 2),
-    livenessAmberCycles: num('INVENTORY_LIVENESS_AMBER_CYCLES', 1),
-    livenessRedCycles: num('INVENTORY_LIVENESS_RED_CYCLES', 2),
+    // Liveness widened to the real walk cadence (Unit 3, health-fidelity). Walks
+    // run about every 2h (one cycle), so a heartbeat is legitimately up to one full
+    // inter-walk gap old right before the next run. Amber at 2 missed cadences (~4h),
+    // red at 3 (~6h), so a healthy 124-min heartbeat reads GREEN instead of flipping
+    // amber right before every walk, while a genuine >4h stall still fires.
+    livenessAmberCycles: num('INVENTORY_LIVENESS_AMBER_CYCLES', 2),
+    livenessRedCycles: num('INVENTORY_LIVENESS_RED_CYCLES', 3),
     // 7,245 / 466 ~= 15.5 (the part-1 case) trips amber at 5x; never escalates to red.
     divergenceAmberRatio: num('INVENTORY_DIVERGENCE_AMBER_RATIO', 5),
   },
@@ -211,10 +259,23 @@ export const config: Config = {
     livenessAmberCycles: num('PRICE_SYNC_LIVENESS_AMBER_CYCLES', 1),
     livenessRedCycles: num('PRICE_SYNC_LIVENESS_RED_CYCLES', 2),
   },
-  // Unit 3: nav_job_queue. Verdict consumed from the middleware; this only labels
-  // the supporting stuck-job number (matches the existing 30-min tripwire).
+  // nav_job_queue (Unit 1, ADR-0007). Computed from read-only NAV. Defaults are
+  // safe starting points surfaced for Ops to tune (health-fidelity kickoff s11):
+  //   auto-release: healthy firings were 4 to 7 min apart in the live run, so
+  //     amber at 30 min and red at 60 min flag a genuine stall without tripping on
+  //     a normal quiet gap.
+  //   in-process: a normal IABC (CU 50007) run is 20 to 47 min, so amber at 60 min
+  //     and red at 90 min; never flag under 60 min (the false-"Stuck" the live run showed).
+  //   pending staging: real Status=0 rows clear quickly; a standing backlog is the
+  //     signal. Amber at 25, red at 100 (surfaced default; NOT the 1,988 Status=1 rows).
   jobQueue: {
     stuckJobWarnSeconds: num('JOB_QUEUE_STUCK_JOB_WARN_SECONDS', 1800),
+    autoReleaseAmberSeconds: num('JOB_QUEUE_AUTO_RELEASE_AMBER_SECONDS', 1800),
+    autoReleaseRedSeconds: num('JOB_QUEUE_AUTO_RELEASE_RED_SECONDS', 3600),
+    inProcessAmberSeconds: num('JOB_QUEUE_IN_PROCESS_AMBER_SECONDS', 3600),
+    inProcessRedSeconds: num('JOB_QUEUE_IN_PROCESS_RED_SECONDS', 5400),
+    pendingStagingAmberCount: num('JOB_QUEUE_PENDING_STAGING_AMBER_COUNT', 25),
+    pendingStagingRedCount: num('JOB_QUEUE_PENDING_STAGING_RED_COUNT', 100),
   },
   // Unit 3: shopify_webhook. Default expected-delivery window 1h; a removed
   // subscription is amber-or-worse regardless of these bands.

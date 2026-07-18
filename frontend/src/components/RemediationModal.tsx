@@ -4,6 +4,7 @@ import type {
   RemediationRegistry,
   RemediationTool,
   RemediationTriggerResult,
+  Verdict,
 } from '@order-health/shared';
 import { triggerRemediation } from '../api';
 
@@ -20,6 +21,26 @@ export interface RemediationSubject {
   subjectKind: 'pipe' | 'signal' | 'order';
   subjectKey: string;
   label: string; // human label for the header (for example the pipe display name)
+  // Failure-mode detection (issue #35): when the opener observed a runtime failure
+  // mode, it names the detected tool here and why. The modal marks THAT tool
+  // "Recommended" (overriding the static primary) and shows the reason. Absent =>
+  // fall back to the static primary mapping.
+  detectedToolId?: string;
+  detectionReason?: string;
+  // Round 3 (Unit 4): the HEALTH reason, so the modal always explains WHY first.
+  // The opener builds these from the subject's verdict + detail (pipe: the failing
+  // sub-verdict + numbers + threshold; order: stage + age + the FS classification).
+  verdict?: Verdict;                     // the subject's verdict (red / amber / ...)
+  why?: string;                          // one-line "why this is red/amber"
+  details?: { k: string; v: string }[]; // supporting numbers (age, FS available, threshold, ...)
+  nextStep?: string;                     // a plain next step, shown when no tool is mapped
+}
+
+function verdictWord(v: Verdict | undefined): string {
+  if (v === 'red') return 'red';
+  if (v === 'amber') return 'amber';
+  if (v === 'green') return 'green';
+  return 'flagged';
 }
 
 function toolFor(registry: RemediationRegistry, toolId: string): RemediationTool | null {
@@ -37,33 +58,107 @@ function callShape(tool: RemediationTool): string {
   return '';
 }
 
+// The exact call an operator is about to authorise, spelled out for the two-step
+// confirm (method / path / target / params). No native confirm() is ever used.
+function ConfirmPanel({
+  tool,
+  subject,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  tool: RemediationTool;
+  subject: RemediationSubject;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}): JSX.Element {
+  const ep = tool.endpoint;
+  const held = ep?.heldFromLivePath === true;
+  const gated = ep?.gated === true;
+  return (
+    <div className="rm-confirm" role="group" aria-label="Confirm and run">
+      <div className="rm-confirm-hd">Confirm and run</div>
+      <p className="rm-confirm-lead">
+        This authorises the exact call below. It runs only if remediation is armed on
+        the server; otherwise the server returns a disarmed preview and makes no live call.
+      </p>
+      <div className="rm-confirm-rows">
+        <div className="rm-why-row">
+          <span className="rm-k">Method</span>
+          <span className="rm-v mono">{ep ? ep.method : 'ops runbook (no live call)'}</span>
+        </div>
+        <div className="rm-why-row">
+          <span className="rm-k">Path</span>
+          <span className="rm-v mono">{ep ? ep.path : tool.runbook?.ref ?? '—'}</span>
+        </div>
+        <div className="rm-why-row">
+          <span className="rm-k">Target</span>
+          <span className="rm-v mono">
+            {subject.subjectKind}:{subject.subjectKey}
+          </span>
+        </div>
+        <div className="rm-why-row">
+          <span className="rm-k">Params</span>
+          <span className="rm-v mono">
+            set_by=order-health-operator{gated ? ' + NAV_TOGGLE_PASSWORD (write-gate)' : ''}
+          </span>
+        </div>
+      </div>
+      {held && (
+        <div className="rm-err">
+          Held out of the live path: {ep?.heldReason ?? 'destructive action, no rollback'}. This
+          returns a preview only and never fires.
+        </div>
+      )}
+      <div className="rm-actions">
+        <button className="rm-btn" onClick={onConfirm} disabled={busy}>
+          {busy ? 'Running...' : 'Confirm and run'}
+        </button>
+        <button className="rm-btn ghost" onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ToolCard({
   mapping,
   tool,
   subject,
+  recommended,
+  detectionReason,
   onResult,
 }: {
   mapping: RemediationMapping;
   tool: RemediationTool;
   subject: RemediationSubject;
+  recommended: boolean;      // marked "Recommended" (detected tool, or static primary)
+  detectionReason?: string;  // set only on the failure-mode-detected recommended card
   onResult: (r: RemediationTriggerResult) => void;
 }): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Two-step confirm: the first click arms this card's Confirm panel; only the
+  // explicit "Confirm and run" click POSTs with confirmed:true (ADR-0010).
+  const [confirming, setConfirming] = useState(false);
 
-  async function onTrigger(): Promise<void> {
+  async function onConfirmRun(): Promise<void> {
     setBusy(true);
     setError(null);
     try {
-      const result = await triggerRemediation(tool.id, {
-        subjectKind: subject.subjectKind,
-        subjectKey: subject.subjectKey,
-      });
+      const result = await triggerRemediation(
+        tool.id,
+        { subjectKind: subject.subjectKind, subjectKey: subject.subjectKey },
+        true, // confirmed: this is the explicit second-step sign-off
+      );
       onResult(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'trigger failed');
     } finally {
       setBusy(false);
+      setConfirming(false);
     }
   }
 
@@ -71,7 +166,7 @@ function ToolCard({
     <div className="rm-tool">
       <div className="rm-tool-hd">
         <div>
-          <div className="rm-kicker">{mapping.primary ? 'Recommended tool' : 'Alternative'}</div>
+          <div className="rm-kicker">{recommended ? 'Recommended tool' : 'Alternative'}</div>
           <h4>{tool.name}</h4>
         </div>
         <span className={`rm-kind ${tool.writeCapable ? 'w' : 'r'}`}>
@@ -80,14 +175,27 @@ function ToolCard({
         </span>
       </div>
       <p className="rm-desc">{tool.description}</p>
+      {recommended && detectionReason !== undefined && (
+        <p className="rm-when">Detected: {detectionReason}</p>
+      )}
       <p className="rm-when">Applies when: {mapping.appliesWhen}</p>
       <pre className="rm-call">{callShape(tool)}</pre>
       {error !== null && <div className="rm-err">{error}</div>}
-      <div className="rm-actions">
-        <button className="rm-btn" onClick={() => void onTrigger()} disabled={busy}>
-          {busy ? 'Triggering...' : `Trigger: ${tool.name}`}
-        </button>
-      </div>
+      {confirming ? (
+        <ConfirmPanel
+          tool={tool}
+          subject={subject}
+          busy={busy}
+          onConfirm={() => void onConfirmRun()}
+          onCancel={() => setConfirming(false)}
+        />
+      ) : (
+        <div className="rm-actions">
+          <button className="rm-btn" onClick={() => setConfirming(true)} disabled={busy}>
+            {`Trigger: ${tool.name}`}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -105,14 +213,20 @@ export function RemediationModal({
   const closeRef = useRef<HTMLButtonElement>(null);
   const [result, setResult] = useState<RemediationTriggerResult | null>(null);
 
-  // Resolve the mapped tools for this subject (primary first).
+  // Resolve the mapped tools for this subject, recommended first. The recommended
+  // tool is the failure-mode-DETECTED one (issue #35) when the opener supplied it,
+  // otherwise the static primary mapping (previous behaviour).
   const cards = useMemo(() => {
     if (subject === null || registry === null) return [];
-    return registry.mappings
+    const mapped = registry.mappings
       .filter((m) => m.subjectKey === subject.subjectKey)
-      .sort((a, b) => Number(b.primary) - Number(a.primary))
       .map((m) => ({ mapping: m, tool: toolFor(registry, m.toolId) }))
       .filter((x): x is { mapping: RemediationMapping; tool: RemediationTool } => x.tool !== null);
+    const staticPrimaryId = mapped.find((c) => c.mapping.primary)?.tool.id ?? null;
+    const recommendedId = subject.detectedToolId ?? staticPrimaryId;
+    return mapped
+      .map((c) => ({ ...c, recommended: c.tool.id === recommendedId }))
+      .sort((a, b) => Number(b.recommended) - Number(a.recommended));
   }, [subject, registry]);
 
   // Reset the shown result whenever the subject changes.
@@ -172,10 +286,38 @@ export function RemediationModal({
           </button>
         </div>
         <div className="rm-mb">
+          {/* Unit 4: the "why" block is ALWAYS first, built from the subject's verdict
+              + detail, so clicking any red/amber item explains itself even when no
+              remediation tool is mapped. */}
+          {subject.why !== undefined && (
+            <div className={`rm-why v-${verdictWord(subject.verdict)}`}>
+              <div className="rm-why-hd">Why this is {verdictWord(subject.verdict)}</div>
+              <p className="rm-why-text">{subject.why}</p>
+              {subject.details !== undefined && subject.details.length > 0 && (
+                <div className="rm-why-rows">
+                  {subject.details.map((d) => (
+                    <div className="rm-why-row" key={d.k}>
+                      <span className="rm-k">{d.k}</span>
+                      <span className="rm-v">{d.v}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {result !== null ? (
             <div className="rm-result" role="status">
-              <div className="rm-result-badge">would trigger</div>
+              <div className={`rm-result-badge s-${result.status}`}>
+                {result.status === 'triggered'
+                  ? 'triggered'
+                  : result.status === 'error'
+                    ? 'trigger failed'
+                    : 'would trigger'}
+              </div>
               <p className="rm-result-msg">{result.message}</p>
+              {result.status === 'error' && result.error !== undefined && (
+                <div className="rm-err">{result.error}</div>
+              )}
               <div className="rm-result-row">
                 <span className="rm-k">Tool</span>
                 <span className="rm-v">{result.toolName}</span>
@@ -199,14 +341,23 @@ export function RemediationModal({
               </div>
             </div>
           ) : cards.length === 0 ? (
-            <p className="rm-desc">No remediation is mapped for this signal.</p>
+            <div className="rm-nostep">
+              <p className="rm-desc">No automated remediation tool is mapped for this item.</p>
+              <p className="rm-when">
+                Next step: {subject.nextStep ?? 'investigate the item above and hand it to the owning team; nothing here can be triggered.'}
+              </p>
+            </div>
           ) : (
-            cards.map(({ mapping, tool }) => (
+            cards.map(({ mapping, tool, recommended }) => (
               <ToolCard
                 key={tool.id}
                 mapping={mapping}
                 tool={tool}
                 subject={subject}
+                recommended={recommended}
+                detectionReason={
+                  recommended && tool.id === subject.detectedToolId ? subject.detectionReason : undefined
+                }
                 onResult={setResult}
               />
             ))

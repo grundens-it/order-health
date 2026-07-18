@@ -40,12 +40,17 @@ test('the five named tools from the brief are all registered', () => {
   }
 });
 
-test('recovery_sweep calls the EXISTING recovery.rs middleware endpoint (no new endpoint)', () => {
+test('recovery_sweep calls the EXISTING recovery.rs BATCH replay endpoint (no new endpoint)', () => {
   const tool = getRemediationTool('recovery_sweep');
   assert.ok(tool !== null);
   assert.equal(tool?.kind, 'middleware_endpoint');
-  assert.equal(tool?.endpoint?.path, '/api/recovery/fulfillments');
-  assert.match(tool?.endpoint?.source ?? '', /recovery\.rs/);
+  // Real route (main.rs:1042); the old '/api/recovery/fulfillments' does not exist.
+  assert.equal(tool?.endpoint?.path, '/api/recovery/replay-fulfillment-requests');
+  assert.match(tool?.endpoint?.source ?? '', /recovery\.rs::handle_replay/);
+  assert.equal(tool?.writeCapable, true);
+  // The corrected contract is a BATCH of shopify_order_ids, capped at 200.
+  assert.match(tool?.description ?? '', /batch/i);
+  assert.match(tool?.description ?? '', /200/);
 });
 
 test('reconcile_audit is read-only (not write-capable)', () => {
@@ -71,5 +76,26 @@ test('every mapping references a registered tool', () => {
 
 test('order-level signals map to their tools (missed_back_sync, nav_staging_stuck)', () => {
   assert.equal(primaryRemediationForSubject('missed_back_sync')?.id, 'recovery_sweep');
-  assert.equal(primaryRemediationForSubject('nav_staging_stuck')?.id, 'unblock_and_repromote');
+  // Round 3: the dominant nav_staging_stuck case is Not-Auto-released -> rerun_auto_release
+  // is primary; the Blocked-SKU and dedupe tools remain mapped alternatives.
+  assert.equal(primaryRemediationForSubject('nav_staging_stuck')?.id, 'rerun_auto_release');
+  const staging = remediationsForSubject('nav_staging_stuck').map((m) => m.toolId);
+  assert.ok(staging.includes('unblock_and_repromote'));
+  assert.ok(staging.includes('stuck_staging_dedupe'));
+});
+
+test('Round 3: fs_floor_at_zero maps to the FS re-floor, never to a fulfillment tool', () => {
+  const tool = primaryRemediationForSubject('fs_floor_at_zero');
+  assert.equal(tool?.id, 'fs_refloor');
+  assert.equal(tool?.kind, 'ops_runbook'); // an FS re-floor, not a middleware fulfillment call
+  const ids = remediationsForSubject('fs_floor_at_zero').map((m) => m.toolId);
+  assert.ok(!ids.includes('submit_fulfillment_request'));
+  assert.ok(!ids.includes('recovery_sweep'));
+});
+
+test('Round 3: shopify_webhook distinguishes a dropped subscription from an outcome gap', () => {
+  const ids = remediationsForSubject('shopify_webhook').map((m) => m.toolId);
+  assert.ok(ids.includes('webhook_resubscribe')); // subscription removed
+  assert.ok(ids.includes('webhook_outcome_redrive')); // intact subscription, orders not arriving
+  assert.equal(primaryRemediationForSubject('shopify_webhook')?.id, 'webhook_resubscribe');
 });

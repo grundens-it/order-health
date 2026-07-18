@@ -19,6 +19,37 @@ export type ChannelFilter = Channel | 'all';
 // is provisioned by DevOps). The worst verdict wins in any rollup.
 export type Verdict = 'green' | 'amber' | 'red' | 'unknown';
 
+// --- Shopify reconciliation (ADR-0007 / ADR-0009) -------------------------
+// The storefront side of a reconciliation: what the middleware CLAIMS vs what
+// Shopify (read-only) actually shows. Attached to a pipe's detail so the panel can
+// surface exactly WHERE they diverge (the SKU, the order), not just a colour. It is
+// surface-only: the verdict is still driven by NAV / the middleware; a divergence is
+// reported, and `available: false` means Shopify was not reached (unknown, never a
+// false green).
+export interface ShopifyDivergenceItem {
+  key: string;                        // the SKU / order / shipment that differs
+  nav: string | number | null;       // what NAV / the middleware claims
+  shopify: string | number | null;   // what Shopify actually holds
+  note: string;                       // human description of the divergence
+}
+export interface ShopifyReconciliation {
+  source: 'shopify-admin';
+  available: boolean;                 // false => Shopify not reached (unknown)
+  checked: number;                    // items compared
+  reconciled: boolean;                // checked > 0 and no divergence
+  divergences: ShopifyDivergenceItem[];
+}
+
+// A non-verdict DISPLAY state (ADR-0008) for a pipe that is correctly not
+// reporting, kept in the pipe's detail bag rather than in the Verdict union.
+//   active          - normal; the default when the field is absent.
+//   disabled        - the feature is deliberately off (e.g. price_sync disabled).
+//   idle_no_traffic - healthy and correctly configured but no work / traffic to
+//                     report in the window (a quiet webhook topic, an idle stretch).
+// The rollup treats disabled / idle_no_traffic as NEUTRAL: not unknown, not
+// red/amber, and it does not drag the leadership headline off healthy.
+export type PipeApplicability = 'active' | 'disabled' | 'idle_no_traffic';
+
 // Verdict ordering for "worst wins" rollups. Higher is worse.
 const VERDICT_SEVERITY: Record<Verdict, number> = {
   green: 0,
@@ -76,6 +107,35 @@ export interface OrderHealth {
   oldest_stuck_age_s: number | null;
   is_orphan_suspect: boolean;
   note: string | null;
+  // Round 3: the FS-aware classification of an awaiting_ship stall, plus a return
+  // marker so a Happy Return is never graded as a stall. Optional / additive; the
+  // read API serves them from the order snapshot detail column (0002 migration).
+  classification?: AwaitingShipClass | null;
+  awaiting_ship_detail?: AwaitingShipDetail | null;
+}
+
+// Round 3 (Unit 1). Why an awaiting_ship order has not shipped, reconciled between
+// the Shopify Fulfillment Service (FS) location and NAV warehouse on-hand.
+//   fs_floor_at_zero : FS available < 0 while a NAV warehouse is stocked (> 0). The
+//                      Symmetry FS floor-at-zero bug (dominant today). NOT a 3PL delay.
+//   backordered      : a line is genuinely warehouse-short / on a future IABC date.
+//   genuine_3pl_delay: in stock, FS available >= 0, unshipped past the SLO (real chase).
+//   orphan_or_return : no NAV order behind the record.
+//   return           : a Happy Return / non-sales record; never an awaiting_ship stall.
+export type AwaitingShipClass =
+  | 'fs_floor_at_zero'
+  | 'backordered'
+  | 'genuine_3pl_delay'
+  | 'orphan_or_return'
+  | 'return';
+
+export interface AwaitingShipDetail {
+  classification: AwaitingShipClass;
+  age_s: number | null;                 // how long the order has been awaiting shipment
+  fs_available: number | null;          // Shopify FS-location available (negative = floor-at-zero)
+  nav_warehouse_on_hand: number | null; // NAV warehouse on-hand (> 0 while FS < 0 = the bug)
+  sample_sku: string | null;            // a representative SKU driving the classification
+  why: string;                          // human "why this is red/amber", for the UI
 }
 
 // The three-verdict inventory-sync contract (design.md 5A.2), generalized so
@@ -125,6 +185,7 @@ export interface InventorySyncDetail {
   last_walk: InventoryWalk | null;
   recent_walks: InventoryWalk[];      // most-recent-first
   divergence: InventoryDivergence;
+  shopify_reconciliation?: ShopifyReconciliation; // NAV availability vs Shopify inventory levels (ADR-0009)
 }
 
 // --- Allocator (Warehouse Split) pipe detail (Unit 4, design.md 3.2 / 5) ------
@@ -150,13 +211,20 @@ export interface AllocatorSplitSanity {
   decisions_window: number | null;    // total decisions counted in the window
   split_count: number | null;         // multi-warehouse splits
   split_rate: number | null;          // split_count / decisions_window
-  unallocatable_count: number | null; // decisions with no ATP anywhere
-  failed_count: number | null;        // errored decisions
-  failed_rate: number | null;         // (unallocatable + failed) / decisions_window
+  unallocatable_count: number | null; // decisions IN THE WINDOW with no ATP anywhere
+  failed_count: number | null;        // errored decisions IN THE WINDOW
+  failed_rate: number | null;         // (unallocatable + failed within window) / decisions_window
   atp_fallback_count: number | null;  // inventory-aware fallbacks
   // green/amber/red by failed_rate bands. Unlike inventory divergence this is
   // NOT amber-capped: a genuinely high un-allocatable rate is allowed to go RED.
   sanity_verdict: Verdict;
+  // Unit 4 (health-fidelity): the STANDING OOS-held / needs-operator backlog,
+  // surfaced as its own labelled count and age. This is a separate population from
+  // the in-window failed decisions above: an order held for lack of stock over
+  // days is NOT a recent allocation failure, so it must NOT inflate failed_rate.
+  // Kept out of the sanity band; it drives its own informational chip, not the verdict.
+  oos_held_count?: number | null;         // orders currently held out-of-stock / needs-operator / backorder
+  oos_held_oldest_age_s?: number | null;  // age of the oldest such held order (first-seen)
 }
 
 export interface AllocatorDetail {
@@ -171,19 +239,30 @@ export interface AllocatorDetail {
 // backend writes the shape; the panel casts detail to it. Snake_case matches
 // the JSONB column convention.
 
-// nav_job_queue: this pipe CONSUMES the middleware's already-computed job-queue
-// health verdict (design.md 6) and does NOT re-derive it. The detail carries the
-// middleware's supporting numbers (CU 50009 auto-release recency + stuck-job
-// tripwire) purely for context; adopted_verdict is the verdict as surfaced.
+// nav_job_queue (Unit 1, ADR-0007): this pipe now COMPUTES its verdict from
+// read-only NAV (last CU 50009 auto-release recency, a genuinely stuck in-process
+// CU 50007, and real Status=0 pending-promotion staging rows). The middleware's
+// own level and stuck-staging count are kept as a LABELLED CROSS-CHECK, not the
+// verdict. New NAV fields are optional so snapshots/tests that predate the compute
+// still type-check.
 export interface JobQueueDetail {
-  source: 'middleware:job-queue/health';
-  adopted_verdict: Verdict;               // the middleware verdict, surfaced unchanged
-  middleware_verdict_raw: string | null;  // the raw verdict string the endpoint returned
-  auto_release_fired_at: string | null;   // last CU 50009 auto-release firing
-  auto_release_age_s: number | null;      // wall-clock age of that firing
-  longest_running_job_s: number | null;   // age of the oldest running Job Queue Entry
-  stuck_job_count: number | null;         // jobs the middleware flags stuck (> its own threshold)
-  checked_at: string | null;              // when the middleware computed this health
+  source: 'nav:job-queue-log+staging' | 'middleware:job-queue/health';
+  // The three independent NAV-computed sub-verdicts.
+  liveness_verdict?: Verdict;   // recency of the last CU 50009 auto-release firing
+  stuck_job_verdict?: Verdict;  // a genuinely stuck in-process CU 50007 (>= ~60 min)
+  staging_verdict?: Verdict;    // real Status=0 pending-promotion staging backlog
+  auto_release_fired_at: string | null;   // last CU 50009 auto-release firing (NAV)
+  auto_release_age_s: number | null;       // wall-clock age of that firing
+  longest_running_job_s: number | null;    // oldest IN-PROCESS CU 50007 age (NAV)
+  in_process_job_count?: number | null;     // CU 50007 rows currently in process (NAV)
+  pending_staging_count?: number | null;    // real Status=0 rows pending promotion (NAV)
+  // Middleware cross-check (monitored, NOT authoritative for the verdict).
+  middleware_verdict_raw: string | null;          // the raw level the endpoint returned
+  middleware_stuck_staging_count?: number | null; // the endpoint's own count (for divergence)
+  stuck_job_count: number | null;                 // jobs the middleware flags stuck
+  checked_at: string | null;                      // when the middleware computed its view
+  // Legacy: the verdict this pipe adopted before Unit 1 (kept for old snapshots).
+  adopted_verdict?: Verdict;
 }
 
 // price_sync: freshness (last price-sync signal received) + liveness (last
@@ -193,6 +272,11 @@ export interface PriceSyncDetail {
   last_received_age_s: number | null;
   last_run_at: string | null;         // last price-sync run/loop completed (liveness)
   last_run_age_s: number | null;
+  // ADR-0008 applicability. 'disabled' when the middleware reports the feature off
+  // (all timestamps null AND an explicit disabled signal): a disabled feature reads
+  // as a labelled neutral state, not a broken-sensor 'unknown'. Absent => 'active'.
+  applicability?: PipeApplicability;
+  shopify_reconciliation?: ShopifyReconciliation; // NAV price vs Shopify price spot-check (ADR-0009)
 }
 
 // shopify_webhook: last-received per topic plus the subscription-removal signal
@@ -203,6 +287,9 @@ export interface WebhookTopicHealth {
   last_received_age_s: number | null;
   subscribed: boolean;            // false = removed/absent subscription (amber-or-worse)
   verdict: Verdict;               // per-topic freshness verdict (subscription folds into the pipe)
+  // Subscribed but no receipt in the window: quiet, not broken (ADR-0008). A quiet
+  // topic contributes a neutral state, not an 'unknown', to the pipe rollup.
+  idle_no_traffic?: boolean;
 }
 
 export interface ShopifyWebhookDetail {
@@ -210,6 +297,14 @@ export interface ShopifyWebhookDetail {
   missing_subscription_count: number; // topics with subscribed === false
   freshest_received_at: string | null;
   stalest_received_at: string | null;
+  // ADR-0008 applicability. 'idle_no_traffic' when every subscribed topic is
+  // simply quiet (no receipt in the window) and no subscription is missing: the
+  // pipe reads a labelled neutral state rather than being dragged to 'unknown' by
+  // a quiet topic. A genuinely missing subscription is still amber-or-worse and
+  // keeps applicability 'active'. Absent => 'active'.
+  applicability?: PipeApplicability;
+  idle_topic_count?: number;          // subscribed topics with no receipt in the window
+  shopify_reconciliation?: ShopifyReconciliation; // Shopify orders vs NAV arrival (outcome, ADR-0009)
 }
 
 // --- Back-sync pipe detail (Unit 2, design.md 3.2 / 5 line "Missed back-sync") -
@@ -244,6 +339,14 @@ export interface BackSyncDetail {
   fulfillments_last_24h: number | null;
   errors_last_24h: number | null;
   missed_shipments: MissedShipment[]; // detail rows for the panel table
+  // Unit 2 (health-fidelity): the freshness/liveness clocks are gated on whether
+  // there is UNSYNCED work. When NAV shows no DTC shipment posted since the last
+  // back-sync record, the watcher is idle-not-behind: the age clocks do not run and
+  // the pipe reads a neutral state instead of aging to amber during a quiet stretch.
+  has_unsynced_work?: boolean;             // a NAV DTC shipment newer than the watermark exists
+  newest_unsynced_shipment_at?: string | null; // the shipment the watermark is aged against (null when idle)
+  applicability?: PipeApplicability;       // 'idle_no_traffic' during a quiet, caught-up stretch
+  shopify_reconciliation?: ShopifyReconciliation; // NAV shipment vs Shopify fulfillment (ADR-0009)
 }
 
 export interface HealthTransition {
@@ -318,12 +421,24 @@ export type RollupResponse = { as_of: string } & LeadershipRollup;
 // call from this service.
 export type RemediationKind = 'middleware_endpoint' | 'ops_runbook';
 
-// The existing authenticated middleware endpoint a tool invokes. Documented as a
-// shape only; the remediationClient is stubbed and never fires a live call.
+// The existing authenticated middleware endpoint a tool invokes. When the
+// executable path is DISARMED (the default, ADR-0010) this is documented as a
+// shape only and no live call is made. When ARMED, a middleware_endpoint tool
+// fires this exact POST with an Authorization: Bearer header.
 export interface RemediationEndpoint {
   method: 'POST' | 'GET';
   path: string;   // for example '/api/recovery/fulfillments'
   source: string; // the middleware function, for example 'recovery.rs :: submit_fulfillment_requests_for_order'
+  // GATED: the middleware requires its NAV write-gate password (NAV_TOGGLE_PASSWORD)
+  // on this endpoint. When true AND armed, the live POST adds the password to the
+  // body (never logged). Seed ONLY from documented evidence; where the middleware's
+  // per-endpoint auth shape is unconfirmed, leave it unset and confirm before arming.
+  gated?: boolean;
+  // HELD OUT of the Tier 1 live path even when armed + confirmed (ADR-0010): a
+  // destructive / irreversible action with no clear rollback story. It always
+  // returns 'would_trigger'; the live POST is never issued. heldReason explains why.
+  heldFromLivePath?: boolean;
+  heldReason?: string;
 }
 
 // A documented ops runbook reference (no live call, no middleware endpoint).
@@ -363,20 +478,169 @@ export interface RemediationRegistry {
 }
 export type RemediationRegistryResponse = { as_of: string } & RemediationRegistry;
 
-// The typed result of an operator trigger. STUBBED: status is always
-// 'would_trigger'; no live call is made (middleware auth is DevOps-gated). The
-// resolved call shape is echoed so an operator sees exactly what WOULD run.
+// The body an operator sends to POST /api/remediation/:tool/trigger. `confirmed`
+// is the per-action operator sign-off (ADR-0010): the live path fires ONLY when
+// confirmed is true. Absent / false returns the 'would_trigger' preview, so a stray
+// POST can never fire a mutation. subjectKind/subjectKey name the health subject to
+// resolve, if any.
+export interface RemediationTriggerInput {
+  subjectKind?: HealthTransition['subject_kind'];
+  subjectKey?: string;
+  confirmed?: boolean;
+}
+
+// The typed result of an operator trigger.
+//   'would_trigger' - DISARMED (or unconfirmed, kill-switched, ops_runbook, or a
+//                     held-out action): the exact call is echoed, NO live call made.
+//   'triggered'     - ARMED + confirmed: the authenticated middleware POST fired
+//                     and returned 2xx. `live` is true.
+//   'error'         - ARMED + confirmed but the live POST failed (non-2xx / network
+//                     / timeout). Typed, never thrown to the route. `error` carries
+//                     the reason; `httpStatus` the response code when there was one.
+// The resolved call shape is always echoed so an operator sees exactly what ran or
+// would run.
 export interface RemediationTriggerResult {
-  status: 'would_trigger';
+  status: 'would_trigger' | 'triggered' | 'error';
   as_of: string;
   toolId: string;
   toolName: string;
   kind: RemediationKind;
-  // The authenticated call that WOULD be issued (documented, not fired), or the
-  // ops runbook step to run by hand.
+  // The authenticated call that was issued, WOULD be issued (documented, not fired),
+  // or the ops runbook step to run by hand.
   wouldCall: string;
-  // Human confirmation line, matching the demo's "done" copy.
+  // Human confirmation line.
   message: string;
   // Whether an open health_transition row was resolved as a remediation event.
   resolvedSubject: { subjectKind: HealthTransition['subject_kind']; subjectKey: string } | null;
+  // True only when a live HTTP call was actually made (status 'triggered' or a
+  // live-attempt 'error'). False for every disarmed / preview outcome.
+  live: boolean;
+  httpStatus?: number; // the middleware response code, when a live call got one
+  error?: string;      // failure reason on status 'error' (no secrets)
+}
+
+// One append-only audit-log entry: recorded on EVERY operator execution (armed or
+// disarmed), the accountability artifact ADR-0010 requires. params holds the
+// non-secret call parameters only; the NAV toggle password and the bearer token
+// are NEVER recorded here.
+export interface RemediationAuditEntry {
+  at: string;          // ISO timestamp of the operator action
+  toolId: string;
+  subjectKind: HealthTransition['subject_kind'] | null;
+  subjectKey: string | null;
+  params: Record<string, unknown>; // non-secret call params (method, path, gated, confirmed, ...)
+  outcome: RemediationTriggerResult['status']; // would_trigger | triggered | error
+}
+
+// --- Failure-mode tool detection (issue #35) -------------------------------
+// A pipe can have SEVERAL real remediation tools, and the right one depends on
+// the runtime failure mode actually observed, not on a static primary. This PURE
+// function inspects a pipe's OBSERVED health (its verdict columns + its typed
+// detail bag, both already computed by the pipe compute modules) and NAMES the
+// tool whose real middleware contract matches that failure mode.
+//
+// BOUNDARY: it only NAMES a tool. It fires nothing, adds no endpoint, and reads
+// NAV nothing but read-only. The remediation modal marks the detected tool
+// "Recommended" (with `reason`) and lists the rest as alternatives; when this
+// returns null (no runtime detail, or no distinguishing signal) the caller falls
+// back to the static primary mapping. It lives here, beside worstVerdict, so both
+// the backend registry and the frontend modal share ONE implementation.
+export interface RemediationDetection {
+  toolId: string; // the detected tool's id (references RemediationTool.id)
+  reason: string; // short human note on the observed failure mode
+}
+
+function isRedOrAmber(v: Verdict): boolean {
+  return v === 'red' || v === 'amber';
+}
+
+// inventory_sync: liveness-dead vs watermark-stale-but-alive vs dry-run-divergence
+// (design.md 5A), mapping to atomic restart / clear-the-hung-job / reconcile audit.
+function detectInventorySync(pipe: PipelineHealth): RemediationDetection | null {
+  // 1. Watcher liveness dead/degraded -> atomic restart (re-attach to the queue).
+  if (isRedOrAmber(pipe.liveness_verdict)) {
+    return {
+      toolId: 'atomic_watcher_restart',
+      reason: `watcher liveness ${pipe.liveness_verdict} (heartbeat aging/dead)`,
+    };
+  }
+  // 2. Watermark stale while the watcher is still alive -> the NAV job queue is
+  //    serialized behind a hung CU 50007; clear that job so auto-release resumes.
+  if (isRedOrAmber(pipe.freshness_verdict)) {
+    return {
+      toolId: 'clear_cu50007_job',
+      reason: `watermark stale (freshness ${pipe.freshness_verdict}) but watcher alive`,
+    };
+  }
+  // 3. Dry-run divergence (structurally amber-capped) -> read-only reconcile audit.
+  const divergence = (pipe.detail as unknown as InventorySyncDetail).divergence;
+  if (divergence !== undefined && divergence.divergence_verdict === 'amber') {
+    return {
+      toolId: 'reconcile_audit',
+      reason: 'dry-run divergence (amber) - classify the delta, do not push',
+    };
+  }
+  return null;
+}
+
+// back_sync: backlog -> batch replay; a single miss -> single submit; a stale
+// watcher with no backlog -> force a pass (run-now). rescan-from / close-fos are
+// visible alternatives with no distinguishing runtime signal.
+function detectBackSync(pipe: PipelineHealth): RemediationDetection | null {
+  const missed = (pipe.detail as unknown as BackSyncDetail).missed_count ?? 0;
+  // A real backlog of unsubmitted fulfillments -> the BATCH replay (<=200 orders).
+  if (missed >= 2) {
+    return {
+      toolId: 'recovery_sweep',
+      reason: `${missed} missed shipments - batch replay of unsubmitted fulfillment requests`,
+    };
+  }
+  // Exactly one missed order -> the single-order submit variant.
+  if (missed === 1) {
+    return {
+      toolId: 'submit_fulfillment_request',
+      reason: 'one missed shipment - single-order fulfillment submit',
+    };
+  }
+  // No backlog, but the watcher/freshness is stale -> force a back-sync pass.
+  if (isRedOrAmber(pipe.liveness_verdict) || isRedOrAmber(pipe.freshness_verdict)) {
+    return {
+      toolId: 'back_sync_run_now',
+      reason: 'no backlog but back-sync watcher stale - force a pass',
+    };
+  }
+  return null;
+}
+
+// shopify_webhook: a removed/absent subscription is the WAF-removal failure mode.
+function detectShopifyWebhook(pipe: PipelineHealth): RemediationDetection | null {
+  const missing = (pipe.detail as unknown as ShopifyWebhookDetail).missing_subscription_count ?? 0;
+  if (missing > 0) {
+    return {
+      toolId: 'webhook_resubscribe',
+      reason: `${missing} webhook subscription(s) removed/absent`,
+    };
+  }
+  return null;
+}
+
+// Select the tool matching the observed failure mode, or null to fall back to the
+// static primary. `pipe` carries both the verdict columns and the typed detail bag.
+export function detectRemediationTool(
+  subjectKey: string,
+  pipe: PipelineHealth | null,
+): RemediationDetection | null {
+  if (pipe === null) return null;
+  switch (subjectKey) {
+    case 'inventory_sync':
+      return detectInventorySync(pipe);
+    case 'back_sync':
+      return detectBackSync(pipe);
+    case 'shopify_webhook':
+      return detectShopifyWebhook(pipe);
+    // price_sync / nav_job_queue / allocator each have a single tool today, so
+    // there is no runtime distinction to draw: the static primary stands.
+    default:
+      return null;
+  }
 }

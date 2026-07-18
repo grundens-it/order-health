@@ -62,7 +62,7 @@ export async function latestOrders(filter: ChannelFilter): Promise<Snapshot<Orde
   const rows = await query<OrderHealth>(
     `SELECT channel, nav_order_no, shopify_order_id, shopify_order_name,
             customer_ref, current_stage, order_verdict, oldest_stuck_age_s,
-            is_orphan_suspect, note
+            is_orphan_suspect, note, classification, awaiting_ship_detail
        FROM order_health_snapshot
       WHERE as_of = $1 ${wantChannel ? 'AND channel = $2' : ''}
       ORDER BY order_verdict DESC, oldest_stuck_age_s DESC NULLS LAST`,

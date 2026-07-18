@@ -11,8 +11,20 @@ import type { OrderHealth, PipelineHealth } from '@order-health/shared';
 import { config } from '../config';
 import { getPool } from '../db/pool';
 import type { MiddlewareClient } from '../sources/middlewareClient';
-import type { NavClient, NavOrderLifecycleRow } from '../sources/navClient';
-import { computeInventorySync, type InventorySyncInput } from './inventorySync';
+import type { NavClient, NavOrderLifecycleRow, NavOrderLine } from '../sources/navClient';
+import type { ShopifyClient } from '../sources/shopifyClient';
+import { classifyAwaitingShip } from './awaitingShipClass';
+// back_sync + inventory_sync are wired live below (their join keys, order-ref and
+// SKU, are reliable). reconcilePrice and reconcileWebhookOutcome are delivered and
+// unit-tested but not wired here yet: price needs a NAV price read, and the webhook
+// outcome needs a reliable Shopify-order-name to NAV-order match, to avoid surfacing
+// false divergences. See shopifyReconcile.ts / ADR-0009.
+import { reconcileBackSync, reconcileInventory } from './shopifyReconcile';
+import {
+  computeDryRunDivergence,
+  computeInventorySync,
+  type InventorySyncInput,
+} from './inventorySync';
 import {
   CHANNEL_STAGES,
   computeOrderRows,
@@ -45,6 +57,7 @@ export const PIPES = [
 export interface Sources {
   middleware: MiddlewareClient;
   nav: NavClient;
+  shopify: ShopifyClient;
 }
 
 // ---------------------------------------------------------------------------
@@ -60,11 +73,18 @@ export async function computeInventorySyncPipeline(sources: Sources): Promise<Pi
   // READ-ONLY source reads (currently stubbed: they return typed nulls/empties
   // until DevOps provisions NAV + the middleware endpoint). No live calls, no
   // writes anywhere upstream.
-  const [state, walks, status] = await Promise.all([
+  const [state, walks, status, feed, navAvailability] = await Promise.all([
     sources.nav.getInventoryWatermarkState(),
     sources.nav.getRecentInventoryWalks(8),
     sources.middleware.getInventorySyncStatus(),
+    sources.middleware.getInventorySyncFeed(),
+    sources.nav.getInventoryAvailability(),
   ]);
+
+  // REBUILD the dry-run "would push" count read-only: current NAV availability vs
+  // the quantity last pushed to Shopify per (sku, location). Falls back to the
+  // middleware's own dry-run body / null when the sources are absent (issue #37).
+  const divergence = computeDryRunDivergence(navAvailability, feed, status.dryRunAt);
 
   const input: InventorySyncInput = {
     navNewestIabcEntryNo: state.navNewestIabcEntryNo,
@@ -72,12 +92,24 @@ export async function computeInventorySyncPipeline(sources: Sources): Promise<Pi
     lastWalkAt: state.lastWalkAt,
     watcherHeartbeatAt: state.watcherHeartbeatAt,
     walks,
-    dryRunWouldPush: status.dryRunWouldPush,
-    dryRunAt: status.dryRunAt,
+    dryRunWouldPush: divergence.dryRunWouldPush ?? status.dryRunWouldPush,
+    dryRunAt: divergence.dryRunAt ?? status.dryRunAt,
     totalPairs: status.totalPairs,
   };
 
   const r = computeInventorySync(input, config.inventorySync, Date.now());
+
+  // Shopify reconciliation (ADR-0009): NAV availability vs the inventory level
+  // Shopify actually holds, for a bounded SKU sample. Surface-only (annotates the
+  // detail, never the verdict); an empty Shopify read reads unavailable (unknown).
+  const navBySku = new Map<string, number>();
+  for (const row of navAvailability) {
+    if (row.sku === null || row.availableQty === null) continue;
+    navBySku.set(row.sku, (navBySku.get(row.sku) ?? 0) + row.availableQty);
+  }
+  const sampleSkus = [...navBySku.keys()].slice(0, 50);
+  const levels = await sources.shopify.getInventoryLevels(sampleSkus);
+  r.detail.shopify_reconciliation = reconcileInventory(navBySku, levels);
 
   return {
     pipe: 'inventory_sync',
@@ -111,6 +143,8 @@ export async function computeAllocatorPipeline(sources: Sources): Promise<Pipeli
     unallocatableCount: status.unallocatableCount,
     failedCount: status.failedCount,
     atpFallbackCount: status.atpFallbackCount,
+    oosHeldCount: status.oosHeldCount,
+    oosHeldOldestAgeS: status.oosHeldOldestAgeS,
     decisions: status.recentDecisions,
   };
 
@@ -140,6 +174,7 @@ export async function computePriceSyncPipeline(sources: Sources): Promise<Pipeli
   const input: PriceSyncInput = {
     lastReceivedAt: status.lastReceivedAt,
     lastRunAt: status.lastRunAt,
+    enabled: status.enabled,
   };
 
   const r = computePriceSync(input, config.priceSync, Date.now());
@@ -157,32 +192,43 @@ export async function computePriceSyncPipeline(sources: Sources): Promise<Pipeli
   };
 }
 
-// --- Unit 3: nav_job_queue -------------------------------------------------
-// CONSUME the middleware's already-computed job-queue verdict; do NOT recompute
-// it (design.md 6). The row's three verdict columns all reflect that single
-// adopted verdict (this pipe derives no independent freshness/liveness); the
-// supporting numbers ride in the typed detail bag.
+// --- Unit 1: nav_job_queue -------------------------------------------------
+// COMPUTE the verdict from read-only NAV (ADR-0007), do NOT adopt the middleware
+// level. Read three NAV signals (last CU 50009 auto-release, oldest in-process
+// CU 50007, real Status=0 staging backlog); read the middleware's own level and
+// stuck-staging count only as a labelled cross-check. The row's freshness column
+// carries the liveness (auto-release recency) verdict; the staging sub-verdict
+// rides in the detail bag.
 export async function computeJobQueuePipeline(sources: Sources): Promise<PipelineHealth> {
-  const status = await sources.middleware.getJobQueueHealthStatus();
+  const [nav, mwHealth, mwStuckStaging] = await Promise.all([
+    sources.nav.getJobQueueState(),
+    sources.middleware.getJobQueueHealthStatus(),
+    sources.middleware.getStuckStaging(),
+  ]);
 
   const input: JobQueueInput = {
-    middlewareVerdict: status.verdict,
-    autoReleaseFiredAt: status.autoReleaseFiredAt,
-    longestRunningJobS: status.longestRunningJobS,
-    stuckJobCount: status.stuckJobCount,
-    checkedAt: status.checkedAt,
+    // NAV (authoritative).
+    autoReleaseFiredAt: nav.autoReleaseFiredAt,
+    oldestInProcessJobAt: nav.oldestInProcessJobAt,
+    inProcessJobCount: nav.inProcessJobCount,
+    pendingStagingCount: nav.pendingStagingCount,
+    // Middleware cross-check (monitored, not authoritative).
+    middlewareVerdict: mwHealth.verdict,
+    middlewareStuckStagingCount: mwStuckStaging.length > 0 ? mwStuckStaging.length : null,
+    stuckJobCount: mwHealth.stuckJobCount,
+    checkedAt: mwHealth.checkedAt,
   };
 
   const r = computeJobQueue(input, config.jobQueue, Date.now());
 
   return {
     pipe: 'nav_job_queue',
-    pipe_verdict: r.pipeVerdict,           // == the adopted middleware verdict
-    freshness_verdict: r.adoptedVerdict,   // mirrors the single consumed verdict
-    watermark_lag_s: null,
-    last_progress_at: r.lastProgressAt,    // last CU 50009 auto-release firing
-    liveness_verdict: r.adoptedVerdict,    // mirrors the single consumed verdict
-    heartbeat_at: r.detail.checked_at,
+    pipe_verdict: r.pipeVerdict,            // worst of liveness / stuck-job / staging
+    freshness_verdict: r.livenessVerdict,   // auto-release recency (NAV liveness)
+    watermark_lag_s: r.detail.auto_release_age_s,
+    last_progress_at: r.lastProgressAt,     // last CU 50009 auto-release firing
+    liveness_verdict: r.livenessVerdict,
+    heartbeat_at: r.heartbeatAt,
     heartbeat_age_s: null,
     detail: r.detail as unknown as Record<string, unknown>,
   };
@@ -224,10 +270,11 @@ export async function computeShopifyWebhookPipeline(sources: Sources): Promise<P
 // the pure computeBackSync, and maps the result to the PipelineHealth row. All reads
 // are currently stubbed (typed nulls/empties) until DevOps provisions the sources.
 export async function computeBackSyncPipeline(sources: Sources): Promise<PipelineHealth> {
-  const [status, missed, shipments] = await Promise.all([
+  const [status, missed, shipments, newestDtcShipmentAt] = await Promise.all([
     sources.middleware.getBackSyncStatus(),
     sources.middleware.getMissedShipmentDetail(),
     sources.nav.getRecentShipments(50),
+    sources.nav.getNewestDtcShipmentAt(), // Unit 2 has-work gate
   ]);
 
   // Enrich each missed row with NAV shipment header detail (carrier / tracking /
@@ -253,9 +300,21 @@ export async function computeBackSyncPipeline(sources: Sources): Promise<Pipelin
     fulfillmentsLast24h: status.fulfillmentsLast24h,
     errorsLast24h: status.errorsLast24h,
     missedShipments: enriched,
+    newestDtcShipmentAt,
   };
 
   const r = computeBackSync(input, config.backSync, Date.now());
+
+  // Shopify reconciliation (ADR-0009): for the recently NAV-posted DTC shipments,
+  // does Shopify actually show a fulfillment? A NAV shipment with no Shopify
+  // fulfillment is the divergence to surface, regardless of the middleware feed.
+  // Surface-only; an empty Shopify read reads unavailable (unknown).
+  const navShippedDtcOrders = shipments
+    .filter((s) => s.webId !== null && s.orderRef !== null)
+    .map((s) => s.orderRef as string)
+    .slice(0, 50);
+  const states = await sources.shopify.getFulfillmentStates(navShippedDtcOrders);
+  r.detail.shopify_reconciliation = reconcileBackSync(navShippedDtcOrders, states);
 
   return {
     pipe: 'back_sync',
@@ -314,21 +373,53 @@ export async function computePipelines(sources: Sources): Promise<PipelineHealth
 // yields an empty snapshot with no live calls.
 // ---------------------------------------------------------------------------
 
-// Map one read-only NAV lifecycle row to the seeded OrderInput the grader takes.
-// The per-channel chain (CHANNEL_STAGES) decides which hops exist, so wholesale
-// simply has no shopify_order / allocator_split / back_sync hop to grade.
-function buildOrderInput(row: NavOrderLifecycleRow): OrderInput {
-  // Completion timestamp per stage. awaiting_ship completes when the shipment
-  // exists (same signal as nav_shipment), which is what moves a promoted order
-  // off "awaiting ship".
+// Map one read-only NAV lifecycle row to the seeded OrderInput the grader takes
+// (Unit 6, health-fidelity; see docs/business/order-layer-red-rate-finding-2026-07-13.md).
+//
+// THE JOIN FIX. Four DTC hop completions are middleware-sourced and NOT observable
+// from read-only NAV, so a live row carries them null: allocatorSplitAt, navStagingAt,
+// navPromotionAt, backSyncAt. Reading those nulls as "never happened" pinned every
+// order at allocator_split and aged it from the order date against the tight staging
+// band, reddening 98.9% of a healthy board. Per ADR-0007, NAV read-only is the system
+// of record: the authoritative per-order evidence is that the order was RECEIVED
+// (orderDate), whether it SHIPPED (navShipmentAt), the staging Status, and the
+// missed-back-sync reconciliation. So INFER each unobservable completion from that
+// evidence (assume the middleware's step landed unless NAV shows a fault) instead of
+// aging a null as if stuck. When a real timestamp IS present (seeded fixtures, or a
+// future source that provides it) it is used unchanged, so the grader and its tests
+// are untouched.
+export function buildOrderInput(row: NavOrderLifecycleRow): OrderInput {
+  const shipped = row.navShipmentAt !== null;
+  // The received-time anchor. DTC carries the NAV order date; wholesale has none in
+  // the read-only row, so an unshipped wholesale order has no anchor and reads
+  // unknown (never a false red) rather than being aged.
+  const receivedAt = row.shopifyOrderAt;
+  // Inferred completion for an unobservable intermediate hop: the shipment time when
+  // shipped, else the received time (the order is in flight, awaiting shipment).
+  const inferredMidCompletion = shipped ? row.navShipmentAt : receivedAt;
+  // Unit D (health-fidelity integration): staging Status is NOT a per-order stuck
+  // signal. Live NAV shows GRUS$Sales Header Staging [Status] = 1 ("Not Auto-released")
+  // is the ordinary early-lifecycle state of a freshly received DTC order (530 of 533
+  // reds were recent Status=1 orders, median age 1 day). No field in the read-only
+  // order-lifecycle query identifies a GENUINELY stuck staging row, so a status FLAG
+  // cannot be a truthful red. The honest per-order signal is age based: an unshipped
+  // order is aged at its awaiting_ship frontier against the awaiting-ship band. The
+  // Status=1 backlog remains a PIPE signal (nav_job_queue), not a per-order red.
+  // See docs/business/order-layer-residual-red-finding-2026-07-13.md.
+  // Back-sync completion is unobservable; infer it from the shipment plus the
+  // missed-back-sync reconciliation. A missed back-sync leaves it incomplete + latched.
+  const backSynced = shipped && !row.missedBackSync;
+
+  // Completion timestamp per stage. Real timestamp if the source provides one, else
+  // the NAV-evidence inference. awaiting_ship / nav_shipment complete on the shipment.
   const completedAtByStage: Partial<Record<OrderHop['stage'], string | null>> = {
     shopify_order: row.shopifyOrderAt,
-    allocator_split: row.allocatorSplitAt,
-    nav_staging: row.navStagingAt,
-    nav_promotion: row.navPromotionAt,
+    allocator_split: row.allocatorSplitAt ?? inferredMidCompletion,
+    nav_staging: row.navStagingAt ?? inferredMidCompletion,
+    nav_promotion: row.navPromotionAt ?? inferredMidCompletion,
     awaiting_ship: row.navShipmentAt,
     nav_shipment: row.navShipmentAt,
-    back_sync: row.backSyncAt,
+    back_sync: row.backSyncAt ?? (backSynced ? row.navShipmentAt : null),
   };
 
   const hops: OrderHop[] = [];
@@ -336,16 +427,12 @@ function buildOrderInput(row: NavOrderLifecycleRow): OrderInput {
   for (const stage of CHANNEL_STAGES[row.channel]) {
     const completedAt = completedAtByStage[stage] ?? null;
 
-    // Latched errors promote a hop straight to RED (design.md 5).
+    // Latched errors promote a hop straight to RED (design.md 5). The only
+    // NAV-observable per-order fault kept is a missed back-sync (a NAV shipment
+    // posted with no Shopify fulfillment); the staging-status flag is NOT a fault
+    // (Unit D). An order stuck in staging surfaces as an unshipped order aged past
+    // the awaiting-ship SLO, not as a status flag.
     let error: string | null = null;
-    if (
-      stage === 'nav_staging' &&
-      row.navStagingStatus !== null &&
-      row.navStagingStatus !== 0 &&
-      row.navPromotionAt === null
-    ) {
-      error = `NAV staging stuck (Status ${row.navStagingStatus})`;
-    }
     if (stage === 'back_sync' && row.missedBackSync) {
       error = 'Missed back-sync: NAV shipment exists with no Shopify fulfillment';
     }
@@ -367,17 +454,143 @@ function buildOrderInput(row: NavOrderLifecycleRow): OrderInput {
   };
 }
 
+// Round 3 (Unit 2). A Happy Return / non-sales record: GRUS$Sales Header Document
+// Type 5 (Return Order), which live NAV shows carry "HR-" numbers and an empty
+// customer. It is NOT an outbound shipment, so it must never be graded awaiting_ship.
+function isReturnRow(row: NavOrderLifecycleRow): boolean {
+  return row.documentType === 5 || (row.navOrderNo?.startsWith('HR-') ?? false);
+}
+
 export async function computeOrders(sources: Sources): Promise<OrderHealth[]> {
-  // READ-ONLY source reads (stubbed: NAV returns [] and the middleware errors
-  // view returns [] until DevOps provisions access). No live calls, no writes.
   const [rows] = await Promise.all([
     sources.nav.getOrderLifecycleRows(),
     sources.middleware.getErrors(), // errors view feeds latched hop errors in the live join
   ]);
+  const now = Date.now();
 
   const inputs = rows.map(buildOrderInput);
   // config.order carries the SLO bands and the orphan-grading flag (default OFF).
-  return computeOrderRows(inputs, config.order, Date.now());
+  const graded = computeOrderRows(inputs, config.order, now);
+  // graded[i] corresponds to rows[i] (1:1 map through buildOrderInput).
+  const paired = graded.map((health, i) => ({ health, row: rows[i]! }));
+
+  // Unit 2: reclassify returns out of awaiting_ship. A return is not a stall.
+  for (const { health, row } of paired) {
+    if (!isReturnRow(row)) continue;
+    health.order_verdict = 'green';
+    health.current_stage = 'complete';
+    health.oldest_stuck_age_s = null;
+    health.classification = 'return';
+    health.awaiting_ship_detail = {
+      classification: 'return',
+      age_s: null,
+      fs_available: null,
+      nav_warehouse_on_hand: null,
+      sample_sku: null,
+      why: 'Happy Return / non-sales record (Document Type 5); not an outbound shipment stall',
+    };
+    health.note = 'Return order (excluded from awaiting_ship grading)';
+  }
+
+  // Unit 1: classify the awaiting_ship red/amber orders by FS vs warehouse on-hand.
+  const awaiting = paired.filter(
+    (p) =>
+      !isReturnRow(p.row) &&
+      p.health.current_stage === 'awaiting_ship' &&
+      (p.health.order_verdict === 'red' || p.health.order_verdict === 'amber'),
+  );
+  if (awaiting.length > 0) {
+    await classifyAwaitingShipOrders(sources, awaiting.map((a) => a.health));
+  }
+  return graded;
+}
+
+// Round 3 (Unit 1). Gather the FS-location available (Shopify) and NAV warehouse
+// on-hand for the awaiting_ship orders' SKUs, then classify each in place. The
+// classifier is pure; this is the I/O glue. Read-only everywhere.
+async function classifyAwaitingShipOrders(sources: Sources, orders: OrderHealth[]): Promise<void> {
+  const orderNos = new Set(orders.map((o) => o.nav_order_no).filter((x): x is string => x !== null));
+  const [lines, navAvail] = await Promise.all([
+    sources.nav.getOutstandingOrderLines(5000),
+    sources.nav.getInventoryAvailability(),
+  ]);
+
+  const linesByOrder = new Map<string, NavOrderLine[]>();
+  for (const l of lines) {
+    if (l.orderNo === null || l.sku === null || !orderNos.has(l.orderNo)) continue;
+    const arr = linesByOrder.get(l.orderNo) ?? [];
+    arr.push(l);
+    linesByOrder.set(l.orderNo, arr);
+  }
+
+  // NAV warehouse on-hand per SKU (summed across NAV locations; the FS location is
+  // a Shopify virtual location, absent from NAV, so all NAV locations are warehouses).
+  const navOnHandBySku = new Map<string, number>();
+  for (const a of navAvail) {
+    if (a.sku === null || a.availableQty === null) continue;
+    navOnHandBySku.set(a.sku, (navOnHandBySku.get(a.sku) ?? 0) + a.availableQty);
+  }
+
+  // FS-location available per SKU. Prioritize the RED (genuine stall) orders' SKUs so
+  // the FS floor-at-zero bug is always detected for them even under a bounded read;
+  // amber orders fill the remainder. The client chunks the read by 100 (the GraphQL
+  // productVariants cap), so a larger bound is a few queries, not a truncation.
+  const ordered = [...orders].sort(
+    (a, b) => Number(b.order_verdict === 'red') - Number(a.order_verdict === 'red'),
+  );
+  const skuList: string[] = [];
+  const seen = new Set<string>();
+  for (const o of ordered) {
+    const arr = o.nav_order_no !== null ? (linesByOrder.get(o.nav_order_no) ?? []) : [];
+    for (const l of arr) {
+      if (l.sku !== null && !seen.has(l.sku)) {
+        seen.add(l.sku);
+        skuList.push(l.sku);
+      }
+    }
+    if (skuList.length >= 500) break;
+  }
+  const fsLevels = await sources.shopify.getFsInventory(skuList);
+  const fsBySku = new Map<string, number | null>();
+  for (const f of fsLevels) fsBySku.set(f.sku, f.available);
+
+  for (const o of orders) {
+    const orderLines = o.nav_order_no !== null ? (linesByOrder.get(o.nav_order_no) ?? []) : [];
+    // Pick the representative SKU: an FS-floored line first (FS < 0 while warehouse
+    // stocked), else a warehouse-short line, else the first line.
+    let repSku: string | null = null;
+    let repFs: number | null = null;
+    let repWh: number | null = null;
+    let backorder = false;
+    for (const l of orderLines) {
+      if (l.sku === null) continue;
+      const fs = fsBySku.has(l.sku) ? (fsBySku.get(l.sku) ?? null) : null;
+      const wh = navOnHandBySku.has(l.sku) ? navOnHandBySku.get(l.sku)! : null;
+      if (fs !== null && fs < 0 && wh !== null && wh > 0) {
+        repSku = l.sku; repFs = fs; repWh = wh; backorder = false;
+        break; // FS floor-at-zero dominates; stop at the first.
+      }
+      if (wh !== null && wh <= 0) {
+        if (repSku === null) { repSku = l.sku; repFs = fs; repWh = wh; }
+        backorder = true;
+      } else if (repSku === null) {
+        repSku = l.sku; repFs = fs; repWh = wh;
+      }
+    }
+    const detail = classifyAwaitingShip({
+      ageS: o.oldest_stuck_age_s,
+      fsAvailable: repFs,
+      navWarehouseOnHand: repWh,
+      sampleSku: repSku,
+      hasNavOrder: o.nav_order_no !== null,
+      hasShopifyOrder: o.shopify_order_id !== null,
+      isReturn: false,
+      backorder,
+    });
+    o.classification = detail.classification;
+    o.awaiting_ship_detail = detail;
+    o.note = detail.why;
+  }
 }
 
 // Persist one order-layer snapshot run, all rows stamped with the same as_of.
@@ -393,12 +606,13 @@ export async function writeOrderSnapshot(asOf: string, orders: OrderHealth[]): P
       `INSERT INTO order_health_snapshot
          (as_of, channel, nav_order_no, shopify_order_id, shopify_order_name,
           customer_ref, current_stage, order_verdict, oldest_stuck_age_s,
-          is_orphan_suspect, note)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          is_orphan_suspect, note, classification, awaiting_ship_detail)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         asOf, o.channel, o.nav_order_no, o.shopify_order_id, o.shopify_order_name,
         o.customer_ref, o.current_stage, o.order_verdict, o.oldest_stuck_age_s,
-        o.is_orphan_suspect, o.note,
+        o.is_orphan_suspect, o.note, o.classification ?? null,
+        o.awaiting_ship_detail ? JSON.stringify(o.awaiting_ship_detail) : null,
       ],
     );
   }

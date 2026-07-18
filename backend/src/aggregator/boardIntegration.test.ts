@@ -118,8 +118,8 @@ test('a wholesale order is graded on its NAV-only chain and NEVER orphan-flags',
   }
 });
 
-// --- A stuck DTC order reds the order layer and the headline ----------------
-test('a DTC order stuck in NAV staging reds the order layer and drives the headline stuck with the oldest-stuck age', async () => {
+// --- A genuinely stalled DTC order reds the order layer and the headline -----
+test('a DTC order unshipped past the SLO reds the order layer and drives the headline stuck with the oldest-stuck age', async () => {
   const now = Date.now();
   const sources = makeSeededSources({
     now,
@@ -133,13 +133,14 @@ test('a DTC order stuck in NAV staging reds the order layer and drives the headl
   const stuck = orders.find((o) => o.nav_order_no === '1002');
   assert.ok(stuck);
   assert.equal(stuck.order_verdict, 'red');
-  assert.match(stuck.note ?? '', /NAV staging stuck/);
+  assert.equal(stuck.current_stage, 'awaiting_ship'); // stalled awaiting shipment, past the SLO
 
   // No pipe is red, yet the red ORDER alone drives the headline to stuck.
   assert.ok(pipes.every((p) => p.pipe_verdict === 'green'));
   assert.equal(rollup.headline, 'stuck');
   assert.equal(rollup.headline_verdict, 'red');
-  assert.ok((rollup.oldest_stuck_age_s ?? 0) > 3600, 'oldest stuck age reflects the stalled hop');
+  // Oldest stuck age reflects the days-old unshipped order (past the 72h red band).
+  assert.ok((rollup.oldest_stuck_age_s ?? 0) > 72 * 3600, 'oldest stuck age reflects the stalled order');
 });
 
 // --- Transition diff is jointly correct across the board --------------------

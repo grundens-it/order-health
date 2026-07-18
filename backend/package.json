@@ -13,6 +13,7 @@
     "test": "node --import tsx --test src/**/*.test.ts"
   },
   "dependencies": {
+    "@fastify/static": "^7.0.4",
     "@order-health/shared": "*",
     "dotenv": "^16.4.5",
     "fastify": "^4.28.1",

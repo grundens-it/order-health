@@ -1,15 +1,17 @@
-// Verdict-correctness tests for the Back-sync Monitor (Unit 2). No live NAV /
-// middleware: every case is a SEEDED input through the pure computeBackSync. Run
-// with `npm test` (node:test, built into Node >= 20).
+// Verdict-correctness tests for the Back-sync Monitor (Unit 2, health-fidelity).
+// No live NAV / middleware: every case is a SEEDED input through the pure
+// computeBackSync. Run with `npm test` (node:test, built into Node >= 20).
 //
-// Mirrors inventorySync.test.ts: assert each verdict at its boundary. The key
-// contrast with Unit 1 is that the missed-shipments signal is NOT amber-capped: a
-// cluster of missed shipments CAN red the pipe (design.md 5 "Missed back-sync").
+// The fidelity fix: the freshness/liveness clocks are GATED on unsynced work. A
+// quiet shipping stretch (no DTC shipment newer than the last back-sync) is
+// idle-not-behind and reads GREEN, never amber. The missed-shipments signal is
+// unchanged and is NOT amber-capped: a cluster still reds the pipe.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { MissedShipment } from '@order-health/shared';
 import {
   computeBackSync,
+  hasUnsyncedWork,
   missedCountVerdict,
   type BackSyncInput,
   type BackSyncThresholds,
@@ -49,92 +51,123 @@ function missed(n: number): MissedShipment[] {
   }));
 }
 
-// A healthy baseline input we perturb per test: fresh watermark, live watcher,
-// zero missed shipments.
+// A healthy, CAUGHT-UP baseline: last back-sync 22 min ago, watcher alive, zero
+// missed, and the newest DTC shipment posted BEFORE the last back-sync (nothing
+// unsynced). Tests perturb only what they exercise.
 function baseInput(overrides: Partial<BackSyncInput> = {}): BackSyncInput {
   return {
-    lastBackSyncAt: ago(22 * 60), // 22 min ago => fresh (demo value)
-    watcherHeartbeatAt: ago(30), // 30s ago => alive
+    lastBackSyncAt: ago(22 * 60),
+    watcherHeartbeatAt: ago(30),
     fulfillmentsLast24h: 231,
     errorsLast24h: 0,
     missedShipments: [],
+    newestDtcShipmentAt: ago(40 * 60), // posted before the last back-sync => caught up
     ...overrides,
   };
 }
 
-// --- Back-sync watermark freshness boundary --------------------------------
-test('freshness: recent fulfillmentCreate (under one cycle) is green', () => {
-  const r = computeBackSync(baseInput({ lastBackSyncAt: ago(3600 - 1) }), T, NOW);
-  assert.equal(r.freshnessVerdict, 'green');
-});
-
-test('freshness: one-cycle-stale watermark is amber', () => {
-  const r = computeBackSync(baseInput({ lastBackSyncAt: ago(3600) }), T, NOW);
-  assert.equal(r.freshnessVerdict, 'amber');
-});
-
-test('freshness: multi-cycle-stale watermark is red', () => {
-  const r = computeBackSync(baseInput({ lastBackSyncAt: ago(2 * 3600) }), T, NOW);
-  assert.equal(r.freshnessVerdict, 'red');
-  assert.equal(r.watermarkLagS, 2 * 3600);
-});
-
-test('freshness: no back-sync timestamp is unknown', () => {
-  const r = computeBackSync(baseInput({ lastBackSyncAt: null }), T, NOW);
-  assert.equal(r.freshnessVerdict, 'unknown');
-  assert.equal(r.watermarkLagS, null);
-});
-
-// --- Watcher liveness boundary (independent of freshness) ------------------
-test('liveness: recent heartbeat is green', () => {
-  const r = computeBackSync(baseInput({ watcherHeartbeatAt: ago(60) }), T, NOW);
-  assert.equal(r.livenessVerdict, 'green');
-});
-
-test('liveness: dead watcher (beyond two cycles) is red', () => {
-  const r = computeBackSync(baseInput({ watcherHeartbeatAt: ago(3 * 3600) }), T, NOW);
-  assert.equal(r.livenessVerdict, 'red');
-});
-
-test('liveness is independent of freshness: fresh back-sync but dead watcher still reds the pipe', () => {
+// --- The core fidelity fix: a quiet stretch reads GREEN --------------------
+test('a quiet, caught-up stretch reads GREEN even with an old watermark (the live-run fix)', () => {
+  // The live-run false amber: newest back-sync 76 min old, but no new shipment to
+  // sync (newest DTC shipment older than the watermark). Idle, not behind.
   const r = computeBackSync(
-    baseInput({ lastBackSyncAt: ago(300), watcherHeartbeatAt: ago(4 * 3600) }),
+    baseInput({ lastBackSyncAt: ago(76 * 60), newestDtcShipmentAt: ago(80 * 60) }),
     T,
     NOW,
   );
   assert.equal(r.freshnessVerdict, 'green');
+  assert.equal(r.livenessVerdict, 'green');
+  assert.equal(r.pipeVerdict, 'green');
+  assert.equal(r.detail.has_unsynced_work, false);
+  assert.equal(r.detail.applicability, 'idle_no_traffic');
+});
+
+// --- Freshness ages ONLY against unsynced work -----------------------------
+test('freshness: unsynced work waiting under one cycle is green', () => {
+  // A DTC shipment posted 59 min ago, newer than the last back-sync => unsynced.
+  const r = computeBackSync(
+    baseInput({ lastBackSyncAt: ago(2 * 3600), newestDtcShipmentAt: ago(3600 - 1) }),
+    T,
+    NOW,
+  );
+  assert.equal(r.detail.has_unsynced_work, true);
+  assert.equal(r.freshnessVerdict, 'green');
+});
+
+test('freshness: unsynced work waiting one cycle is amber', () => {
+  const r = computeBackSync(
+    baseInput({ lastBackSyncAt: ago(3 * 3600), newestDtcShipmentAt: ago(3600) }),
+    T,
+    NOW,
+  );
+  assert.equal(r.freshnessVerdict, 'amber');
+  assert.equal(r.watermarkLagS, 3600);
+});
+
+test('freshness: unsynced work waiting multiple cycles is red (a genuine backlog)', () => {
+  const r = computeBackSync(
+    baseInput({ lastBackSyncAt: ago(4 * 3600), newestDtcShipmentAt: ago(2 * 3600) }),
+    T,
+    NOW,
+  );
+  assert.equal(r.freshnessVerdict, 'red');
+  assert.equal(r.watermarkLagS, 2 * 3600);
+  assert.equal(r.pipeVerdict, 'red');
+});
+
+// --- Liveness is gated the same way ----------------------------------------
+test('liveness: a dead watcher with NO work to sync stays green (idle, not a fault)', () => {
+  const r = computeBackSync(baseInput({ watcherHeartbeatAt: ago(4 * 3600) }), T, NOW);
+  assert.equal(r.detail.has_unsynced_work, false);
+  assert.equal(r.livenessVerdict, 'green');
+});
+
+test('liveness: a dead watcher WHILE work is waiting reds the pipe', () => {
+  const r = computeBackSync(
+    baseInput({
+      lastBackSyncAt: ago(3 * 3600),
+      newestDtcShipmentAt: ago(300), // fresh unsynced work
+      watcherHeartbeatAt: ago(4 * 3600),
+    }),
+    T,
+    NOW,
+  );
+  assert.equal(r.detail.has_unsynced_work, true);
+  assert.equal(r.freshnessVerdict, 'green'); // work only 5 min old
   assert.equal(r.livenessVerdict, 'red');
   assert.equal(r.pipeVerdict, 'red');
 });
 
-// --- Missed-shipments signal boundary (uncapped, may be RED) ---------------
-test('missed: zero missed shipments is green', () => {
-  const r = computeBackSync(baseInput({ missedShipments: [] }), T, NOW);
-  assert.equal(r.missedVerdict, 'green');
-  assert.equal(r.detail.missed_count, 0);
+// --- The has-work gate itself ----------------------------------------------
+test('hasUnsyncedWork: newer shipment => true, older => false, null shipment => false', () => {
+  assert.equal(hasUnsyncedWork(ago(60), ago(600)), true); // shipment newer than watermark
+  assert.equal(hasUnsyncedWork(ago(600), ago(60)), false); // shipment older than watermark
+  assert.equal(hasUnsyncedWork(null, ago(60)), false); // no DTC shipment => nothing to sync
+  assert.equal(hasUnsyncedWork(ago(60), null), true); // shipment exists, never synced
+});
+
+// --- Missed-shipments signal is UNCHANGED (uncapped, may be RED) -----------
+test('missed: a cluster reds the pipe even while freshness/liveness are idle-green', () => {
+  const r = computeBackSync(baseInput({ missedShipments: missed(5) }), T, NOW);
+  assert.equal(r.missedVerdict, 'red');
+  assert.equal(r.freshnessVerdict, 'green');
+  assert.equal(r.livenessVerdict, 'green');
+  assert.equal(r.pipeVerdict, 'red');
+  // A real backlog is not idle: applicability stays active, not idle_no_traffic.
+  assert.equal(r.detail.applicability, 'active');
 });
 
 test('missed: one missed shipment is amber (the demo "Missed 14d: 1")', () => {
   const r = computeBackSync(baseInput({ missedShipments: missed(1) }), T, NOW);
   assert.equal(r.missedVerdict, 'amber');
   assert.equal(r.detail.missed_count, 1);
-  assert.equal(r.detail.missed_shipments[0].order_ref, 'SP-319090');
-});
-
-test('missed: a cluster (>= red count) reds the missed signal AND the pipe (NOT capped)', () => {
-  const r = computeBackSync(baseInput({ missedShipments: missed(5) }), T, NOW);
-  assert.equal(r.missedVerdict, 'red');
-  // The deliberate contrast with inventory-sync's amber-capped divergence: a real
-  // backlog escalates the pipe to RED even with green freshness and liveness.
-  assert.equal(r.freshnessVerdict, 'green');
-  assert.equal(r.livenessVerdict, 'green');
-  assert.equal(r.pipeVerdict, 'red');
+  assert.equal(r.pipeVerdict, 'amber');
 });
 
 test('missed: null (endpoint not queried) is unknown, not a false green', () => {
   const r = computeBackSync(baseInput({ missedShipments: null }), T, NOW);
   assert.equal(r.missedVerdict, 'unknown');
-  assert.equal(r.detail.missed_count, 0);
+  assert.equal(r.pipeVerdict, 'unknown');
 });
 
 test('missedCountVerdict bands: null=>unknown, 0=>green, amber boundary, red boundary', () => {
@@ -146,26 +179,31 @@ test('missedCountVerdict bands: null=>unknown, 0=>green, amber boundary, red bou
 });
 
 // --- Detail bag + rollup ---------------------------------------------------
-test('detail carries the missed count, window, counters and rows', () => {
+test('detail carries the missed count, window, counters, rows and the has-work gate', () => {
   const r = computeBackSync(
-    baseInput({ missedShipments: missed(2), fulfillmentsLast24h: 231, errorsLast24h: 0 }),
+    baseInput({
+      missedShipments: missed(2),
+      lastBackSyncAt: ago(2 * 3600),
+      newestDtcShipmentAt: ago(600),
+    }),
     T,
     NOW,
   );
   assert.equal(r.detail.missed_count, 2);
   assert.equal(r.detail.missed_window_days, 14);
   assert.equal(r.detail.fulfillments_last_24h, 231);
-  assert.equal(r.detail.errors_last_24h, 0);
   assert.equal(r.detail.missed_shipments.length, 2);
   assert.equal(r.detail.last_back_sync_at, r.lastProgressAt);
+  assert.equal(r.detail.has_unsynced_work, true);
+  assert.equal(r.detail.newest_unsynced_shipment_at, ago(600));
 });
 
-test('rollup: all-healthy inputs produce a green pipe', () => {
+test('rollup: all-healthy caught-up inputs produce a green pipe', () => {
   const r = computeBackSync(baseInput(), T, NOW);
   assert.equal(r.pipeVerdict, 'green');
 });
 
-test('rollup: empty/null inputs produce unknown, not a false green or red', () => {
+test('rollup: unread inputs (missed null) produce unknown, not a false green or red', () => {
   const r = computeBackSync(
     {
       lastBackSyncAt: null,
@@ -173,12 +211,13 @@ test('rollup: empty/null inputs produce unknown, not a false green or red', () =
       fulfillmentsLast24h: null,
       errorsLast24h: null,
       missedShipments: null,
+      newestDtcShipmentAt: null,
     },
     T,
     NOW,
   );
-  assert.equal(r.freshnessVerdict, 'unknown');
-  assert.equal(r.livenessVerdict, 'unknown');
+  // With no detectable work the clocks read green, but the unread missed signal
+  // carries the unknown so the pipe never falsely reads all-green.
   assert.equal(r.missedVerdict, 'unknown');
   assert.equal(r.pipeVerdict, 'unknown');
 });

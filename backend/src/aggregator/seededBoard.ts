@@ -11,15 +11,20 @@ import type { InventoryWalk, MissedShipment } from '@order-health/shared';
 import type {
   AllocatorStatus,
   BackSyncStatus,
+  InventorySyncFeedRow,
   InventorySyncStatus,
   JobQueueHealthStatus,
   MiddlewareClient,
   PriceSyncStatus,
   ShopifyWebhookStatus,
 } from '../sources/middlewareClient';
+import { ShopifyClientStub, type ShopifyClient, type ShopifyFsInventory } from '../sources/shopifyClient';
 import type {
   NavClient,
+  NavInventoryAvailabilityRow,
+  NavJobQueueState,
   NavOrderLifecycleRow,
+  NavOrderLine,
   NavShipmentHeader,
   NavWatermarkState,
 } from '../sources/navClient';
@@ -49,12 +54,28 @@ export interface BoardSeed {
     status?: Partial<BackSyncStatus>;
     missed?: MissedShipment[] | null;
     shipments?: NavShipmentHeader[];
+    newestDtcShipmentAt?: string | null; // Unit 2 has-work gate (null => caught up default)
   };
   priceSync?: Partial<PriceSyncStatus>;
-  jobQueue?: Partial<JobQueueHealthStatus>;
+  jobQueue?: Partial<JobQueueHealthStatus>;       // middleware cross-check only (Unit 1)
+  jobQueueState?: Partial<NavJobQueueState>;      // NAV-authoritative job-queue signals (Unit 1)
   webhook?: ShopifyWebhookStatus;
   allocator?: Partial<AllocatorStatus>;
   orders?: NavOrderLifecycleRow[];
+  orderLines?: NavOrderLine[]; // Round 3: outstanding order lines for FS classification
+  inventoryAvailability?: NavInventoryAvailabilityRow[]; // Round 3: NAV warehouse on-hand
+  fsInventory?: ShopifyFsInventory[]; // Round 3: Shopify FS-location available per SKU
+}
+
+// A read-only Shopify client backed by the seed: only the FS-inventory read is
+// seeded (the classification test needs it); the reconciliation reads return empty.
+class SeededShopifyClient extends ShopifyClientStub implements ShopifyClient {
+  constructor(private readonly fsSeed: ShopifyFsInventory[]) {
+    super();
+  }
+  override async getFsInventory(): Promise<ShopifyFsInventory[]> {
+    return this.fsSeed;
+  }
 }
 
 function greenWalks(now: number): InventoryWalk[] {
@@ -85,6 +106,31 @@ class SeededNavClient implements NavClient {
   }
   async getRecentShipments(): Promise<NavShipmentHeader[]> {
     return this.seed.backSync?.shipments ?? [];
+  }
+  async getInventoryAvailability(): Promise<NavInventoryAvailabilityRow[]> {
+    // Default empty (the dry-run divergence falls back to the seeded
+    // InventorySyncStatus.dryRunWouldPush); a test seeds it for FS classification.
+    return this.seed.inventoryAvailability ?? [];
+  }
+  async getJobQueueState(): Promise<NavJobQueueState> {
+    // Default healthy: auto-release firing minutes ago, no in-process job, an empty
+    // Status=0 pending-promotion backlog. A test overrides only what it exercises.
+    return {
+      autoReleaseFiredAt: agoIso(300, this.now),
+      oldestInProcessJobAt: null,
+      inProcessJobCount: 0,
+      pendingStagingCount: 0,
+      ...this.seed.jobQueueState,
+    };
+  }
+  async getNewestDtcShipmentAt(): Promise<string | null> {
+    // Default: a DTC shipment posted BEFORE the default back-sync watermark
+    // (agoIso 600), so the has-work gate reads caught-up (idle-green). A test
+    // overrides this to a time newer than the watermark to exercise unsynced work.
+    return this.seed.backSync?.newestDtcShipmentAt ?? agoIso(900, this.now);
+  }
+  async getOutstandingOrderLines(): Promise<NavOrderLine[]> {
+    return this.seed.orderLines ?? [];
   }
   async queryReadOnly<T>(): Promise<T[]> {
     return [];
@@ -122,6 +168,10 @@ class SeededMiddlewareClient implements MiddlewareClient {
       ...this.seed.inventory?.status,
     };
   }
+  async getInventorySyncFeed(): Promise<InventorySyncFeedRow[]> {
+    // Seeded board leaves the feed empty; see getInventoryAvailability above.
+    return [];
+  }
   async getAllocatorStatus(): Promise<AllocatorStatus> {
     return {
       lastDecisionAt: agoIso(90, this.now),
@@ -132,6 +182,8 @@ class SeededMiddlewareClient implements MiddlewareClient {
       unallocatableCount: 0,
       failedCount: 0,
       atpFallbackCount: 2,
+      oosHeldCount: 0,
+      oosHeldOldestAgeS: null,
       recentDecisions: [],
       ...this.seed.allocator,
     };
@@ -150,6 +202,7 @@ class SeededMiddlewareClient implements MiddlewareClient {
     return {
       lastReceivedAt: agoIso(600, this.now),
       lastRunAt: agoIso(300, this.now),
+      enabled: true,
       ...this.seed.priceSync,
     };
   }
@@ -179,11 +232,14 @@ class SeededMiddlewareClient implements MiddlewareClient {
 }
 
 // Build a whole-board read-only Sources from a seed. Omitted pipes default green.
+// The Shopify client is the read-only stub (empty reads): the reconciliations then
+// read 'unavailable' (surface-only) and never affect the seeded verdicts.
 export function makeSeededSources(seed: BoardSeed = {}): Sources {
   const now = seed.now ?? Date.now();
   return {
     nav: new SeededNavClient(seed, now),
     middleware: new SeededMiddlewareClient(seed, now),
+    shopify: new SeededShopifyClient(seed.fsInventory ?? []),
   };
 }
 
@@ -206,6 +262,7 @@ export function greenDtcOrder(navOrderNo: string, now: number = Date.now()): Nav
     navShipmentAt: agoIso(3600, now),
     backSyncAt: agoIso(1800, now),
     missedBackSync: false,
+    documentType: 1,
   };
 }
 
@@ -231,11 +288,14 @@ export function greenWholesaleOrder(
     navShipmentAt: agoIso(3600, now),
     backSyncAt: null,
     missedBackSync: false,
+    documentType: 1,
   };
 }
 
-// A DTC order stuck in NAV staging with a nonzero (blocked) status and no
-// promotion: a latched error at nav_staging => RED (design.md 5).
+// A DTC order genuinely stuck: received days ago and STILL not shipped, so it ages
+// past the awaiting-ship SLO => RED. (Unit D: staging Status is no longer a per-order
+// red, since Status = 1 is a normal early state; the honest stuck signal is an
+// unshipped order aged past the SLO.)
 export function stuckStagingDtcOrder(
   navOrderNo: string,
   now: number = Date.now(),
@@ -246,14 +306,38 @@ export function stuckStagingDtcOrder(
     webId: `web-${navOrderNo}`,
     webOrder: 1, // a web order (WebOrder = 1 on the NAV Sales Header)
     shopifyOrderName: `#${navOrderNo}`,
-    customerRef: 'CUST-777 Blocked',
-    shopifyOrderAt: agoIso(9000, now),
-    allocatorSplitAt: agoIso(8900, now),
-    navStagingAt: agoIso(8800, now),
-    navStagingStatus: 1, // Blocked = 1 SKU (design.md 5): promotion errored
+    customerRef: 'CUST-777 Stalled',
+    shopifyOrderAt: agoIso(5 * 86400, now), // received 5 days ago, never shipped => past 72h red
+    allocatorSplitAt: null,
+    navStagingAt: null,
+    navStagingStatus: 1, // Not Auto-released (a normal state; no longer the trigger)
+    navPromotionAt: null,
+    navShipmentAt: null, // still unshipped => aged red at awaiting_ship
+    backSyncAt: null,
+    missedBackSync: false,
+    documentType: 1,
+  };
+}
+
+// A Happy Return (Round 3, Unit 2): Document Type 5, HR- number, empty customer, no
+// Shopify WebId. Old and unshipped, so the naive grader would red it awaiting_ship;
+// the returns exclusion must reclassify it as 'return', never a stall.
+export function happyReturnOrder(hrNo: string, now: number = Date.now()): NavOrderLifecycleRow {
+  return {
+    channel: 'wholesale',
+    navOrderNo: hrNo,
+    webId: null,
+    webOrder: 0,
+    shopifyOrderName: null,
+    customerRef: '',
+    shopifyOrderAt: agoIso(6 * 86400, now),
+    allocatorSplitAt: null,
+    navStagingAt: null,
+    navStagingStatus: null,
     navPromotionAt: null,
     navShipmentAt: null,
     backSyncAt: null,
     missedBackSync: false,
+    documentType: 5, // Return Order
   };
 }

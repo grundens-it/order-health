@@ -8,7 +8,11 @@
 // endpoint; the trigger routes to the middleware's EXISTING authenticated paths
 // (or a documented ops runbook). It NEVER auto-fires: nothing here is on a cadence.
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import type { RemediationRegistryResponse, RemediationTriggerResult } from '@order-health/shared';
+import type {
+  RemediationRegistryResponse,
+  RemediationTriggerInput,
+  RemediationTriggerResult,
+} from '@order-health/shared';
 import { config } from '../config';
 import {
   REMEDIATION_MAPPINGS,
@@ -17,7 +21,6 @@ import {
 } from '../remediation/registry';
 import { triggerRemediation } from '../remediation/remediationClient';
 import { resolveForRemediation } from '../repo/transitionRepo';
-import type { SubjectKind } from '../aggregator/transitions';
 
 // Operator gate. When REMEDIATION_OPERATOR_TOKEN is set, require a matching
 // Authorization: Bearer / x-operator-token header. When empty (scaffold) it logs
@@ -35,10 +38,7 @@ function assertOperator(req: FastifyRequest): boolean {
   return bearer === expected || header === expected;
 }
 
-interface TriggerBody {
-  subjectKind?: SubjectKind;
-  subjectKey?: string;
-}
+type TriggerBody = RemediationTriggerInput;
 
 export async function registerRemediationRoutes(app: FastifyInstance): Promise<void> {
   // The runbook registry, read-only, with as_of (firm rule). The modal reads this
@@ -49,8 +49,12 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
     mappings: [...REMEDIATION_MAPPINGS],
   }));
 
-  // Operator trigger. Authenticated; invokes the mapped tool via the stubbed
-  // client (no live call) and records the resolution event.
+  // Operator trigger (executable Tier 1, ADR-0010). Authenticated; invokes the
+  // mapped tool via remediationClient and records the resolution event. The client
+  // is DISARMED by default: a live middleware call fires ONLY when the path is armed,
+  // not kill-switched, AND the operator confirmed (body.confirmed === true). This
+  // route enforces the confirm gate and the kill switch as defence in depth so a
+  // stray or unconfirmed POST can never fire a mutation; the client re-checks both.
   app.post(
     '/api/remediation/:tool/trigger',
     async (req: FastifyRequest, reply: FastifyReply): Promise<RemediationTriggerResult | { error: string }> => {
@@ -79,8 +83,12 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
         if (resolved) resolvedSubject = { subjectKind: body.subjectKind, subjectKey: body.subjectKey };
       }
 
-      // The stubbed invocation: typed 'would_trigger', no live call.
-      return triggerRemediation(tool, resolvedSubject, nowIso);
+      // The confirm gate + kill switch, enforced here before the client sees a live
+      // intent. A live fire requires an explicit confirmed:true AND the kill switch
+      // off; otherwise we pass confirmed:false so the client returns the disarmed
+      // preview and never issues an HTTP call. The client records the audit entry.
+      const confirmed = body.confirmed === true && config.remediation.killSwitch === false;
+      return triggerRemediation(tool, resolvedSubject, nowIso, { confirmed });
     },
   );
 }

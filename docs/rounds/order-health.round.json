@@ -2,8 +2,51 @@
   "round": "order-health-observability",
   "repo": "grundens-it/order-health",
   "brief": "docs/kickoffs/order-health-observability.md",
-  "updated": "2026-07-06 (post-round: real read-only NAV client build, Entra auth, off DATA_SOURCES.md; data path corrected from NAV login to Azure SQL + Entra)",
+  "updated": "2026-07-14 (executable remediation Tier 1, ADR-0010: give remediationClient a live authenticated POST path behind REMEDIATION_LIVE_ENABLED + REMEDIATION_KILL_SWITCH, per-action Confirm-and-run, append-only audit log; disarmed by default; stuck_staging_dedupe held out; branch exec-remediation/tier1 off round-3/fs-ui, #70, not merged)",
   "umbrella_issue": 2,
+  "fidelity_round": {
+    "name": "health-fidelity-fixes",
+    "brief": "docs/kickoffs/health-fidelity-fixes-kickoff.md",
+    "evidence": "docs/business/order-health-validation-results-2026-07-13.md",
+    "branch": "fix/health-fidelity",
+    "umbrella_issue": 46,
+    "adrs": ["ADR-0007 source-of-truth precedence + reconciliation", "ADR-0008 verdict-applicability display state"],
+    "foundation_item": "issue 54 (read-only Shopify Admin API client + least-privilege credential; does not block NAV units)",
+    "note": "branch pushed; PRs not opened, not merged to main, per the kickoff"
+  },
+  "integration_round": {
+    "name": "health-fidelity-integration",
+    "brief": "docs/kickoffs/health-fidelity-integration-kickoff.md",
+    "evidence": "docs/business/order-health-validation-results-2026-07-13.md",
+    "regrade": "docs/business/health-fidelity-integration-regrade-2026-07-13.md",
+    "branch": "integration/health-fidelity (off round/integration)",
+    "umbrella_issue": 60,
+    "adrs": ["ADR-0007 precedence (Accepted)", "ADR-0008 applicability (Accepted)", "ADR-0009 read-only Shopify Admin API (Accepted)"],
+    "result": "live re-grade: 5 of 6 pipes read correctly green/neutral (was zero green); inventory_sync freshness+liveness green, remaining amber is the amber-capped divergence; order layer 989 false reds down to 40 genuine aged stalls. Real NAV + real middleware + live Shopify.",
+    "note": "branch pushed; PRs not opened, not merged to main, per the kickoff"
+  },
+  "round3": {
+    "name": "fs-classification-remediation-why-ui",
+    "brief": "docs/kickoffs/round-3-fs-classification-ui-kickoff.md",
+    "branch": "round-3/fs-ui (off integration/health-fidelity)",
+    "umbrella_context": "issues #61-#65",
+    "result": "live-confirmed: 32 of 34 awaiting_ship reds classify fs_floor_at_zero (Shopify FS-location available < 0 while NAV warehouse stocked; the Symmetry floor-at-zero bug), the other 2 are genuine 3PL delays; 8 Happy Returns (Document Type 5) reclassified out of awaiting_ship (0 graded a stall); fs_floor_at_zero maps to an FS re-floor runbook (ADR-0003), not back_sync; the modal always shows the why first; every leadership card drills through. Real NAV + live Shopify.",
+    "note": "Unit 5 fanned out to a background worktree agent while Units 3+4 ran in the main context. Branch pushed; PRs not opened, not merged to main."
+  },
+  "exec_remediation_round": {
+    "name": "executable-remediation-tier1",
+    "brief": "docs/kickoffs/executable-remediation-tier1-kickoff.md",
+    "adr": "ADR-0010 executable-remediation actor mode (Accepted 2026-07-13)",
+    "branch": "exec-remediation/tier1 (off round-3/fs-ui)",
+    "umbrella_issue": 69,
+    "issue": 70,
+    "result": "remediationClient gains a live authenticated POST path for middleware_endpoint tools, DISARMED by default (REMEDIATION_LIVE_ENABLED false) with a REMEDIATION_KILL_SWITCH; per-action Confirm-and-run in the modal showing the exact method/path/target/params; append-only audit log (no secrets); gated tools add NAV_TOGGLE_PASSWORD (recovery_sweep is the only documented gate). stuck_staging_dedupe held out of the live path (deletes NAV staging rows, no rollback). Aggregator no-auto-fire invariant preserved. 8 node:test safety invariants added (275 pass). typecheck + test green.",
+    "surfaced": [
+      "Per-endpoint auth shape: only recovery_sweep documents the NAV write-gate (password + set_by). The other middleware_endpoint tools (submit_fulfillment_request, back_sync_run_now, back_sync_rescan_from, close_unfulfilled_fos) are marked non-gated; their per-endpoint auth + request-body shape must be confirmed against the middleware before REMEDIATION_LIVE_ENABLED is ever set true.",
+      "stuck_staging_dedupe is held disarmed pending a documented rollback story for the staging-row delete (ADR-0010)."
+    ],
+    "note": "Single coupled unit, one phased pass in a worktree off round-3/fs-ui. Branch pushed; PR NOT opened, not merged; REMEDIATION_LIVE_ENABLED never armed in a committed env. Tier 2 runner (#71) not built."
+  },
   "kickoff_pr": 1,
   "stack": {
     "adr": "ADR-0004",
@@ -27,7 +70,19 @@
     "W": "fan-out wave, independent subagents, after Unit 0",
     "C": "convergence, sequential, after the wave",
     "D": "delivery track (added 2026-07-06): local dev + CI now, deploy pipeline gated on target decision",
-    "P": "provisioning realization (post-round): real read-only source clients against live systems, do not merge until validated"
+    "P": "provisioning realization (post-round): real read-only source clients against live systems, do not merge until validated",
+    "HF-F": "health-fidelity foundation (2026-07-13): reconciliation ADR, applicability ADR, config + shared, one commit",
+    "HF-W": "health-fidelity fan-out: per-pipe fidelity fixes, each pure-compute + node:test (healthy-green AND true-fault-fires)",
+    "HF-R": "health-fidelity research-first: order-layer 98.9% red investigation then fix",
+    "HF-C": "health-fidelity convergence: typecheck + test, round.json, push (no PRs)",
+    "INT-F": "integration foundation (2026-07-13): merge onto real middleware client, resolve, ADR housekeeping",
+    "INT-W": "integration fan-out: Shopify client + reconciliations, job-queue source fix",
+    "INT-R": "integration research-first: residual order red-rate verification then fix",
+    "INT-C": "integration convergence: typecheck + test, live end-to-end re-grade, push (no PRs)",
+    "R3-F": "round 3 foundation: FS classifier + returns exclusion (shared order ingest)",
+    "R3-W": "round 3 fan-out: remediation fold-in + FS re-floor, why-modal, leadership drill-through (Unit 5 a background agent)",
+    "R3-C": "round 3 convergence: typecheck + test, live FS-classification confirm, push (no PRs)",
+    "EXR": "executable remediation Tier 1 (ADR-0010): single coupled unit in a worktree off round-3/fs-ui; disarmed live path + confirm + audit, no PR, not armed"
   },
   "units": [
     { "unit": 0, "issue": 3, "phase": "F", "name": "Foundation scaffold", "status": "done", "pr": 12, "merged": true },
@@ -41,6 +96,30 @@
     { "unit": 8, "issue": 11, "phase": "C", "name": "Integration and hardening", "status": "done", "pr": 24, "merged": true, "note": "staleness sim, a11y shape-audit, dark-theme parity, visual-status script" },
     { "unit": 9, "issue": 19, "phase": "D", "name": "Local dev (Docker Compose) + CI workflow", "status": "done", "pr": 22, "merged": true, "note": "docker compose up, CI build/test on push+PR" },
     { "unit": 10, "issue": 20, "phase": "D", "name": "ADR-0005 deploy target + CD pipeline", "status": "done", "pr": 25, "merged": true, "note": "ADR-0005 accepted Alternative B; CD workflow (GHCR + SSH to VM, gated by production environment) merged; inert until DevOps provisions VM+VPN+secrets" },
-    { "unit": "1b", "issue": 28, "phase": "P", "name": "Real read-only NAV client (Entra auth) against live NAV", "status": "review", "pr": 29, "note": "provisioning realization of Unit 1 NAV reads per docs/DATA_SOURCES.md; Entra auth (az login local), GRUS$ prefixes, WebOrder read; strictly read-only, stub fallback; do NOT merge until validated by az login against sqldb-nav18-grus-prd-01" }
+    { "unit": "1b", "issue": 28, "phase": "P", "name": "Real read-only NAV client (Entra auth) against live NAV", "status": "review", "pr": 29, "note": "provisioning realization of Unit 1 NAV reads per docs/DATA_SOURCES.md; Entra auth (az login local), GRUS$ prefixes, WebOrder read; strictly read-only, stub fallback; do NOT merge until validated by az login against sqldb-nav18-grus-prd-01" },
+
+    { "unit": "HF-F", "issue": 46, "phase": "HF-F", "name": "Foundation: ADR-0007 precedence+reconciliation, ADR-0008 applicability, config + shared", "status": "done", "note": "one commit; supersedes ADR-0002 middleware-adoption for health signals; Shopify Admin API client surfaced as foundation item #54 (does not block NAV units)" },
+    { "unit": "HF-1", "issue": 47, "phase": "HF-W", "name": "nav_job_queue: compute from read-only NAV, stop adopting the middleware verdict", "status": "done", "note": "supersedes the internal direct-NAV task; liveness=CU 50009 auto-release, stuck-job=in-process CU 50007 past ~60m, staging=real Status=0; middleware kept as labelled cross-check" },
+    { "unit": "HF-2", "issue": 48, "phase": "HF-W", "name": "back_sync: gate freshness/liveness on unsynced-work-exists", "status": "done", "note": "a quiet caught-up stretch reads green (idle_no_traffic); missed-shipments signal unchanged" },
+    { "unit": "HF-3", "issue": 49, "phase": "HF-W", "name": "inventory_sync: align liveness bands to the ~2h walk cadence", "status": "done", "note": "amber 2 cycles, red 3; a healthy 124-min heartbeat reads green" },
+    { "unit": "HF-4", "issue": 50, "phase": "HF-W", "name": "allocator: failed_rate over the sampled window, OOS-held backlog split out", "status": "done", "note": "standing OOS backlog no longer inflates the rate; surfaced as its own labelled count/age" },
+    { "unit": "HF-5", "issue": 51, "phase": "HF-W", "name": "shopify_webhook + price_sync: truthful applicability states (ADR-0008)", "status": "done", "note": "disabled / idle_no_traffic read neutral and are excluded from the rollup; subscription-drop signal intact" },
+    { "unit": "HF-6", "issue": 52, "phase": "HF-R", "name": "order layer: fix the 98.9% red rate (broken stage-timestamp join)", "status": "done", "note": "research-first finding docs/business/order-layer-red-rate-finding-2026-07-13.md; infer unobservable middleware hop completions from NAV evidence; bands were fine" },
+    { "unit": "HF-7", "issue": 53, "phase": "HF-W", "name": "frontend: distinguish backend-down from backend-up-error in the banner", "status": "done", "note": "typed ApiError kind network vs http; distinct message and remedy for each" },
+
+    { "unit": "INT-A", "issue": 56, "phase": "INT-F", "name": "Integrate the fidelity fixes with the real middleware client", "status": "done", "note": "merged fix/health-fidelity onto round/integration; real reconciled-route middleware client wins; AllocatorStatus window-scoped + oosHeld, PriceSyncStatus enabled adapted to real routes; NAV + middleware live" },
+    { "unit": "INT-E", "issue": 58, "phase": "INT-F", "name": "ADR housekeeping: renumber Shopify to 0009, accept 0007/0008/0009", "status": "done", "note": "ADR-0009 created; 0007/0008/0009 Accepted; cross-references updated" },
+    { "unit": "INT-B", "issue": 55, "phase": "INT-W", "name": "Read-only Shopify Admin client + reconciliations (ADR-0009)", "status": "done", "note": "GraphQL query-only, mutation guard, client-credentials token manager, live/stub factory; pure mappers + 4 reconcilers unit-tested; back_sync + inventory wired live; token verified live" },
+    { "unit": "INT-C", "issue": 47, "phase": "INT-W", "name": "nav_job_queue stuck-job from Job Queue Entry current state", "status": "done", "note": "sources the in-process signal from GRUS$Job Queue Entry (live), not the stale Job Queue Log Entry audit trail; regression test for the stale-log false RED" },
+    { "unit": "INT-D", "issue": 57, "phase": "INT-R", "name": "Verify + fix the residual order-layer red rate (~532)", "status": "done", "note": "research-first finding docs/business/order-layer-residual-red-finding-2026-07-13.md; staging Status=1 is normal (Not Auto-released), not a per-order fault; live red 533 -> 40 genuine aged stalls" },
+    { "unit": "INT-F", "issue": 59, "phase": "INT-C", "name": "End-to-end re-grade all six pipes on real sources", "status": "done", "note": "docs/business/health-fidelity-integration-regrade-2026-07-13.md; live real NAV + middleware + Shopify; 5 of 6 pipes correct green/neutral (was zero green), order layer 989 -> 40 genuine reds; remediation disarmed" },
+
+    { "unit": "R3-1", "issue": 64, "phase": "R3-F", "name": "FS-location-aware awaiting_ship classification", "status": "done", "note": "shopifyClient getFsInventory resolves the FS location by name (hidden from locations()); pure classifier fs_floor_at_zero / backordered / genuine_3pl_delay / orphan_or_return; live: 32 of 34 reds classify fs_floor_at_zero" },
+    { "unit": "R3-2", "issue": 63, "phase": "R3-F", "name": "Exclude Happy Returns / non-sales from awaiting_ship", "status": "done", "note": "Document Type 5 (HR-) reclassified as return, never a stall; live: 8 reclassified, 0 graded a stall" },
+    { "unit": "R3-3", "issue": 61, "phase": "R3-W", "name": "Fold remediation tool-detection + FS re-floor + 3 findings", "status": "done", "note": "detect engine folded in; fs_floor_at_zero -> FS re-floor runbook (ADR-0003), not back_sync; nav_staging_stuck Not-Auto-released gap, close_unfulfilled_fos safety, webhook_resubscribe vs outcome closed" },
+    { "unit": "R3-4", "issue": 62, "phase": "R3-W", "name": "Clicking any unhealthy/at-risk item always explains WHY", "status": "done", "note": "RemediationModal renders a why block first from verdict+detail; plain next-step when no tool; FS-floored order routes to the FS re-floor" },
+    { "unit": "R3-5", "issue": 65, "phase": "R3-W", "name": "Every LeadershipStrip card a keyboard-focusable drill-through", "status": "done", "note": "background worktree agent; DrillTarget union + onDrill; App wires orders->table, oldest-stuck->why, inventory->panel" },
+
+    { "unit": "EXR-1", "issue": 70, "phase": "EXR", "name": "Executable remediation Tier 1: live path for existing middleware endpoints (ADR-0010)", "status": "review", "note": "disarmed by default (REMEDIATION_LIVE_ENABLED false + REMEDIATION_KILL_SWITCH); live authenticated POST for middleware_endpoint tools, per-action Confirm-and-run, append-only audit log (no secrets); gated tools add NAV_TOGGLE_PASSWORD (recovery_sweep only documented gate); stuck_staging_dedupe held out (row delete, no rollback); ops_runbook never mutates; aggregator no-auto-fire preserved; 8 node:test invariants, 275 pass. Branch exec-remediation/tier1 off round-3/fs-ui; PR not opened, not merged; not armed. Tier 2 runner #71 not built." }
   ]
 }

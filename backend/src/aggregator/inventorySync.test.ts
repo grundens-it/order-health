@@ -9,6 +9,7 @@ import test from 'node:test';
 import type { InventoryWalk } from '@order-health/shared';
 import {
   capAmberNeverRed,
+  computeDryRunDivergence,
   computeInventorySync,
   type InventorySyncInput,
   type InventorySyncThresholds,
@@ -17,14 +18,17 @@ import {
 // Fixed clock so every age is deterministic.
 const NOW = Date.parse('2026-07-05T18:00:00.000Z');
 
-// Defaults mirror config.inventorySync: cycle 2h, green<1c, amber 1-2c, red>=2c,
-// divergence amber above 5x.
+// Defaults mirror config.inventorySync: cycle 2h. Freshness green<1c, amber 1-2c,
+// red>=2c. Liveness is WIDER (Unit 3, health-fidelity): amber at 2 missed walk
+// cadences, red at 3, because walks legitimately run about every 2h so a heartbeat
+// is up to one full inter-walk gap old right before the next run. Divergence amber
+// above 5x.
 const T: InventorySyncThresholds = {
   cycleSeconds: 7200,
   freshnessAmberCycles: 1,
   freshnessRedCycles: 2,
-  livenessAmberCycles: 1,
-  livenessRedCycles: 2,
+  livenessAmberCycles: 2,
+  livenessRedCycles: 3,
   divergenceAmberRatio: 5,
 };
 
@@ -76,18 +80,32 @@ test('freshness: no walk timestamp is unknown', () => {
   assert.equal(r.watermarkLagS, null);
 });
 
-// --- Watcher liveness boundary (independent of freshness) ------------------
+// --- Watcher liveness boundary (Unit 3: widened to the ~2h walk cadence) ----
 test('liveness: recent heartbeat is green', () => {
   const r = computeInventorySync(baseInput({ watcherHeartbeatAt: ago(30) }), T, NOW);
   assert.equal(r.livenessVerdict, 'green');
 });
 
-test('liveness: dead watcher (beyond two cycles) is red', () => {
+test('liveness: a 124-min heartbeat (just over one walk cadence) reads GREEN (the live-run fix)', () => {
+  // The live-run false amber: heartbeat 124 min old, just over the OLD 120-min
+  // (1-cycle) threshold, while walks legitimately run about every 2h. It must not
+  // flip amber right before every run.
+  const r = computeInventorySync(baseInput({ watcherHeartbeatAt: ago(124 * 60) }), T, NOW);
+  assert.equal(r.livenessVerdict, 'green');
+  assert.equal(r.pipeVerdict, 'green');
+});
+
+test('liveness: two missed cadences (>= 2 cycles) is amber', () => {
+  const r = computeInventorySync(baseInput({ watcherHeartbeatAt: ago(2 * 7200) }), T, NOW);
+  assert.equal(r.livenessVerdict, 'amber');
+});
+
+test('liveness: three missed cadences (>= 3 cycles) is red (a genuine stall still fires)', () => {
   const r = computeInventorySync(baseInput({ watcherHeartbeatAt: ago(3 * 7200) }), T, NOW);
   assert.equal(r.livenessVerdict, 'red');
 });
 
-test('liveness is independent of freshness: fresh data but dead watcher still reds the pipe', () => {
+test('liveness is independent of freshness: fresh data but a >3-cycle-dead watcher still reds the pipe', () => {
   // The part-1 failure mode: CU 50007 kept completing (data looks fresh) while
   // the middleware watcher died. Freshness green, liveness red => pipe red.
   const r = computeInventorySync(
@@ -189,4 +207,40 @@ test('rollup: empty inputs produce unknown, not a false green or red', () => {
   assert.equal(r.livenessVerdict, 'unknown');
   assert.equal(r.divergenceVerdict, 'unknown');
   assert.equal(r.pipeVerdict, 'unknown');
+});
+
+// --- Dry-run "would push" reconstruction (Unit 3b, issue #37) ----------------
+// Rebuilds the middleware's dry-run predicate read-only: current NAV availability
+// vs the last quantity the sync pushed to Shopify per (sku, location).
+test('computeDryRunDivergence counts pairs whose NAV availability differs from the last-synced quantity', () => {
+  const nav = [
+    { sku: 'A', location: 'HF1FTZ', availableQty: 10 }, // matches last-set 10 -> not divergent
+    { sku: 'B', location: 'HF1FTZ', availableQty: 3 },  // NAV 3 vs last-set 5 -> divergent
+    { sku: 'C', location: 'TAC', availableQty: 8 },     // no feed baseline -> excluded
+  ];
+  const feed = [
+    { sku: 'A', location: 'HF1FTZ', shopifySetQuantity: 10, syncedAt: '2026-07-05T11:00:00.000Z', reversed: false, hasError: false },
+    { sku: 'B', location: 'HF1FTZ', shopifySetQuantity: 5, syncedAt: '2026-07-05T10:30:00.000Z', reversed: false, hasError: false },
+  ];
+  const r = computeDryRunDivergence(nav, feed, '2026-07-05T09:00:00.000Z');
+  assert.equal(r.dryRunWouldPush, 1); // only pair B diverged; C had no baseline
+  assert.equal(r.dryRunAt, '2026-07-05T11:00:00.000Z'); // newest synced_at used
+});
+
+test('computeDryRunDivergence uses the newest non-reversed, non-errored row as the baseline', () => {
+  const nav = [{ sku: 'A', location: 'HF1FTZ', availableQty: 12 }];
+  const feed = [
+    { sku: 'A', location: 'HF1FTZ', shopifySetQuantity: 99, syncedAt: '2026-07-05T12:00:00.000Z', reversed: true, hasError: false }, // reversal ignored
+    { sku: 'A', location: 'HF1FTZ', shopifySetQuantity: 7, syncedAt: '2026-07-05T09:00:00.000Z', reversed: false, hasError: true },  // errored ignored
+    { sku: 'A', location: 'HF1FTZ', shopifySetQuantity: 12, syncedAt: '2026-07-05T11:00:00.000Z', reversed: false, hasError: false }, // valid baseline = 12
+  ];
+  const r = computeDryRunDivergence(nav, feed, null);
+  assert.equal(r.dryRunWouldPush, 0); // NAV 12 == valid baseline 12
+  assert.equal(r.dryRunAt, '2026-07-05T11:00:00.000Z');
+});
+
+test('computeDryRunDivergence returns unknown (null) when NAV availability is absent, keeping the fallback as-of', () => {
+  const r = computeDryRunDivergence([], [], '2026-07-05T09:00:00.000Z');
+  assert.equal(r.dryRunWouldPush, null); // NAV genuinely absent -> unknown, not a false zero
+  assert.equal(r.dryRunAt, '2026-07-05T09:00:00.000Z');
 });

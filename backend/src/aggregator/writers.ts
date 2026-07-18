@@ -32,6 +32,20 @@ import {
   type OrderInput,
 } from './orderLifecycle';
 import { computeAllocator, type AllocatorInput } from './allocator';
+import {
+  bucketHeldOrder,
+  computeOosHeld,
+  extractDroppedSku,
+  type HeldNavFacts,
+  type OosHeldInput,
+} from './oosHeld';
+import {
+  computeFsLocationDivergence,
+  type FsLocationDivergenceInput,
+  type NavLocationAvailabilityRow,
+} from './fsLocationDivergence';
+import { MIDDLEWARE_PATHS } from '../sources/middlewareClient';
+import type { OosHeldOrder } from '@order-health/shared';
 import { computeJobQueue, type JobQueueInput } from './jobQueue';
 import { computePriceSync, type PriceSyncInput } from './priceSync';
 import { computeShopifyWebhook, type ShopifyWebhookInput } from './shopifyWebhook';
@@ -45,6 +59,8 @@ import {
 } from '../repo/transitionRepo';
 
 // The set of pipes the strip renders. Phase W units each own one key.
+// oos_held (WI1 #87) and fs_location_divergence (WI2 #88) are added additively;
+// they do not change any existing pipe's compute.
 export const PIPES = [
   'inventory_sync',
   'back_sync',
@@ -52,6 +68,8 @@ export const PIPES = [
   'nav_job_queue',
   'shopify_webhook',
   'allocator',
+  'oos_held',
+  'fs_location_divergence',
 ] as const;
 
 export interface Sources {
@@ -161,6 +179,123 @@ export async function computeAllocatorPipeline(sources: Sources): Promise<Pipeli
     heartbeat_age_s: r.heartbeatAgeS,
     // The split-sanity verdict and all the counts live in the typed detail bag
     // (AllocatorDetail): recent split decisions + the sanity signal.
+    detail: r.detail as unknown as Record<string, unknown>,
+  };
+}
+
+// Does a NAV order number belong to this held Shopify order? NAV split legs are
+// numbered order_name + "-1" / "-2" / ... (GRUS$Sales Header [No_] LIKE
+// order_name + '-%'); an un-split order matches on equality.
+function navOrderMatchesName(navOrderNo: string, orderName: string): boolean {
+  return navOrderNo === orderName || navOrderNo.startsWith(`${orderName}-`);
+}
+
+// OOS-held backlog seam (WI1 #87 + WI3 #89). Reads the read-only /api/oos-held
+// backlog, joins each held order to NAV (GRUS$Sales Header presence by [No_] LIKE
+// order_name + '-%', and whether the dropped SKU line exists in GRUS$Sales Line),
+// buckets it, and calls the pure computeOosHeld. NAV stays read-only; no re-drive
+// is fired here (remediation is operator-triggered elsewhere).
+export async function computeOosHeldPipeline(sources: Sources): Promise<PipelineHealth> {
+  const held = await sources.middleware.getOosHeldOrders();
+
+  let joined: OosHeldOrder[] | null = held;
+  if (held !== null && held.length > 0) {
+    // WI3 NAV join (read-only). Match held order names to NAV order numbers and
+    // gather the SKUs present on those NAV lines so a missing dropped line is
+    // distinguishable from a present one.
+    const [navOrders, navLines] = await Promise.all([
+      sources.nav.getOrderLifecycleRows(),
+      sources.nav.getOutstandingOrderLines(5000),
+    ]);
+    const navOrderNos = navOrders
+      .map((o) => o.navOrderNo)
+      .filter((x): x is string => x !== null);
+
+    joined = held.map((o) => {
+      const orderName = o.order_name;
+      if (orderName === null) {
+        // No name to join on: treat as line-present (an ops verify), never a re-drive.
+        return bucketHeldOrder(o, { inNav: true, droppedSku: null, navLineSkus: [] });
+      }
+      const inNav = navOrderNos.some((no) => navOrderMatchesName(no, orderName));
+      const navLineSkus = navLines
+        .filter((l) => l.orderNo !== null && l.sku !== null && navOrderMatchesName(l.orderNo, orderName))
+        .map((l) => l.sku as string);
+      const facts: HeldNavFacts = {
+        inNav,
+        droppedSku: extractDroppedSku(o.last_detail),
+        navLineSkus,
+      };
+      return bucketHeldOrder(o, facts);
+    });
+  }
+
+  const input: OosHeldInput = { heldOrders: joined };
+  const r = computeOosHeld(input, config.oosHeld, Date.now());
+
+  return {
+    pipe: 'oos_held',
+    pipe_verdict: r.heldVerdict, // worst of depth (alerting count) and age (needs_operator)
+    freshness_verdict: r.heldVerdict,
+    watermark_lag_s: r.detail.oldest_alerting_age_s,
+    last_progress_at: null,
+    liveness_verdict: r.heldVerdict,
+    heartbeat_at: null,
+    heartbeat_age_s: null,
+    // The counts, the bucket tallies, and the routed per-order list (WI3) live in
+    // the typed detail bag (OosHeldDetail).
+    detail: r.detail as unknown as Record<string, unknown>,
+  };
+}
+
+// Per-location availability divergence seam (WI2 #88). Reads NAV IABC availability
+// at HF1FTZ (read-only, from getInventoryAvailability filtered to the location) and
+// the middleware's FS-location availability, assembles the input, and calls the
+// pure computeFsLocationDivergence. SEPARATE from the inventory-sync pipe.
+export async function computeFsLocationDivergencePipeline(sources: Sources): Promise<PipelineHealth> {
+  const location = config.fsDivergence.navLocationCode;
+  const [navAvail, fsInfo] = await Promise.all([
+    sources.nav.getInventoryAvailability(),
+    sources.middleware.getFulfillmentServiceInfo(),
+  ]);
+
+  // NAV side: the availability rows already at HF1FTZ. onHand / earliestShipmentDate
+  // are not exposed by the item-ledger read (see the DATA_SOURCES.md follow-up), so
+  // they are null; a null ship date is treated as eligible (best-effort).
+  const navAtLocation: NavLocationAvailabilityRow[] = navAvail
+    .filter((a) => a.location === location && a.sku !== null)
+    .map((a) => ({
+      sku: a.sku as string,
+      available: a.availableQty,
+      onHand: null,
+      earliestShipmentDate: null,
+    }));
+
+  // FS side: null (unread) grades unknown; a present list becomes a per-SKU map.
+  const fsAvailBySku =
+    fsInfo === null ? null : new Map(fsInfo.map((f) => [f.sku, f.fsAvailable]));
+
+  const input: FsLocationDivergenceInput = {
+    navAtLocation,
+    fsAvailBySku,
+    navLocation: location,
+    fsSource: `middleware ${MIDDLEWARE_PATHS.fsInfo}`,
+    // The exact per-SKU availability field on fulfillment-service-info is
+    // unconfirmed, so the FS side is documented as a proxy (DATA_SOURCES.md + PR).
+    fsSourceIsProxy: true,
+  };
+
+  const r = computeFsLocationDivergence(input, config.fsDivergence, Date.now());
+
+  return {
+    pipe: 'fs_location_divergence',
+    pipe_verdict: r.divergenceVerdict,
+    freshness_verdict: r.divergenceVerdict,
+    watermark_lag_s: null,
+    last_progress_at: null,
+    liveness_verdict: r.divergenceVerdict,
+    heartbeat_at: null,
+    heartbeat_age_s: null,
     detail: r.detail as unknown as Record<string, unknown>,
   };
 }
@@ -358,6 +493,8 @@ export async function computePipelines(sources: Sources): Promise<PipelineHealth
     computeJobQueuePipeline(sources),       // Unit 3
     computeShopifyWebhookPipeline(sources), // Unit 3
     computeAllocatorPipeline(sources),      // Unit 4
+    computeOosHeldPipeline(sources),        // WI1 (#87)
+    computeFsLocationDivergencePipeline(sources), // WI2 (#88)
   ]);
   const real = new Map<string, PipelineHealth>(landed.map((p) => [p.pipe, p]));
   return PIPES.map((p) => real.get(p) ?? placeholderPipe(p));

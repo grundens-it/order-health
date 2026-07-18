@@ -229,6 +229,8 @@ export function App(): JSX.Element {
     nav_job_queue: 'NAV job queue',
     shopify_webhook: 'Shopify webhooks',
     allocator: 'Allocator split',
+    oos_held: 'OOS-held backlog',
+    fs_location_divergence: 'FS-location divergence',
   };
   const openPipeRemediation = (pipe: PipelineHealth): void => {
     // Inspect the observed failure mode (issue #35). When a distinct signal is

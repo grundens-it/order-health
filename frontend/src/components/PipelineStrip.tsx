@@ -11,6 +11,8 @@ const PIPE_LABELS: Record<string, string> = {
   nav_job_queue: 'NAV job queue',
   shopify_webhook: 'Shopify webhooks',
   allocator: 'Allocator split',
+  oos_held: 'OOS-held backlog',
+  fs_location_divergence: 'FS-location divergence',
 };
 
 // A red/amber pipe is actionable: clicking its verdict opens the remediation

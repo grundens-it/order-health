@@ -48,6 +48,11 @@ COPY --from=build /app/backend ./backend
 COPY --from=build /app/frontend/package.json ./frontend/package.json
 COPY --from=build /app/frontend/dist ./frontend/dist
 
+# The migrate-on-boot runner (backend/src/db/migrate.ts) reads these on startup
+# from /app/db/migrations. Ship them in the image so a push to main owns the
+# schema with no separate migrate job. Copied from the build context (repo root).
+COPY db/migrations ./db/migrations
+
 EXPOSE 8080
 
 # start = "tsx src/index.ts": boots the Fastify read API + aggregator and, because

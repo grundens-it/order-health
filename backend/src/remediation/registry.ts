@@ -281,6 +281,139 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
     },
     writeCapable: true,
   },
+  // --- WI3 (#89): NAV-conditioned OOS-held routing tools --------------------
+  {
+    // ONLY for a not-in-NAV held order. The middleware's orders_updated.rs
+    // idempotency rule returns DuplicateSkip when allocations exist AND the order
+    // is already in NAV; it only falls through and re-stages when the order is NOT
+    // in NAV. So this re-drive is valid EXCLUSIVELY for the not_in_nav bucket, and
+    // the registry maps it to nothing else (routeHeldOrder enforces the same).
+    id: 'forward_sync_replay',
+    name: 'Forward-sync replay (re-drive a not-in-NAV held order)',
+    description:
+      'Re-drives ONE held Shopify order through the forward-sync path so it re-stages ' +
+      'in NAV. Valid ONLY when the order is NOT in NAV: the middleware returns ' +
+      'DuplicateSkip (a no-op) for an order already in NAV, so this must never be ' +
+      'offered on an in-NAV held order.',
+    kind: 'middleware_endpoint',
+    endpoint: {
+      method: 'POST',
+      path: '/api/forward-sync/replay',
+      source: 'forward-sync/replay -> orders_updated.rs re-drive (re-stages when the order is NOT in NAV)',
+      // Un-gated per the brief: the replay body is { shopify_order_id }, no NAV
+      // write-gate password.
+    },
+    writeCapable: true,
+  },
+  {
+    // in_nav_line_missing: a re-drive no-ops (DuplicateSkip); the middleware has no
+    // endpoint to add the dropped line, so this is a documented NAV-admin runbook.
+    id: 'oos_held_nav_line_add',
+    name: 'Add the dropped line to the NAV sales order',
+    description:
+      'The order reached NAV but its dropped SKU line is MISSING, so a re-drive ' +
+      'returns DuplicateSkip and cannot recover it (auto-recovery of partial lines ' +
+      'is unsupported). Add the missing line to the NAV sales order by hand, then ' +
+      'let the normal promotion + allocation flow ship it.',
+    kind: 'ops_runbook',
+    runbook: {
+      ref: 'runbooks/nav-add-dropped-line.md',
+      command: 'Add the dropped SKU line to the NAV sales order (NAV admin); do NOT forward-sync replay (DuplicateSkip)',
+      diagnostic: 'GRUS$Sales Header present for the order but the dropped SKU is absent from GRUS$Sales Line',
+    },
+    writeCapable: true,
+  },
+  {
+    // in_nav_line_present: the order reached NAV whole; the hold record is stale.
+    id: 'oos_held_stale_clear',
+    name: 'Verify and clear the stale OOS-held record',
+    description:
+      'The order is in NAV WITH the line present, so it staged whole and the ' +
+      'oos_held record is stale (the order is no longer actually held). Verify the ' +
+      'NAV order is progressing, then clear the stale hold record. Not a re-drive.',
+    kind: 'ops_runbook',
+    runbook: {
+      ref: 'runbooks/oos-held-stale-clear.md',
+      command: 'Confirm the NAV order (line present) is progressing, then clear the stale oos_held record',
+      diagnostic: 'GRUS$Sales Header + the dropped SKU line both present for the order',
+    },
+    writeCapable: true,
+  },
+  {
+    // The oos_held PIPE-level primary: the correct action is per-order and depends
+    // on each row's NAV-join bucket, so the pipe tool is a triage that routes each
+    // held order to its bucketed tool (surfaced per row in the OosHeldDetail).
+    id: 'oos_held_triage',
+    name: 'Triage the OOS-held backlog by NAV-join bucket',
+    description:
+      'Route each held order by its NAV-join bucket: not-in-NAV -> forward-sync ' +
+      'replay; in-NAV line-missing -> add the dropped NAV line by hand; in-NAV ' +
+      'line-present -> clear the stale hold. A blanket re-drive is wrong: it no-ops ' +
+      '(DuplicateSkip) on every in-NAV order.',
+    kind: 'ops_runbook',
+    runbook: {
+      ref: 'runbooks/oos-held-triage.md',
+      command: 'Work the held backlog per the per-order bucket (re-drive / NAV line-add / stale-clear)',
+      diagnostic: 'GET /api/oos-held joined to GRUS$Sales Header + GRUS$Sales Line',
+    },
+    writeCapable: false,
+  },
+  // --- WI2 (#88): FS-location re-floor tools (the divergence root-cause fix) ---
+  {
+    // The native middleware FS re-floor endpoint (the shipped fs-floor API). Gated
+    // by NAV_TOGGLE_PASSWORD; dry_run defaults ON server-side. This resets the FS
+    // Shopify location's availability to the warehouse-backed floor, clearing the
+    // per-location divergence WI2 detects.
+    id: 'fs_location_floor',
+    name: 'Re-floor the FS location (fulfillment-service-floor)',
+    description:
+      'Re-floors the fulfillment-service (FS) Shopify location so its per-location ' +
+      'availability matches the warehouse-backed floor, clearing the NAV-stocked-but-' +
+      'FS-reads-0 divergence. dry_run defaults ON server-side; run a dry pass first, ' +
+      'then the live floor. See the -floor-progress read to watch it complete.',
+    kind: 'middleware_endpoint',
+    endpoint: {
+      method: 'POST',
+      path: '/api/nav/inventory-sync/fulfillment-service-floor',
+      source: 'inventory-sync fulfillment-service-floor (fs-floor API; dry_run defaults on, password-gated)',
+      gated: true,
+    },
+    writeCapable: true,
+  },
+  {
+    // Single-SKU / single-order variant of the FS re-floor.
+    id: 'fs_location_floor_one',
+    name: 'Re-floor one SKU at the FS location (fulfillment-service-floor-one)',
+    description:
+      'Single-target variant of the FS re-floor: re-floors ONE diverging SKU at the ' +
+      'FS location. Use when a single SKU diverged rather than a cluster. dry_run ' +
+      'defaults ON; password-gated.',
+    kind: 'middleware_endpoint',
+    endpoint: {
+      method: 'POST',
+      path: '/api/nav/inventory-sync/fulfillment-service-floor-one',
+      source: 'inventory-sync fulfillment-service-floor-one (fs-floor API; dry_run defaults on, password-gated)',
+      gated: true,
+    },
+    writeCapable: true,
+  },
+  {
+    // Full FS sweep: re-floors every diverging SKU at the FS location.
+    id: 'fs_location_sweep',
+    name: 'Sweep the FS location (fulfillment-service-sweep)',
+    description:
+      'Sweeps the whole FS location, re-flooring every SKU whose FS availability has ' +
+      'diverged from its warehouse-backed floor. The broadest FS re-floor; dry_run ' +
+      'defaults ON; password-gated. Use for a widespread divergence.',
+    kind: 'middleware_endpoint',
+    endpoint: {
+      method: 'POST',
+      path: '/api/nav/inventory-sync/fulfillment-service-sweep',
+      source: 'inventory-sync fulfillment-service-sweep (fs-floor API; dry_run defaults on, password-gated)',
+      gated: true,
+    },
+    writeCapable: true,
+  },
 ] as const;
 
 // --- Subject -> tool mappings ---------------------------------------------
@@ -444,6 +577,70 @@ export const REMEDIATION_MAPPINGS: readonly RemediationMapping[] = [
       'while the NAV warehouse is stocked. Re-floor the FS location (ADR-0003), do not chase a 3PL delay.',
     toolId: 'fs_refloor',
     primary: true,
+  },
+  // --- WI1 (#87): the oos_held PIPE. Its correct action is per-order (routed by
+  // the NAV-join bucket in the detail), so the pipe primary is the triage tool. ---
+  {
+    subjectKind: 'pipe',
+    subjectKey: 'oos_held',
+    appliesWhen:
+      'The OOS-held backlog is amber/red (transient + needs_operator depth or age). Triage each held ' +
+      'order by its NAV-join bucket; a blanket re-drive no-ops (DuplicateSkip) on every in-NAV order.',
+    toolId: 'oos_held_triage',
+    primary: true,
+  },
+  // --- WI3 (#89): the three NAV-join buckets, each routed to the CORRECT tool.
+  // forward_sync_replay is mapped ONLY to not-in-NAV (never to an in-NAV bucket). ---
+  {
+    subjectKind: 'signal',
+    subjectKey: 'oos_held_not_in_nav',
+    appliesWhen:
+      'A held order is NOT in NAV: the re-drive falls through and re-stages it. forward_sync_replay is valid.',
+    toolId: 'forward_sync_replay',
+    primary: true,
+  },
+  {
+    subjectKind: 'signal',
+    subjectKey: 'oos_held_line_missing',
+    appliesWhen:
+      'A held order is in NAV but the dropped SKU line is MISSING: a re-drive returns DuplicateSkip and ' +
+      'no-ops. Add the missing NAV line by hand (no middleware endpoint exists); never forward_sync_replay.',
+    toolId: 'oos_held_nav_line_add',
+    primary: true,
+  },
+  {
+    subjectKind: 'signal',
+    subjectKey: 'oos_held_line_present',
+    appliesWhen:
+      'A held order is in NAV WITH the line present: it staged whole, so the hold record is stale. Verify ' +
+      'and clear it; never forward_sync_replay (it would DuplicateSkip anyway).',
+    toolId: 'oos_held_stale_clear',
+    primary: true,
+  },
+  // --- WI2 (#88): the fs_location_divergence PIPE. Re-floor the FS location (the
+  // native fs-floor API); floor-one / sweep are the scoped alternatives. ---
+  {
+    subjectKind: 'pipe',
+    subjectKey: 'fs_location_divergence',
+    appliesWhen:
+      'NAV shows stock at HF1FTZ but the FS-location availability reads 0 for one or more SKUs (the ' +
+      '2026-07-17 leading indicator). Re-floor the FS location so it matches the warehouse-backed floor.',
+    toolId: 'fs_location_floor',
+    primary: true,
+  },
+  {
+    subjectKind: 'pipe',
+    subjectKey: 'fs_location_divergence',
+    appliesWhen: 'A SINGLE SKU diverged: re-floor just that SKU at the FS location.',
+    toolId: 'fs_location_floor_one',
+    primary: false,
+  },
+  {
+    subjectKind: 'pipe',
+    subjectKey: 'fs_location_divergence',
+    appliesWhen: 'A WIDESPREAD divergence: sweep the whole FS location, re-flooring every diverged SKU.',
+    toolId: 'fs_location_sweep',
+    primary: false,
   },
 ] as const;
 

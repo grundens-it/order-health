@@ -99,3 +99,43 @@ test('Round 3: shopify_webhook distinguishes a dropped subscription from an outc
   assert.ok(ids.includes('webhook_outcome_redrive')); // intact subscription, orders not arriving
   assert.equal(primaryRemediationForSubject('shopify_webhook')?.id, 'webhook_resubscribe');
 });
+
+// --- WI3 (#89): NAV-conditioned OOS-held routing ---------------------------
+test('WI3: forward_sync_replay maps ONLY to the not-in-NAV bucket, and is an un-gated middleware endpoint', () => {
+  // The tool is offered on not_in_nav and nowhere else (the DuplicateSkip gotcha).
+  const subjectsWithReplay = REMEDIATION_MAPPINGS.filter((m) => m.toolId === 'forward_sync_replay').map(
+    (m) => m.subjectKey,
+  );
+  assert.deepEqual(subjectsWithReplay, ['oos_held_not_in_nav']);
+  const tool = getRemediationTool('forward_sync_replay');
+  assert.equal(tool?.kind, 'middleware_endpoint');
+  assert.equal(tool?.endpoint?.path, '/api/forward-sync/replay');
+  assert.notEqual(tool?.endpoint?.gated, true); // un-gated per the brief
+});
+
+test('WI3: the in-NAV buckets NEVER offer forward_sync_replay (a re-drive would DuplicateSkip)', () => {
+  for (const subject of ['oos_held_line_missing', 'oos_held_line_present']) {
+    const ids = remediationsForSubject(subject).map((m) => m.toolId);
+    assert.ok(!ids.includes('forward_sync_replay'), `${subject} must not offer a re-drive`);
+  }
+  assert.equal(primaryRemediationForSubject('oos_held_line_missing')?.id, 'oos_held_nav_line_add');
+  assert.equal(primaryRemediationForSubject('oos_held_line_missing')?.kind, 'ops_runbook');
+  assert.equal(primaryRemediationForSubject('oos_held_line_present')?.id, 'oos_held_stale_clear');
+});
+
+test('WI1: the oos_held pipe primary is the per-order triage', () => {
+  assert.equal(primaryRemediationForSubject('oos_held')?.id, 'oos_held_triage');
+});
+
+// --- WI2 (#88): FS-location re-floor is a GATED middleware endpoint ---------
+test('WI2: fs_location_divergence primary re-floors the FS location, gated by NAV_TOGGLE_PASSWORD', () => {
+  const tool = primaryRemediationForSubject('fs_location_divergence');
+  assert.equal(tool?.id, 'fs_location_floor');
+  assert.equal(tool?.kind, 'middleware_endpoint');
+  assert.equal(tool?.endpoint?.path, '/api/nav/inventory-sync/fulfillment-service-floor');
+  assert.equal(tool?.endpoint?.gated, true); // password-gated
+  // floor-one + sweep are the scoped alternatives.
+  const ids = remediationsForSubject('fs_location_divergence').map((m) => m.toolId);
+  assert.ok(ids.includes('fs_location_floor_one'));
+  assert.ok(ids.includes('fs_location_sweep'));
+});

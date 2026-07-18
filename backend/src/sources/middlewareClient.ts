@@ -34,6 +34,7 @@
 // still boots when the middleware is unreachable.
 import type { AllocationDecision, AllocationOutcome, Channel } from '@order-health/shared';
 import type { MissedShipment } from '@order-health/shared';
+import type { OosHeldClass, OosHeldOrder, OosHeldStatus } from '@order-health/shared';
 import { config } from '../config';
 
 // Composed from the inventory-sync analytics endpoint's last completed catalog
@@ -146,6 +147,18 @@ export interface BackSyncStatus {
   errorsLast24h: number | null;       // feed rows w/ error recorded in last 24h
 }
 
+// WI2 (#88). The middleware's fulfillment-service (FS) per-location availability
+// for one SKU. The FS side of the per-location divergence detector: NAV shows
+// stock at HF1FTZ while this reads 0. Composed from
+// GET /api/nav/inventory-sync/fulfillment-service-info. See the DATA_SOURCES.md
+// note: this is the closest DOCUMENTED middleware per-location read; its exact
+// per-SKU availability field is unconfirmed, so it is treated as a PROXY and a
+// follow-up is flagged rather than inventing a cleaner endpoint.
+export interface FsLocationAvailability {
+  sku: string;
+  fsAvailable: number | null; // FS-location available (<= 0 while NAV is stocked = the divergence)
+}
+
 // Shapes are intentionally loose (Record) at the scaffold stage; Phase W units
 // tighten each endpoint's response type as they wire it in.
 export interface MiddlewareClient {
@@ -180,6 +193,16 @@ export interface MiddlewareClient {
   // queried (stub) / failed so the missed signal reads 'unknown' rather than a
   // false green. Wholesale shipments are excluded upstream.
   getMissedShipmentDetail(): Promise<MissedShipment[] | null>;
+  // WI1 (#87). The first-class OOS-held backlog read: GET /api/oos-held?limit=300.
+  // Returns null when the endpoint has not been queried (stub) / failed so the
+  // signal reads 'unknown' rather than a false green; an empty array is a genuine
+  // "zero held" (green).
+  getOosHeldOrders(): Promise<OosHeldOrder[] | null>;
+  // WI2 (#88). The FS-location availability read (the FS side of the divergence
+  // detector). Composed from GET /api/nav/inventory-sync/fulfillment-service-info.
+  // Returns null when unread / failed so the divergence reads 'unknown', never a
+  // false green.
+  getFulfillmentServiceInfo(): Promise<FsLocationAvailability[] | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +231,11 @@ export const MIDDLEWARE_PATHS = {
   webhookEvents: '/api/shopify/webhooks/events',
   allocatorAudit: '/api/warehouse/rollout/audit',
   oosHeld: '/api/oos-held',
+  // WI2 (#88). The closest DOCUMENTED middleware per-location availability read for
+  // the FS side of the divergence detector (confirmed live in the brief). Its exact
+  // per-SKU availability field shape is unconfirmed; see the proxy note in mapper +
+  // DATA_SOURCES.md and the PR follow-up.
+  fsInfo: '/api/nav/inventory-sync/fulfillment-service-info',
 } as const;
 
 // Default per-request timeout. The dashboard endpoints are cheap reads; a stalled
@@ -755,6 +783,82 @@ export function mapMissedShipments(body: unknown): MissedShipment[] {
   return asRecordArray(body).map(mapMissedShipment);
 }
 
+// --- WI1 (#87): OOS-held backlog mappers -----------------------------------
+const OOS_HELD_CLASSES: readonly OosHeldClass[] = ['transient', 'backorder'];
+const OOS_HELD_STATUSES: readonly OosHeldStatus[] = ['pending', 'resolved', 'needs_operator'];
+
+function mapOosHeldClass(v: unknown): OosHeldClass | null {
+  const s = toStr(v);
+  return (OOS_HELD_CLASSES as readonly string[]).includes(s ?? '') ? (s as OosHeldClass) : null;
+}
+function mapOosHeldStatus(v: unknown): OosHeldStatus | null {
+  const s = toStr(v);
+  return (OOS_HELD_STATUSES as readonly string[]).includes(s ?? '') ? (s as OosHeldStatus) : null;
+}
+
+// One GET /api/oos-held row (OosHeldOrderRow) -> OosHeldOrder. The wire `class`
+// field is renamed held_class (class is a reserved word). age_s / nav_bucket /
+// remediation_tool_id stay null here: age is filled by the grader (needs nowMs),
+// the bucket + tool by the WI3 NAV join.
+export function mapOosHeldOrder(row: Row): OosHeldOrder {
+  return {
+    order_id: toStr(pick(row, 'order_id', 'orderId', 'shopify_order_id', 'shopifyOrderId')),
+    order_name: toStr(pick(row, 'order_name', 'orderName', 'name')),
+    held_class: mapOosHeldClass(pick(row, 'class', 'held_class', 'heldClass', 'klass')),
+    status: mapOosHeldStatus(pick(row, 'status', 'state')),
+    attempts: toNum(pick(row, 'attempts', 'attempt_count', 'attemptCount')),
+    first_seen_at: toIso(pick(row, 'first_seen_at', 'firstSeenAt', 'held_since', 'heldSince', 'created_at', 'createdAt')),
+    last_attempt_at: toIso(pick(row, 'last_attempt_at', 'lastAttemptAt', 'last_attempted_at')),
+    last_detail: toStr(pick(row, 'last_detail', 'lastDetail', 'detail', 'last_error', 'reason')),
+    age_s: null,
+    nav_bucket: null,
+    remediation_tool_id: null,
+  };
+}
+
+// GET /api/oos-held -> OosHeldOrder[]. The body is a bare OosHeldOrderRow[] (or an
+// enveloped rows array); asRecordArray unwraps either.
+export function mapOosHeldOrders(body: unknown): OosHeldOrder[] {
+  return asRecordArray(body).map(mapOosHeldOrder);
+}
+
+// --- WI2 (#88): FS-location availability mapper ----------------------------
+// One fulfillment-service-info row -> FsLocationAvailability. The exact per-SKU
+// availability field is unconfirmed (see DATA_SOURCES.md); the mapper accepts the
+// plausible aliases and falls back to null (unread) rather than a fabricated 0.
+export function mapFsLocationAvailability(row: Row): FsLocationAvailability | null {
+  const sku = toStr(pick(row, 'sku', 'item_no', 'itemNo', 'variant_sku', 'variantSku'));
+  if (sku === null) return null;
+  return {
+    sku,
+    fsAvailable: toNum(
+      pick(
+        row,
+        'fs_available',
+        'fsAvailable',
+        'available',
+        'fulfillment_service_available',
+        'fulfillmentServiceAvailable',
+        'shopify_available',
+        'shopifyAvailable',
+        'quantity',
+        'qty',
+      ),
+    ),
+  };
+}
+
+// GET /api/nav/inventory-sync/fulfillment-service-info -> FsLocationAvailability[].
+// Rows without a SKU are dropped (they carry no comparable per-SKU availability).
+export function mapFulfillmentServiceInfo(body: unknown): FsLocationAvailability[] {
+  const out: FsLocationAvailability[] = [];
+  for (const row of asRecordArray(body)) {
+    const mapped = mapFsLocationAvailability(row);
+    if (mapped !== null) out.push(mapped);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // STUB (kept forever). Returned when the middleware is not configured, and the
 // fallback the live client degrades to when the middleware is unreachable so the
@@ -853,6 +957,17 @@ export class MiddlewareClientStub implements MiddlewareClient {
     this.note(MIDDLEWARE_PATHS.missedShipments);
     // null (not empty) so the missed-shipments signal reads 'unknown' until the
     // endpoint is live; an empty array would falsely read as green (zero missed).
+    return null;
+  }
+  async getOosHeldOrders(): Promise<OosHeldOrder[] | null> {
+    this.note(MIDDLEWARE_PATHS.oosHeld);
+    // null (not empty) so the OOS-held signal reads 'unknown' until the endpoint is
+    // live; an empty array would falsely read as green (zero held).
+    return null;
+  }
+  async getFulfillmentServiceInfo(): Promise<FsLocationAvailability[] | null> {
+    this.note(MIDDLEWARE_PATHS.fsInfo);
+    // null so the divergence detector reads 'unknown' until the FS read is live.
     return null;
   }
 }
@@ -1036,6 +1151,26 @@ class MiddlewareClientLive implements MiddlewareClient {
       return mapMissedShipments(await this.getJson(MIDDLEWARE_PATHS.missedShipments));
     } catch (err) {
       return this.degrade('missed-shipment detail', err, this.stub.getMissedShipmentDetail());
+    }
+  }
+
+  async getOosHeldOrders(): Promise<OosHeldOrder[] | null> {
+    try {
+      // WI1 (#87): limit 300 per the brief. A successful GET (even empty) is a real
+      // "zero held" reading; only a failure degrades to null (unknown).
+      return mapOosHeldOrders(await this.getJson(buildPath(MIDDLEWARE_PATHS.oosHeld, { limit: 300 })));
+    } catch (err) {
+      return this.degrade('oos-held backlog', err, this.stub.getOosHeldOrders());
+    }
+  }
+
+  async getFulfillmentServiceInfo(): Promise<FsLocationAvailability[] | null> {
+    try {
+      // WI2 (#88): the FS side of the divergence detector. A successful GET (even
+      // empty) is a real reading; only a failure degrades to null (unknown).
+      return mapFulfillmentServiceInfo(await this.getJson(MIDDLEWARE_PATHS.fsInfo));
+    } catch (err) {
+      return this.degrade('fulfillment-service info', err, this.stub.getFulfillmentServiceInfo());
     }
   }
 }

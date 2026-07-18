@@ -234,6 +234,91 @@ export interface AllocatorDetail {
   sanity: AllocatorSplitSanity;
 }
 
+// --- OOS-held backlog signal (WI1 #87) + NAV-conditioned routing (WI3 #89) ----
+// The middleware oos_held_order queue (GET /api/oos-held) parks DTC orders whose
+// lines the allocator could not satisfy. WI1 promotes this backlog from a buried
+// count on the allocator pipe to its OWN graded pipe. WI3 joins each held order to
+// NAV and buckets it so the correct remediation is routed (a plain re-drive no-ops
+// on most of these). Snake_case matches the JSONB / wire convention.
+
+// The queue row's own class + status columns (GET /api/oos-held row shape).
+// class: 'transient' (a momentary allocator miss, the alerting population) vs
+// 'backorder' (a genuine warehouse short, legitimate and NEVER a red driver).
+export type OosHeldClass = 'transient' | 'backorder';
+// status: 'pending' (awaiting a retry), 'resolved' (cleared), 'needs_operator'
+// (a human must act; the aging population the age band grades).
+export type OosHeldStatus = 'pending' | 'resolved' | 'needs_operator';
+
+// WI3 NAV-join bucket. Which remediation is correct depends ENTIRELY on this:
+//   not_in_nav          -> a re-drive works (forward_sync_replay).
+//   in_nav_line_missing -> re-drive no-ops (DuplicateSkip); needs a manual NAV
+//                          line-add (no middleware endpoint exists for it).
+//   in_nav_line_present -> the order reached NAV whole; a STALE hold record to clear.
+export type OosHeldNavBucket = 'not_in_nav' | 'in_nav_line_missing' | 'in_nav_line_present';
+
+// One held-order row read from /api/oos-held, optionally enriched with the WI3
+// NAV-join bucket and the mapped remediation tool. Enrichment fields are null
+// until the join runs so an un-joined snapshot still types cleanly.
+export interface OosHeldOrder {
+  order_id: string | null;       // Shopify numeric id (string on the wire)
+  order_name: string | null;     // e.g. "SP-322348"
+  held_class: OosHeldClass | null;   // the wire `class` (renamed; `class` is reserved)
+  status: OosHeldStatus | null;
+  attempts: number | null;
+  first_seen_at: string | null;
+  last_attempt_at: string | null;
+  last_detail: string | null;    // the last retry outcome, human text
+  age_s: number | null;          // wall-clock age since first_seen_at (filled by the grader)
+  nav_bucket: OosHeldNavBucket | null;   // WI3 routing bucket (null until joined)
+  remediation_tool_id: string | null;   // the tool routed for this bucket (null until joined)
+}
+
+// The typed detail bag for the oos_held pipe. held_verdict is depth-and-age banded
+// over the ALERTING population (transient rows that are not resolved), with the
+// age band driven by the needs_operator rows. backorder-class rows are surfaced
+// separately and never move the verdict.
+export interface OosHeldDetail {
+  held_verdict: Verdict;             // depth/age band over the alerting population
+  total_count: number | null;        // all held rows (null = source unread => unknown)
+  alerting_count: number | null;     // transient, not-resolved rows (the depth signal)
+  needs_operator_count: number | null; // transient + needs_operator (drives the age band)
+  backorder_count: number | null;    // legitimate backorder-class rows (never red)
+  oldest_age_s: number | null;         // oldest held row of any class (informational)
+  oldest_alerting_age_s: number | null; // oldest needs_operator row (the age-band driver)
+  // WI3 NAV-join bucket tallies (null until the join runs).
+  not_in_nav_count: number | null;
+  in_nav_line_missing_count: number | null;
+  in_nav_line_present_count: number | null;
+  reason_counts: Record<string, number>; // last_detail -> count (the top reasons)
+  held_orders: OosHeldOrder[];       // the held rows, bucketed + routed when joined
+}
+
+// --- Per-location availability divergence signal (WI2 #88) --------------------
+// The 2026-07-17 leading indicator: NAV shows stock at HF1FTZ (Holman) while the
+// middleware's fulfillment-service (FS) per-location availability reads 0, so the
+// allocator bounces the order and drops the line to OutOfStock. This is its OWN
+// signal, SEPARATE from the catalog inventory-sync pipe (which was green the whole
+// incident). It surfaces the exact diverging SKUs so an operator sees the cause at
+// hour 0, not after 173 orders pile up.
+export interface FsLocationDivergenceItem {
+  sku: string;
+  nav_available: number | null;   // NAV IABC Qty Available at HF1FTZ (> 0 = stocked)
+  nav_on_hand: number | null;     // NAV IABC Qty On Hand at HF1FTZ (null when unread)
+  earliest_shipment_date: string | null; // NAV IABC Earliest Shipment Date (null when unread)
+  fs_available: number | null;    // middleware FS-location availability (<= 0 = the divergence)
+  note: string;                   // human "why this diverged"
+}
+
+export interface FsLocationDivergenceDetail {
+  divergence_verdict: Verdict;    // count-banded (amber then red); the leading signal
+  checked: number | null;         // SKUs compared on both sides (null = FS source unread)
+  diverged_count: number | null;  // SKUs NAV shows stocked at HF1FTZ but FS reads <= 0
+  nav_location: string;           // the NAV location compared (HF1FTZ)
+  fs_source: string;              // the middleware read used for the FS side
+  fs_source_is_proxy: boolean;    // true when a proxy stands in for a clean per-location read
+  items: FsLocationDivergenceItem[]; // the diverging SKUs (bounded for the panel)
+}
+
 // --- Unit 3 pipe detail bags (job-queue, price-sync, Shopify webhooks) -----
 // Each pipe carries its own typed detail bag inside PipelineHealth.detail. The
 // backend writes the shape; the panel casts detail to it. Snake_case matches

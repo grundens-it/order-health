@@ -24,6 +24,9 @@ param imageTag = 'latest'
 // (access-policy model) and grants the app identity get/list here; bootstrap only
 // seeds the secret VALUES. No REPLACE-ME, nothing to look up.
 param keyVaultName = 'kv-order-health-prod-01'
+// Operator object id: keeps human/ops get/list/set access to the vault across
+// deploys, so an IaC redeploy never locks operators out. Object ids are not secret.
+param operatorObjectId = 'f883cb99-7628-42e3-9045-cb0f6bf506c1'
 
 param databaseUrlSecretName = 'order-health-database-url'
 param shopifyClientSecretName = 'order-health-shopify-client-secret'

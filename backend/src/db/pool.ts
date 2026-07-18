@@ -3,13 +3,14 @@
 // typechecks and the API runs (on the stub layer) without a live database.
 import pg from 'pg';
 import { config, hasDatabase } from '../config';
+import { pgConnectionConfig } from './pgConfig';
 
 let pool: pg.Pool | null = null;
 
 export function getPool(): pg.Pool | null {
   if (!hasDatabase()) return null;
   if (pool === null) {
-    pool = new pg.Pool({ connectionString: config.database.url });
+    pool = new pg.Pool(pgConnectionConfig(config.database.url));
   }
   return pool;
 }

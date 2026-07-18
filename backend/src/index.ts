@@ -9,8 +9,15 @@ import { registerHealthRoutes } from './api/health';
 import { registerRemediationRoutes } from './api/remediation';
 import { registerStaticServing } from './api/static';
 import { startAggregator } from './aggregator';
+import { runMigrations } from './db/migrate';
 
 async function main(): Promise<void> {
+  // Own the schema before anything reads or writes it: apply db/migrations on
+  // boot BEFORE the server serves and BEFORE the aggregator cron starts. A clean
+  // no-op in stub mode (no DATABASE_URL). Throws on failure so the container
+  // fails fast rather than serving on an unmigrated database.
+  await runMigrations();
+
   const app = Fastify({ logger: true });
 
   // Permissive CORS for the Vite dev frontend. Tighten per environment later.

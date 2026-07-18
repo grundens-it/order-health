@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { config, hasDatabase } from '../config.js';
 import { pgConnectionConfig } from './pgConfig.js';
+import { ensureDatabase } from './ensureDatabase.js';
 
 // The migrations ship at <image>/db/migrations. This module lives at
 // backend/src/db/migrate.ts, so three levels up is the repo/app root in both the
@@ -66,6 +67,12 @@ export async function runMigrations(
   opts: { dir?: string; log?: Logger } = {},
 ): Promise<void> {
   const log = opts.log ?? defaultLog;
+
+  // Self-healing: the target database must exist before we can migrate it. On a
+  // fresh server, provisioning may never have run CREATE DATABASE (the cause of
+  // the 2026-07-18 prod boot crash), so ensure it first. Connects to the server's
+  // `postgres` maintenance database, NOT the target. A clean no-op in stub mode.
+  await ensureDatabase({ log });
 
   if (!hasDatabase()) {
     log('DATABASE_URL not set: stub mode, skipping migrations');

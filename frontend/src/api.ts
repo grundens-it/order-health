@@ -1,9 +1,11 @@
 // Typed fetch helpers for the backend read API. The shared package supplies the
 // response types, so the frontend and backend agree on the as_of envelope.
 import type {
+  AuthMeResponse,
   ChannelFilter,
   OrdersResponse,
   PipelinesResponse,
+  RemediationArmStateResponse,
   RemediationRegistryResponse,
   RemediationTriggerResult,
   RollupResponse,
@@ -58,6 +60,38 @@ export function fetchRollup(): Promise<RollupResponse> {
 // mapped tool for a red signal without re-declaring the runbook.
 export function fetchRemediationRegistry(): Promise<RemediationRegistryResponse> {
   return getJson<RemediationRegistryResponse>('/api/remediation/registry');
+}
+
+// The resolved principal (issue #96): the SPA reads this to decide whether to show
+// the Admin-only arm/disarm panel. The server is still the real gate on every write.
+export function fetchAuthMe(): Promise<AuthMeResponse> {
+  return getJson<AuthMeResponse>('/api/auth/me');
+}
+
+// Admin arm/disarm panel (issue #97). GET the current arm state + kill switch,
+// PUT to set each. Admin-only on the server; a non-Admin PUT returns 403.
+export function fetchArmState(): Promise<RemediationArmStateResponse> {
+  return getJson<RemediationArmStateResponse>('/api/admin/arm-state');
+}
+
+async function putJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`request to ${url} responded ${res.status}`);
+  }
+  return (await res.json()) as T;
+}
+
+export function putArmState(armed: boolean): Promise<RemediationArmStateResponse> {
+  return putJson<RemediationArmStateResponse>('/api/admin/arm-state', { armed });
+}
+
+export function putKillSwitch(killed: boolean): Promise<RemediationArmStateResponse> {
+  return putJson<RemediationArmStateResponse>('/api/admin/kill-switch', { killed });
 }
 
 // Operator trigger. Fires ONLY on an explicit operator action in the modal. The

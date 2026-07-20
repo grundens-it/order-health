@@ -7,6 +7,7 @@ import Fastify from 'fastify';
 import { config } from './config';
 import { registerHealthRoutes } from './api/health';
 import { registerRemediationRoutes } from './api/remediation';
+import { registerAdminRoutes } from './api/admin';
 import { registerStaticServing } from './api/static';
 import { startAggregator } from './aggregator';
 import { runMigrations } from './db/migrate';
@@ -28,6 +29,8 @@ async function main(): Promise<void> {
 
   await registerHealthRoutes(app);
   await registerRemediationRoutes(app);
+  // Admin arm/disarm + kill-switch (issue #97) and /api/auth/me (issue #96).
+  await registerAdminRoutes(app);
   // Production static serving of the built frontend (ADR-0011 single container).
   // Registered AFTER the API routes so /api/* always wins; a no-op in dev.
   await registerStaticServing(app);

@@ -610,6 +610,7 @@ export interface RemediationTriggerResult {
 // are NEVER recorded here.
 export interface RemediationAuditEntry {
   at: string;          // ISO timestamp of the operator action
+  actor: string;       // the authenticated principal name (issue #96); never a secret
   toolId: string;
   subjectKind: HealthTransition['subject_kind'] | null;
   subjectKey: string | null;
@@ -729,3 +730,59 @@ export function detectRemediationTool(
       return null;
   }
 }
+
+
+// --- RBAC + admin arm/disarm (issues #96 / #97) ---------------------------
+// The app runs behind Entra Easy Auth, which injects an X-MS-CLIENT-PRINCIPAL
+// header (base64 JSON with a claims array). Roles arrive as 'roles' claims
+// carrying the Entra app-role values below. These constants are the SINGLE source
+// of truth for the role strings so the backend gate and the frontend admin-panel
+// visibility check never re-declare them.
+export const APP_ROLES = {
+  viewer: 'OrderHealth.Viewer',
+  operator: 'OrderHealth.Operator',
+  admin: 'OrderHealth.Admin',
+} as const;
+export type AppRole = (typeof APP_ROLES)[keyof typeof APP_ROLES];
+
+// The authenticated caller, resolved from the Easy Auth header (or the dev
+// fallback when the header is absent, i.e. Easy Auth is not in front locally).
+export interface Principal {
+  name: string;      // preferred_username / name claim, or the dev principal name
+  roles: string[];   // the 'roles' claim values (Entra app roles)
+}
+
+// The typed 403 body returned when a caller's roles do not satisfy a route's gate.
+export interface ForbiddenBody {
+  error: string;
+  code: 'forbidden';
+  requiredRoles: string[];  // any-of these would have been allowed
+  principalRoles: string[]; // what the caller actually carried
+}
+
+// GET /api/auth/me: the resolved principal, so the frontend can decide whether to
+// render the Admin-only panel. Open to any authenticated principal.
+export type AuthMeResponse = { as_of: string } & Principal;
+
+// Where a resolved runtime flag came from: an explicit runtime_settings row, or
+// the env config default (no row present). Surfaced so the admin panel is honest
+// about whether the value is a live override or the seeded default.
+export type FlagSource = 'runtime_settings' | 'env_default';
+
+// The resolved remediation arm state (issue #97). remediationLiveEnabled and
+// killSwitch each resolve as (runtime_settings row) ELSE (env config default);
+// `armed` is the effective posture (live enabled AND not kill-switched).
+export interface RemediationArmState {
+  remediationLiveEnabled: boolean;
+  killSwitch: boolean;
+  armed: boolean;                 // remediationLiveEnabled && !killSwitch
+  liveEnabledSource: FlagSource;
+  killSwitchSource: FlagSource;
+  updatedBy: string | null;       // last admin who changed a row (null = env default only)
+  updatedAt: string | null;       // ISO time of that change (null = env default only)
+}
+export type RemediationArmStateResponse = { as_of: string } & RemediationArmState;
+
+// The Admin-only PUT bodies for the two arm/disarm controls.
+export interface SetArmedInput { armed: boolean }
+export interface SetKillSwitchInput { killed: boolean }

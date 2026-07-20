@@ -13,6 +13,17 @@ function str(name: string, fallback?: string): string {
   return v;
 }
 
+// A comma-separated list env (e.g. DEV_PRINCIPAL_ROLES=OrderHealth.Admin,OrderHealth.Operator).
+// Trims blanks; an unset/empty value yields the fallback list.
+function strList(name: string, fallback: string[]): string[] {
+  const v = process.env[name];
+  if (v === undefined || v.trim().length === 0) return fallback;
+  return v
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 function bool(name: string, fallback: boolean): boolean {
   const v = process.env[name];
   if (v === undefined) return fallback;
@@ -29,6 +40,15 @@ function num(name: string, fallback: number): number {
 export interface Config {
   server: { host: string; port: number };
   database: { url: string };
+  // RBAC (issue #96). The app sits behind Entra Easy Auth, which injects the
+  // X-MS-CLIENT-PRINCIPAL header. When that header is ABSENT (local dev / Easy Auth
+  // not in front) the route layer falls back to this dev principal so development
+  // is unblocked. It defaults to granting Admin locally; a deployed environment
+  // always has the header, so this fallback never applies in front of Easy Auth.
+  auth: {
+    devPrincipalName: string;   // DEV_PRINCIPAL_NAME
+    devPrincipalRoles: string[]; // DEV_PRINCIPAL_ROLES (comma-separated app roles)
+  };
   middleware: { baseUrl: string; authToken: string };
   // Read-only Shopify Admin API (ADR-0009). Client-credentials custom-app token,
   // least-privilege READ scopes only. The client is live only when shop + clientId
@@ -190,6 +210,12 @@ export const config: Config = {
   },
   database: {
     url: str('DATABASE_URL'),
+  },
+  auth: {
+    devPrincipalName: str('DEV_PRINCIPAL_NAME', 'dev-admin@localhost'),
+    // Default grants Admin locally so dev is unblocked (issue #96). Never applies
+    // when Easy Auth is in front (the header is always present in that case).
+    devPrincipalRoles: strList('DEV_PRINCIPAL_ROLES', ['OrderHealth.Admin']),
   },
   middleware: {
     baseUrl: str('MIDDLEWARE_BASE_URL'),

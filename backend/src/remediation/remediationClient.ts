@@ -26,10 +26,12 @@ import type {
 } from '@order-health/shared';
 import { config } from '../config';
 import { buildUrl } from '../sources/middlewareClient';
+import { resolveRemediationFlags } from '../runtime/runtimeSettings';
 
 // A single operator action's arming/confirmation intent, passed from the route.
 export interface TriggerOptions {
   confirmed: boolean; // the per-action operator sign-off (ADR-0010)
+  actor?: string;     // the authenticated principal name recorded on the audit entry (issue #96)
 }
 
 // Per-request timeout for the live POST. A stalled middleware must fail fast into
@@ -146,8 +148,13 @@ export async function triggerRemediation(
   nowIso: string,
   options: TriggerOptions = { confirmed: false },
 ): Promise<RemediationTriggerResult> {
-  const armed = config.remediation.liveEnabled && !config.remediation.killSwitch;
+  // Resolve the arm state + kill switch from runtime_settings with env fallback
+  // (issue #97). In stub mode (no DB) this is exactly the env config, so the
+  // disarmed-by-default posture and the existing tests are unchanged.
+  const { remediationLiveEnabled, killSwitch } = await resolveRemediationFlags();
+  const armed = remediationLiveEnabled && !killSwitch;
   const fireLive = armed && options.confirmed && isLiveExecutable(tool);
+  const actor = options.actor ?? 'unknown';
 
   const base = {
     as_of: nowIso,
@@ -161,6 +168,7 @@ export async function triggerRemediation(
   const record = (outcome: RemediationTriggerResult['status']): void => {
     auditLog.push({
       at: nowIso,
+      actor,
       toolId: tool.id,
       subjectKind: resolvedSubject?.subjectKind ?? null,
       subjectKey: resolvedSubject?.subjectKey ?? null,

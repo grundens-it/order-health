@@ -3,6 +3,7 @@ import type {
   ChannelFilter as ChannelFilterValue,
   LeadershipRollup,
   LifecycleStage,
+  OosHeldDetail,
   OrderHealth,
   PipelineHealth,
   RemediationRegistry,
@@ -254,6 +255,10 @@ export function App(): JSX.Element {
     // back to the static primary. Pure, read-only: NAMES a tool, triggers nothing.
     const detected = detectRemediationTool(pipe.pipe, pipe);
     const w = pipeWhy(pipe, PIPE_LABELS[pipe.pipe] ?? pipe.pipe);
+    // Unit 1: the OOS-held pipe carries its per-order NAV-join buckets in detail, so
+    // the modal's DIAGNOSE + RESOLVE regions can route each held order to its bucket.
+    const oosHeld =
+      pipe.pipe === 'oos_held' ? (pipe.detail as unknown as OosHeldDetail) : undefined;
     setRemediationSubject({
       subjectKind: 'pipe',
       subjectKey: pipe.pipe,
@@ -263,6 +268,7 @@ export function App(): JSX.Element {
       verdict: pipe.pipe_verdict,
       why: w.why,
       details: w.details,
+      oosHeld,
     });
   };
 
@@ -390,7 +396,7 @@ export function App(): JSX.Element {
         {tab === 'orderhealth' && (
           <>
             <LeadershipStrip rollup={rollup} onDrill={onDrill} />
-            <PipelineStrip pipelines={pipelines} onRemediate={openPipeRemediation} />
+            <PipelineStrip pipelines={pipelines} registry={registry} onRemediate={openPipeRemediation} />
 
             <div className="sec">
               <h2>Order lifecycle</h2>
@@ -538,6 +544,7 @@ export function App(): JSX.Element {
       <RemediationModal
         subject={remediationSubject}
         registry={registry}
+        isAdmin={isAdmin}
         onClose={() => setRemediationSubject(null)}
       />
     </>

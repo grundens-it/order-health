@@ -127,6 +127,20 @@ test('WI1: the oos_held pipe primary is the per-order triage', () => {
   assert.equal(primaryRemediationForSubject('oos_held')?.id, 'oos_held_triage');
 });
 
+// --- Unit 1: recovery-replay FIX wired onto the in-NAV-line-present bucket ----
+test('Unit 1: the in-NAV-line-present bucket offers recovery_sweep as a secondary FIX (never a re-drive)', () => {
+  const ids = remediationsForSubject('oos_held_line_present').map((m) => m.toolId);
+  // The stale-clear ops step stays primary; recovery replay is the secondary FIX.
+  assert.equal(primaryRemediationForSubject('oos_held_line_present')?.id, 'oos_held_stale_clear');
+  assert.ok(ids.includes('recovery_sweep'), 'line-present offers the recovery replay FIX');
+  // A re-drive would DuplicateSkip an in-NAV order, so it must never be offered here.
+  assert.ok(!ids.includes('forward_sync_replay'), 'line-present must not offer a re-drive');
+  // recovery_sweep is the GATED batch replay (password required, verified in source).
+  const recovery = getRemediationTool('recovery_sweep');
+  assert.equal(recovery?.endpoint?.path, '/api/recovery/replay-fulfillment-requests');
+  assert.equal(recovery?.endpoint?.gated, true);
+});
+
 // --- WI2 (#88): FS-location re-floor is a GATED middleware endpoint ---------
 test('WI2: fs_location_divergence primary re-floors the FS location, gated by NAV_TOGGLE_PASSWORD', () => {
   const tool = primaryRemediationForSubject('fs_location_divergence');

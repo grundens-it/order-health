@@ -215,4 +215,47 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
       return proxyMiddleware(reply, 'POST', '/api/nav/inventory/check', invBody);
     },
   );
+
+  // --- Unit 1 OOS-held DIAGNOSE reads (all read-only, Operator OR Admin) ------
+  // The OOS-held modal joins each held order to NAV and shows the relevant middleware
+  // reads inline so the operator sees the cause without leaving the tool. Each route
+  // proxies an EXISTING middleware read verified against the middleware route table
+  // (main.rs): job-queue/health (main.rs:563), order-presence/:id (main.rs:634, i64),
+  // pending-fulfillment-requests (main.rs:1088). No password, no write.
+
+  // GET /api/diagnostics/job-queue-health -> middleware GET /api/nav/job-queue/health.
+  app.get(
+    '/api/diagnostics/job-queue-health',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      return proxyMiddleware(reply, 'GET', '/api/nav/job-queue/health');
+    },
+  );
+
+  // GET /api/diagnostics/order-presence/:id -> middleware GET /api/nav/order-presence/:id.
+  // Answers "has this Shopify order id reached NAV" for the OOS-held NAV join.
+  app.get(
+    '/api/diagnostics/order-presence/:id',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      const id = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(id)) {
+        return reply.code(400).send({ error: 'order-presence id must be a numeric Shopify order id' });
+      }
+      return proxyMiddleware(reply, 'GET', `/api/nav/order-presence/${id}`);
+    },
+  );
+
+  // GET /api/diagnostics/pending-fulfillment-requests -> middleware
+  // GET /api/middleware/pending-fulfillment-requests (the pending back-sync queue).
+  app.get(
+    '/api/diagnostics/pending-fulfillment-requests',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      return proxyMiddleware(reply, 'GET', '/api/middleware/pending-fulfillment-requests');
+    },
+  );
 }

@@ -702,6 +702,22 @@ export const REMEDIATION_MAPPINGS: readonly RemediationMapping[] = [
     toolId: 'oos_held_stale_clear',
     primary: true,
   },
+  {
+    // Unit 1: the recovery-replay FIX for the in-NAV-line-present bucket. When the
+    // order reached NAV whole and its NAV shipment posted but the Shopify
+    // fulfillmentCreate never fired, a re-drive DuplicateSkips; the recovery BATCH
+    // replay (recovery.rs, idempotent, already-submitted reported) dispatches the
+    // missing fulfillment instead. Secondary to the stale-clear ops step. Verified
+    // body: { shopify_order_ids:[i64], set_by } + NAV_TOGGLE_PASSWORD (gated).
+    subjectKind: 'signal',
+    subjectKey: 'oos_held_line_present',
+    appliesWhen:
+      'The held order is in NAV with the line present and its NAV shipment posted, but the Shopify ' +
+      'fulfillmentCreate never fired. Batch-replay the fulfillment request to dispatch it (idempotent, ' +
+      'already-submitted is reported, never double-fulfilled). Not a re-drive (that would DuplicateSkip).',
+    toolId: 'recovery_sweep',
+    primary: false,
+  },
   // --- WI2 (#88): the fs_location_divergence PIPE. Re-floor the FS location (the
   // native fs-floor API); floor-one / sweep are the scoped alternatives. ---
   {

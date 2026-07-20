@@ -150,3 +150,26 @@ export function fetchNavInventory(sku: string, location?: string): Promise<Diagn
   if (location && location.length > 0) params.set('location', location);
   return getJson<DiagnosticEnvelope>(`/api/diagnostics/nav-inventory?${params.toString()}`);
 }
+
+// --- Unit 1 OOS-held DIAGNOSE reads (read-only proxies) --------------------
+// The OOS-held modal loads these inline so the operator sees the cause without
+// leaving the tool. Each proxies an existing middleware read (verified against the
+// middleware main.rs route table); the backend attaches no password and mutates
+// nothing. A failure degrades to the modal's "diagnostic unavailable" state.
+
+// GET /api/diagnostics/job-queue-health -> NAV job-queue health (CU 50007/50009).
+export function fetchJobQueueHealth(): Promise<DiagnosticEnvelope> {
+  return getJson<DiagnosticEnvelope>('/api/diagnostics/job-queue-health');
+}
+
+// GET /api/diagnostics/order-presence/:id -> has this Shopify order reached NAV.
+export function fetchOrderPresence(orderId: string): Promise<DiagnosticEnvelope> {
+  return getJson<DiagnosticEnvelope>(
+    `/api/diagnostics/order-presence/${encodeURIComponent(orderId)}`,
+  );
+}
+
+// GET /api/diagnostics/pending-fulfillment-requests -> the pending back-sync queue.
+export function fetchPendingFulfillment(): Promise<DiagnosticEnvelope> {
+  return getJson<DiagnosticEnvelope>('/api/diagnostics/pending-fulfillment-requests');
+}

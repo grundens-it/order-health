@@ -108,23 +108,23 @@ jobs:
       # `--parameters name=$VALUE` after `echo "::add-mask::$VALUE"`.
 
       # Open the Grundens IP lockdown to THIS runner so the post-deploy smoke can
-      # hit the real /api/health/ping. Done HERE, before any site-config write,
-      # so the access-restriction write is not racing a container restart. That
-      # race (running it right after the image swap) is what 400-ed the earlier
-      # attempts; from a settled config the same command succeeds. Bicep does not
-      # manage access restrictions, so this rule survives the deploy. The Remove
-      # step restores the lockdown on every outcome.
+      # hit the real /api/health/ping. Bicep does not manage access restrictions,
+      # so this rule survives the deploy; the Remove step restores the lockdown
+      # on every outcome. (The earlier 400s were a semicolon in the rule
+      # description, not a race or a permission problem: see the add below.)
       - name: Allow this runner through the IP lockdown (temporary)
         id: ciallow
         run: |
           set -euo pipefail
           runner_ip=$(curl -fsS --max-time 10 https://api.ipify.org)
           echo "Runner egress IP: $runner_ip"
+          # No --description: a semicolon in that field makes ARM reject the
+          # whole request with a 400 (reproduced deterministically). The rule
+          # name already says what it is.
           az webapp config access-restriction add \
             --resource-group "$AZURE_RESOURCE_GROUP" --name "$APP_NAME" \
             --rule-name ci-health-temp --action Allow --priority 90 \
-            --ip-address "$runner_ip/32" \
-            --description "Transient CI health probe; removed after smoke"
+            --ip-address "$runner_ip/32"
           echo "Temporary allow rule added."
 
       # Bicep is the slowest step and is pure overhead on a code-only change.

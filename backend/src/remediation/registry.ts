@@ -58,6 +58,11 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       gated: true,
     },
     writeCapable: true,
+    steps: [
+      'Triage first: confirm the order reached NAV and its Shopify fulfillmentCreate never fired.',
+      'Replay the fulfillment request(s); idempotent, already-submitted orders are reported, never double-fulfilled.',
+      'Verify the Shopify fulfillment now exists for each replayed order.',
+    ],
   },
   {
     id: 'submit_fulfillment_request',
@@ -142,6 +147,12 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       diagnostic: 'Shopify FS-location available < 0 while NAV warehouse on-hand > 0 (fs_floor_at_zero)',
     },
     writeCapable: true,
+    steps: [
+      'Confirm the pattern: Shopify FS-location available < 0 while the NAV warehouse is stocked (on-hand > 0).',
+      'Confirm stock with the NAV inventory check for the SKU and location.',
+      'Re-floor the FS location for the affected SKU(s) (prefer the native fs-floor tool; dry run then apply).',
+      'Verify FS available is no longer negative and the order releases to ship. Do NOT submit a fulfillment or chase a 3PL delay.',
+    ],
   },
   {
     // Round 3 (Unit 3), finding: the nav_staging_stuck "Not Auto-released" gap. The
@@ -200,6 +211,7 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       method: 'POST',
       path: '/api/nav/stuck-staging/dedupe',
       source: 'main.rs:570 -> stuck-staging dedupe',
+      destructive: true,
       heldFromLivePath: true,
       heldReason: 'deletes NAV staging rows with no documented rollback; per ADR-0010 held disarmed pending a rollback story',
     },
@@ -301,9 +313,16 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       path: '/api/forward-sync/replay',
       source: 'forward-sync/replay -> orders_updated.rs re-drive (re-stages when the order is NOT in NAV)',
       // Un-gated per the brief: the replay body is { shopify_order_id }, no NAV
-      // write-gate password.
+      // write-gate password. Real mode, no dry_run: any confirmed fire is a live
+      // write (Admin-only at the route).
     },
     writeCapable: true,
+    steps: [
+      'Confirm the held order is NOT in NAV (a re-drive DuplicateSkips an order already in NAV).',
+      'Open the modal from the specific order so its numeric Shopify order id is the subject.',
+      'Run the replay (Admin-only, real mode, no dry-run) so the order re-stages in NAV.',
+      'Verify the order now appears in NAV staging and clears the OOS hold.',
+    ],
   },
   {
     // in_nav_line_missing: a re-drive no-ops (DuplicateSkip); the middleware has no
@@ -377,8 +396,15 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       path: '/api/nav/inventory-sync/fulfillment-service-floor',
       source: 'inventory-sync fulfillment-service-floor (fs-floor API; dry_run defaults on, password-gated)',
       gated: true,
+      supportsDryRun: true,
     },
     writeCapable: true,
+    steps: [
+      'Confirm the pattern: the FS location shows available < 0 while NAV warehouse on-hand > 0.',
+      'Confirm stock with the NAV inventory check for the affected SKU and location.',
+      'Dry run the re-floor first (preview, no writes), then run it live to reset the FS floor.',
+      'Verify FS available is no longer negative and the order releases; a 200 alone does not prove the write stuck, re-read FS available (watch the floor-progress read).',
+    ],
   },
   {
     // Single-SKU / single-order variant of the FS re-floor.
@@ -394,8 +420,15 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       path: '/api/nav/inventory-sync/fulfillment-service-floor-one',
       source: 'inventory-sync fulfillment-service-floor-one (fs-floor API; dry_run defaults on, password-gated)',
       gated: true,
+      supportsDryRun: true,
     },
     writeCapable: true,
+    steps: [
+      'Confirm this is a single-SKU divergence (FS available < 0, NAV on-hand > 0 for that one SKU).',
+      'Open the modal from the diverging SKU so its SKU is the subject (floor-one targets that SKU).',
+      'Dry run first (preview, no writes), then run it live to re-floor just that SKU.',
+      'Verify the SKU FS available is no longer negative and the order releases.',
+    ],
   },
   {
     // Full FS sweep: re-floors every diverging SKU at the FS location.
@@ -409,10 +442,49 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
     endpoint: {
       method: 'POST',
       path: '/api/nav/inventory-sync/fulfillment-service-sweep',
-      source: 'inventory-sync fulfillment-service-sweep (fs-floor API; dry_run defaults on, password-gated)',
+      source: 'inventory-sync fulfillment-service-sweep (fs-floor API; dry_run defaults on, days_back scan)',
       gated: true,
+      supportsDryRun: true,
     },
     writeCapable: true,
+    steps: [
+      'Use only for a WIDESPREAD divergence (a full size run or drop diverged), not a single SKU.',
+      'Dry run the sweep first (preview, no writes) and review the would-change count.',
+      'Run it live to re-floor every diverged SKU; watch the sweep-progress read to completion.',
+      'Verify the FS-location divergence signal clears and the held orders release.',
+    ],
+  },
+  {
+    // genuine_3pl_delay: a READ-ONLY diagnostics tool. The order is picked and in
+    // stock at the 3PL (HF1FTZ / HF1FTZPRE) and unshipped past the SLO. There is NO
+    // middleware fix (the fix is physical: the warehouse must ship), so this tool
+    // mutates nothing. It drives the diagnostics modal (FO Inspector + NAV inventory
+    // check via the read-only proxy routes) and gives the operator the chase.
+    id: 'genuine_3pl_delay_chase',
+    name: 'Chase the 3PL warehouse (read-only diagnostics)',
+    description:
+      'The order is picked and in stock at the 3PL (HF1FTZ / HF1FTZPRE) and unshipped past the ' +
+      'ship SLO. It is not the FS floor bug and not a backorder: the warehouse simply has not ' +
+      'shipped it, and there is no middleware endpoint to force a physical ship. This tool is ' +
+      'READ-ONLY: it confirms the fulfillment order is assigned and in stock, then gives the ' +
+      'operator what they need to chase HF1FTZ warehouse ops. It never re-floors, re-drives, or ' +
+      'adds NAV lines.',
+    kind: 'ops_runbook',
+    runbook: {
+      ref: 'runbooks/genuine-3pl-delay-chase.md',
+      command:
+        'Chase HF1FTZ warehouse ops to expedite pick/pack/ship for this order and carrier; do NOT re-floor, re-drive, or add NAV lines',
+      diagnostic:
+        'GET /api/shopify/order/:id/fulfillment-orders (FO Inspector) + POST /api/nav/inventory/check (per-SKU on-hand)',
+    },
+    writeCapable: false,
+    steps: [
+      'Confirm the order is at HF1FTZ / HF1FTZPRE with lines in stock (warehouse on-hand > 0 and FS available >= 0). If FS available < 0 it is the FS floor bug: use the FS re-floor instead.',
+      'Run the FO Inspector to confirm the fulfillment order is assigned to HF1FTZ and open, not held.',
+      'Chase HF1FTZ warehouse ops to expedite pick/pack/ship for this order number and carrier.',
+      'Do NOT re-floor, re-drive, or add NAV lines: the order is correct, it just needs to physically ship.',
+      'Record the chase (who, when) so a repeat breach escalates.',
+    ],
   },
 ] as const;
 
@@ -576,6 +648,19 @@ export const REMEDIATION_MAPPINGS: readonly RemediationMapping[] = [
       'An awaiting_ship order is held by the FS floor-at-zero bug: Shopify FS-location available < 0 ' +
       'while the NAV warehouse is stocked. Re-floor the FS location (ADR-0003), do not chase a 3PL delay.',
     toolId: 'fs_refloor',
+    primary: true,
+  },
+  // Round 3 (Unit 1/3): a genuine 3PL delay. In stock at HF1FTZ, FS available >= 0,
+  // unshipped past the SLO. There is no middleware fix; the modal is READ-ONLY and
+  // drives the FO Inspector + NAV inventory-check diagnostics, then chases HF1FTZ.
+  {
+    subjectKind: 'signal',
+    subjectKey: 'genuine_3pl_delay',
+    appliesWhen:
+      'An awaiting_ship order is picked and in stock at the 3PL (HF1FTZ / HF1FTZPRE), FS available >= 0, ' +
+      'unshipped past the ship SLO. Read-only: confirm it is genuinely a 3PL delay (not the FS floor bug), ' +
+      'then chase the warehouse. No re-floor, re-drive, or NAV line-add.',
+    toolId: 'genuine_3pl_delay_chase',
     primary: true,
   },
   // --- WI1 (#87): the oos_held PIPE. Its correct action is per-order (routed by

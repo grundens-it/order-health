@@ -274,11 +274,13 @@ export function App(): JSX.Element {
     const signal =
       o.classification === 'fs_floor_at_zero'
         ? 'fs_floor_at_zero'
-        : o.current_stage === 'back_sync'
-          ? 'missed_back_sync'
-          : o.current_stage === 'nav_staging'
-            ? 'nav_staging_stuck'
-            : o.current_stage;
+        : o.classification === 'genuine_3pl_delay'
+          ? 'genuine_3pl_delay'
+          : o.current_stage === 'back_sync'
+            ? 'missed_back_sync'
+            : o.current_stage === 'nav_staging'
+              ? 'nav_staging_stuck'
+              : o.current_stage;
     const w = orderWhy(o);
     setRemediationSubject({
       subjectKind: 'order',
@@ -288,6 +290,10 @@ export function App(): JSX.Element {
       why: w.why,
       details: w.details,
       nextStep: w.nextStep,
+      // Carry the identifiers the read-only 3PL diagnostics need (FO Inspector by
+      // Shopify order id; NAV inventory check by the representative SKU).
+      orderId: o.shopify_order_id ?? undefined,
+      diagSku: o.awaiting_ship_detail?.sample_sku ?? undefined,
     });
   };
 

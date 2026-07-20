@@ -34,6 +34,8 @@ export interface RemediationSubject {
   why?: string;                          // one-line "why this is red/amber"
   details?: { k: string; v: string }[]; // supporting numbers (age, FS available, threshold, ...)
   nextStep?: string;                     // a plain next step, shown when no tool is mapped
+  orderId?: string | number;             // Shopify order id, for the read-only FO Inspector diagnostic
+  diagSku?: string;                      // representative SKU, for the read-only NAV inventory check
 }
 
 function verdictWord(v: Verdict | undefined): string {

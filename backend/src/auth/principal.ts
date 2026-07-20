@@ -59,6 +59,17 @@ export function parseClientPrincipal(headerValue: string | undefined | null): Pr
 // The pure role-gate decision: allow when the caller carries ANY of the allowed
 // roles. Used for both the Operator-OR-Admin trigger gate and the Admin-only
 // arm/disarm gate. No implicit hierarchy: callers pass the full allowed set.
+// Role names may arrive namespaced ('OrderHealth.Admin') or bare ('Admin')
+// depending on the Entra app-role `value`, and a value change lags in issued
+// tokens. Compare on the last dotted segment so both forms satisfy the gate.
+// The roles claim is scoped to THIS app's assignments, so matching the bare
+// suffix carries no cross-app collision risk.
+function bareRole(r: string): string {
+  const i = r.lastIndexOf('.');
+  return i >= 0 ? r.slice(i + 1) : r;
+}
+
 export function roleGate(principalRoles: readonly string[], allowedRoles: readonly string[]): boolean {
-  return principalRoles.some((r) => allowedRoles.includes(r));
+  const allowed = new Set(allowedRoles.map(bareRole));
+  return principalRoles.some((r) => allowed.has(bareRole(r)));
 }

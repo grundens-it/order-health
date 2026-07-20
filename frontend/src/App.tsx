@@ -151,7 +151,13 @@ export function App(): JSX.Element {
     let cancelled = false;
     fetchAuthMe()
       .then((me) => {
-        if (!cancelled) setIsAdmin(me.roles.includes(APP_ROLES.admin));
+        if (!cancelled) {
+          // Match on the last dotted segment so both 'Admin' and
+          // 'OrderHealth.Admin' show the panel (the Entra value can lag).
+          const bare = (r: string) => (r.includes('.') ? r.slice(r.lastIndexOf('.') + 1) : r);
+          const adminBare = bare(APP_ROLES.admin);
+          setIsAdmin(me.roles.some((r) => bare(r) === adminBare));
+        }
       })
       .catch(() => {
         // Non-critical: without a resolvable principal the panel simply stays hidden.

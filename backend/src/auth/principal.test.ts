@@ -65,3 +65,14 @@ test('admin-only gate (arm / disarm / kill): only Admin allowed', () => {
   assert.equal(roleGate([APP_ROLES.viewer], adminOnly), false);
   assert.equal(roleGate([APP_ROLES.operator, APP_ROLES.viewer], adminOnly), false);
 });
+
+test('role gate tolerates bare Entra values (Admin) and namespaced (OrderHealth.Admin)', () => {
+  const adminOnly = [APP_ROLES.admin];
+  const trigger = [APP_ROLES.operator, APP_ROLES.admin];
+  // Bare token role (Entra value before propagation) still satisfies the gate.
+  assert.equal(roleGate(['Admin'], adminOnly), true);
+  assert.equal(roleGate(['Operator'], trigger), true);
+  assert.equal(roleGate(['Viewer'], trigger), false);
+  // A non-matching bare name is still denied.
+  assert.equal(roleGate(['Reader'], adminOnly), false);
+});

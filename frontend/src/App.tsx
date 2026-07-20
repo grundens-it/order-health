@@ -24,8 +24,8 @@ import { ChannelFilter } from './components/ChannelFilter';
 
 // Tabbed shell, matching the demo: "Order Health" is the primary view (leadership
 // glance + pipeline cards + the filterable order lifecycle table); each pipe has
-// its own deep-dive tab so no single panel buries the rest. Three middleware-only
-// pages (Home, Errors, SQL Console) deep-link out to the live middleware dashboard.
+// its own deep-dive tab so no single panel buries the rest. The Admin tab (arm /
+// disarm executable remediation) renders only for Admins.
 
 type TabKey =
   | 'orderhealth'
@@ -34,7 +34,8 @@ type TabKey =
   | 'pricesync'
   | 'jobqueue'
   | 'webhooks'
-  | 'warehouse';
+  | 'warehouse'
+  | 'admin';
 
 const INTERNAL_TABS: ReadonlyArray<readonly [TabKey, string]> = [
   ['orderhealth', 'Order Health'],
@@ -44,15 +45,6 @@ const INTERNAL_TABS: ReadonlyArray<readonly [TabKey, string]> = [
   ['jobqueue', 'Job Queue'],
   ['webhooks', 'Webhooks'],
   ['warehouse', 'Warehouse Split'],
-];
-
-// Middleware-only pages (no local panel): deep-link to the live middleware
-// dashboard (reachable read-only from the corporate range).
-const DASH_BASE = 'https://middleware.grundens.com';
-const EXTERNAL_TABS: ReadonlyArray<readonly [string, string]> = [
-  ['Home', '/malibu_dash'],
-  ['Errors', '/malibu_dash/errors'],
-  ['SQL Console', '/malibu_dash/config/sql'],
 ];
 
 const STAGE_OPTIONS: ReadonlyArray<readonly [LifecycleStage, string]> = [
@@ -354,19 +346,19 @@ export function App(): JSX.Element {
               {label}
             </button>
           ))}
-          <span className="tab-sep" aria-hidden="true" />
-          {EXTERNAL_TABS.map(([label, path]) => (
-            <a
-              key={path}
-              className="tab tab-ext"
-              href={`${DASH_BASE}${path}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Opens the middleware dashboard in a new tab"
-            >
-              {label} ↗
-            </a>
-          ))}
+          {isAdmin && (
+            <>
+              <span className="tab-sep" aria-hidden="true" />
+              <button
+                type="button"
+                className={`tab${tab === 'admin' ? ' on' : ''}`}
+                aria-current={tab === 'admin' ? 'page' : undefined}
+                onClick={() => setTab('admin')}
+              >
+                Admin
+              </button>
+            </>
+          )}
         </div>
       </nav>
 
@@ -456,8 +448,17 @@ export function App(): JSX.Element {
               </span>
             </div>
             <OrderTable orders={shownOrders} onSelect={openOrderRemediation} />
+          </>
+        )}
 
-            {isAdmin && <AdminPanel />}
+        {tab === 'admin' && isAdmin && (
+          <>
+            <div className="sec">
+              <h2>Remediation controls</h2>
+              <div className="rule" />
+              <span className="aux">arm and disarm executable remediation (Admin only)</span>
+            </div>
+            <AdminPanel />
           </>
         )}
 

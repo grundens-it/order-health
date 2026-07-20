@@ -118,6 +118,20 @@ jobs:
               - 'infra/**'
               - '.github/workflows/deploy.yml'
 
+      # Capture the image the app is serving BEFORE anything swaps it (Bicep or
+      # the container-set step), so a failed health check rolls prod back to the
+      # genuinely previous image, not the one we just deployed.
+      - name: Capture current image (for rollback)
+        id: prev
+        run: |
+          set -euo pipefail
+          current=$(az webapp config container show \
+                      --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" \
+                      --query "[?name=='DOCKER_CUSTOM_IMAGE_NAME'].value | [0]" -o tsv || true)
+          # Value is "DOCKER|<registry>/<repo>:<tag>"; strip the DOCKER| prefix.
+          echo "image=${current#DOCKER|}" >> "$GITHUB_OUTPUT"
+          echo "Previous image: ${current#DOCKER|}"
+
       - name: Bicep what-if (surface the infra diff before applying)
         if: steps.changes.outputs.infra == 'true' || github.event_name == 'workflow_dispatch'
         run: |
@@ -136,19 +150,6 @@ jobs:
             --parameters infra/bicep/main.bicepparam \
             --parameters imageTag="$IMAGE_TAG"
 
-      # Capture the image the app is currently serving, so a failed health
-      # check can roll prod back to it instead of leaving a half-deploy live.
-      - name: Capture current image (for rollback)
-        id: prev
-        run: |
-          set -euo pipefail
-          current=$(az webapp config container show \
-                      --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" \
-                      --query "[?name=='DOCKER_CUSTOM_IMAGE_NAME'].value | [0]" -o tsv || true)
-          # Value is "DOCKER|<registry>/<repo>:<tag>"; strip the DOCKER| prefix.
-          echo "image=${current#DOCKER|}" >> "$GITHUB_OUTPUT"
-          echo "Previous image: ${current#DOCKER|}"
-
       # Code-only path: point the app at the new tag without a full Bicep run.
       - name: Set container image to the built tag
         run: |
@@ -156,6 +157,25 @@ jobs:
             --name "$APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --container-image-name "$ACR_LOGIN_SERVER/$IMAGE_REPOSITORY:$IMAGE_TAG"
+
+      # The main site is locked to Grundens IPs (Deny all else), so the runner
+      # cannot probe it directly. Add the runner's egress IP as a temporary
+      # allow rule for the duration of the smoke; the cleanup step below removes
+      # it every time (success, failure, or timeout). Kudu runs in a separate
+      # container on a custom-container App Service, so a localhost probe is out.
+      - name: Allow this runner through the IP lockdown (temporary)
+        id: ciallow
+        run: |
+          set -euo pipefail
+          runner_ip=$(curl -fsS --max-time 10 https://api.ipify.org)
+          echo "Runner egress IP: $runner_ip"
+          az webapp config access-restriction add \
+            --resource-group "$AZURE_RESOURCE_GROUP" --name "$APP_NAME" \
+            --rule-name ci-health-temp --action Allow --priority 90 \
+            --ip-address "$runner_ip/32" \
+            --description "Transient CI health probe; removed after smoke" >/dev/null
+          echo "Temporary allow rule added; waiting 20s for it to take effect."
+          sleep 20
 
       # Post-deploy smoke. An App Service container restart normally takes 2 to
       # 4 minutes to warm up; that is expected, not a hang (Pattern 7). Retry
@@ -178,6 +198,18 @@ jobs:
           az webapp log tail --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --provider docker &
           sleep 15
           exit 1
+
+      # ALWAYS remove the transient allow rule, whether the smoke passed, failed,
+      # or timed out, so the Grundens-only lockdown is restored every run. Guard
+      # on the add having succeeded so we never try to remove a rule we did not
+      # create (e.g. an earlier-step failure).
+      - name: Remove the temporary CI allow rule
+        if: always() && steps.ciallow.outcome == 'success'
+        run: |
+          az webapp config access-restriction remove \
+            --resource-group "$AZURE_RESOURCE_GROUP" --name "$APP_NAME" \
+            --rule-name ci-health-temp >/dev/null || true
+          echo "Temporary CI allow rule removed; lockdown restored."
 
       # If any step above failed (most importantly the health probe), revert the
       # app to the image it was serving before this run and restart. Prod ends

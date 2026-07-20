@@ -136,6 +136,19 @@ jobs:
             --parameters infra/bicep/main.bicepparam \
             --parameters imageTag="$IMAGE_TAG"
 
+      # Capture the image the app is currently serving, so a failed health
+      # check can roll prod back to it instead of leaving a half-deploy live.
+      - name: Capture current image (for rollback)
+        id: prev
+        run: |
+          set -euo pipefail
+          current=$(az webapp config container show \
+                      --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" \
+                      --query "[?name=='DOCKER_CUSTOM_IMAGE_NAME'].value | [0]" -o tsv || true)
+          # Value is "DOCKER|<registry>/<repo>:<tag>"; strip the DOCKER| prefix.
+          echo "image=${current#DOCKER|}" >> "$GITHUB_OUTPUT"
+          echo "Previous image: ${current#DOCKER|}"
+
       # Code-only path: point the app at the new tag without a full Bicep run.
       - name: Set container image to the built tag
         run: |
@@ -165,3 +178,21 @@ jobs:
           az webapp log tail --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --provider docker &
           sleep 15
           exit 1
+
+      # If any step above failed (most importantly the health probe), revert the
+      # app to the image it was serving before this run and restart. Prod ends
+      # on the last-good image; the run still reports failure so it stays visible.
+      # NOTE: never hand-edit Easy Auth during a deploy. That race is what made
+      # the #98 run fail its probe after the image had already swapped, and with
+      # no rollback it left a half-deploy live.
+      - name: Roll back on failure
+        if: failure() && steps.prev.outputs.image != ''
+        run: |
+          set -euo pipefail
+          echo "::warning::Deploy failed; rolling back to ${{ steps.prev.outputs.image }}"
+          az webapp config container set \
+            --name "$APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --container-image-name "${{ steps.prev.outputs.image }}"
+          az webapp restart --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP"
+          echo "Rolled back. Prod is on the previous image; this run stays red."

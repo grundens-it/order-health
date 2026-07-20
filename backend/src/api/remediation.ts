@@ -13,6 +13,7 @@ import type {
   RemediationTriggerInput,
   RemediationTriggerResult,
 } from '@order-health/shared';
+import { APP_ROLES } from '@order-health/shared';
 import { config } from '../config';
 import {
   REMEDIATION_MAPPINGS,
@@ -21,6 +22,8 @@ import {
 } from '../remediation/registry';
 import { triggerRemediation } from '../remediation/remediationClient';
 import { resolveForRemediation } from '../repo/transitionRepo';
+import { resolveRemediationFlags } from '../runtime/runtimeSettings';
+import { requireRole } from '../auth/context';
 
 // Operator gate. When REMEDIATION_OPERATOR_TOKEN is set, require a matching
 // Authorization: Bearer / x-operator-token header. When empty (scaffold) it logs
@@ -58,6 +61,11 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
   app.post(
     '/api/remediation/:tool/trigger',
     async (req: FastifyRequest, reply: FastifyReply): Promise<RemediationTriggerResult | { error: string }> => {
+      // RBAC (issue #96): triggering remediation requires Operator OR Admin. The
+      // typed 403 is sent by requireRole; a null return means the gate denied.
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      // The existing operator-token gate stays as defence in depth alongside RBAC.
       if (!assertOperator(req)) {
         return reply.code(401).send({ error: 'operator token required' });
       }
@@ -87,8 +95,14 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
       // intent. A live fire requires an explicit confirmed:true AND the kill switch
       // off; otherwise we pass confirmed:false so the client returns the disarmed
       // preview and never issues an HTTP call. The client records the audit entry.
-      const confirmed = body.confirmed === true && config.remediation.killSwitch === false;
-      return triggerRemediation(tool, resolvedSubject, nowIso, { confirmed });
+      // Resolve the kill switch from runtime_settings with env fallback (issue #97)
+      // so an Admin can disarm live from the panel without a redeploy.
+      const { killSwitch } = await resolveRemediationFlags();
+      const confirmed = body.confirmed === true && killSwitch === false;
+      return triggerRemediation(tool, resolvedSubject, nowIso, {
+        confirmed,
+        actor: principal.name,
+      });
     },
   );
 }

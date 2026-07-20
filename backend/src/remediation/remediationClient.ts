@@ -38,6 +38,12 @@ export interface TriggerOptions {
   // ignore this: for them any confirmed live fire is a write, gated to Admin at the
   // route. Never widens the arming gate; a live call still requires armed+confirmed.
   dryRun?: boolean;
+  // The NUMERIC Shopify order id for an order-targeted endpoint (forward-sync
+  // replay -> shopify_order_id; recovery replay -> shopify_order_ids:[id]). Threaded
+  // from the route because the resolvedSubject.subjectKey for an ORDER is the
+  // classification signal string or a split order name (SP-#####), never the numeric
+  // id. Number(subjectKey) was NaN and sent 0 / [], which 502-ed the middleware.
+  shopifyOrderId?: string | number;
 }
 
 // Per-request timeout for the live POST. A stalled middleware must fail fast into
@@ -103,7 +109,7 @@ function auditParams(tool: RemediationTool, confirmed: boolean, dryRun: boolean)
 // see the PR notes), so we never send a one-size-fits-all body. Returns undefined
 // for an endpoint that takes NO request body (back-sync run-now). The NAV
 // write-gate password is added by firePost for gated endpoints only, never here.
-function buildRequestBody(
+export function buildRequestBody(
   tool: RemediationTool,
   resolvedSubject: RemediationTriggerResult['resolvedSubject'],
   options: TriggerOptions,
@@ -114,13 +120,23 @@ function buildRequestBody(
   const dryRun = options.dryRun !== false;
   const path = tool.endpoint?.path ?? '';
 
+  // The numeric Shopify order id for the order-targeted endpoints. Prefer the id
+  // threaded end-to-end (options.shopifyOrderId); fall back only to a subjectKey
+  // that is itself numeric (the OOS-held per-order path passes the id as subjectKey).
+  // An order SIGNAL subjectKey ('fs_floor_at_zero') or a split name ('SP-323019') is
+  // NOT numeric, so it can never masquerade as an id and send 0 / [] to the middleware.
+  const rawOrderId = options.shopifyOrderId ?? subjectKey;
+  const orderId = Number(rawOrderId);
+  const hasOrderId = Number.isFinite(orderId) && orderId > 0;
+
   switch (path) {
-    // recovery.rs BATCH replay: a list of numeric shopify_order_ids + set_by. NO
-    // dry_run (the endpoint has none; it is idempotent, already-submitted reported).
-    // A single-order subject becomes a one-element list.
+    // recovery.rs BATCH replay (verified: ReplayRequest { shopify_order_ids: Vec<i64>,
+    // password, set_by }). A list of numeric shopify_order_ids + set_by; NO dry_run
+    // (idempotent, already-submitted reported). A single-order subject becomes a
+    // one-element list. Empty when no numeric id resolved (the frontend disables the
+    // fix; the middleware rejects [] with a clean 400 rather than 502).
     case '/api/recovery/replay-fulfillment-requests': {
-      const id = subjectKey !== null ? Number(subjectKey) : NaN;
-      return { shopify_order_ids: Number.isFinite(id) ? [id] : [], set_by: setBy };
+      return { shopify_order_ids: hasOrderId ? [orderId] : [], set_by: setBy };
     }
     // fs-floor sweep + full sweep: dry_run (default true) + set_by. Password added
     // by firePost when gated. Async (returns 202); progress read separately.
@@ -131,11 +147,12 @@ function buildRequestBody(
     // as subjectKey). dry_run (default true) + set_by; password added when gated.
     case '/api/nav/inventory-sync/fulfillment-service-floor-one':
       return { sku: subjectKey ?? '', dry_run: dryRun, set_by: setBy };
-    // forward-sync replay: ONE numeric shopify_order_id. Un-gated, real mode, no
-    // dry_run and no set_by (the middleware ReplayRequest carries only this field).
+    // forward-sync replay (verified: ReplayRequest { shopify_order_id: i64 }). ONE
+    // numeric shopify_order_id; un-gated, real mode, no dry_run and no set_by (the
+    // middleware struct carries only this field). Uses the threaded numeric id, never
+    // Number(subjectKey) (which was NaN -> 0 -> 502) for an order signal subjectKey.
     case '/api/forward-sync/replay': {
-      const id = subjectKey !== null ? Number(subjectKey) : NaN;
-      return { shopify_order_id: Number.isFinite(id) ? id : 0 };
+      return { shopify_order_id: hasOrderId ? orderId : 0 };
     }
     // back-sync run-now: the route takes NO json body (fires one back-sync pass).
     case '/api/back-sync/run-now':

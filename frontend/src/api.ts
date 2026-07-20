@@ -105,6 +105,7 @@ export async function triggerRemediation(
   subject: { subjectKind: 'pipe' | 'signal' | 'order'; subjectKey: string } | null,
   confirmed: boolean,
   dryRun?: boolean,
+  shopifyOrderId?: string | number,
 ): Promise<RemediationTriggerResult> {
   const res = await fetch(`/api/remediation/${encodeURIComponent(toolId)}/trigger`, {
     method: 'POST',
@@ -112,7 +113,15 @@ export async function triggerRemediation(
     // dryRun is sent only when specified: undefined keeps the safe server default
     // (dry_run true) on endpoints that support it. dryRun:false is the live apply
     // (Admin-only on the server); a non-Admin request for it returns 403.
-    body: JSON.stringify({ ...(subject ?? {}), confirmed, ...(dryRun === undefined ? {} : { dryRun }) }),
+    // shopifyOrderId is the NUMERIC Shopify id for order-targeted fixes (forward-sync
+    // replay, recovery replay); the subjectKey for an order is the classification
+    // signal, not the id, so the id must be threaded explicitly (fixes the 502).
+    body: JSON.stringify({
+      ...(subject ?? {}),
+      confirmed,
+      ...(dryRun === undefined ? {} : { dryRun }),
+      ...(shopifyOrderId === undefined ? {} : { shopifyOrderId }),
+    }),
   });
   if (!res.ok) {
     let detail = '';
@@ -172,4 +181,24 @@ export function fetchOrderPresence(orderId: string): Promise<DiagnosticEnvelope>
 // GET /api/diagnostics/pending-fulfillment-requests -> the pending back-sync queue.
 export function fetchPendingFulfillment(): Promise<DiagnosticEnvelope> {
   return getJson<DiagnosticEnvelope>('/api/diagnostics/pending-fulfillment-requests');
+}
+
+// --- Comprehensive DIAGNOSE reads (the modal "Run diagnosis" buttons) ------
+// Each proxies an existing middleware read (verified against main.rs) so a signal's
+// DIAGNOSE button renders the live RESULT inline, never a raw endpoint string.
+
+// GET /api/diagnostics/stuck-staging -> NAV staging rows stuck (Not Auto-released).
+export function fetchStuckStaging(): Promise<DiagnosticEnvelope> {
+  return getJson<DiagnosticEnvelope>('/api/diagnostics/stuck-staging');
+}
+
+// GET /api/diagnostics/stuck-staging-duplicates -> read-only preview of the
+// duplicate staging rows a dedupe would delete (the dedupe stays held from live).
+export function fetchStuckStagingDuplicates(): Promise<DiagnosticEnvelope> {
+  return getJson<DiagnosticEnvelope>('/api/diagnostics/stuck-staging-duplicates');
+}
+
+// GET /api/diagnostics/missed-shipments -> NAV shipments with no Shopify fulfillment.
+export function fetchMissedShipments(): Promise<DiagnosticEnvelope> {
+  return getJson<DiagnosticEnvelope>('/api/diagnostics/missed-shipments');
 }

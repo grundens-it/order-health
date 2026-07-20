@@ -79,6 +79,12 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
         'main.rs:1059 -> submit_fulfillment_requests_for_order (orders_updated.rs) -> Shopify fulfillmentCreate',
     },
     writeCapable: true,
+    steps: [
+      'Run the pending-fulfillment diagnosis to confirm exactly one order missed back-sync (not a backlog).',
+      'Confirm the order reached NAV and its Shopify fulfillmentCreate never fired.',
+      'Submit the single fulfillment request (Admin-only live write; idempotent).',
+      'Verify the Shopify fulfillment now exists for the order.',
+    ],
   },
   {
     id: 'back_sync_run_now',
@@ -94,6 +100,11 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       source: 'main.rs:581 -> back-sync pass',
     },
     writeCapable: true,
+    steps: [
+      'Run the missed-shipments diagnosis to confirm the watcher is alive but a pass is overdue (no standing backlog).',
+      'Trigger a back-sync pass now (Admin-only live write; the route takes no body).',
+      'Re-run the missed-shipments diagnosis to confirm the count dropped and freshness recovered.',
+    ],
   },
   {
     id: 'back_sync_rescan_from',
@@ -108,6 +119,11 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       source: 'main.rs:594 -> back-sync rescan',
     },
     writeCapable: true,
+    steps: [
+      'Run the missed-shipments diagnosis to identify the historical window of unfulfilled shipments.',
+      'Rescan that bounded window (Admin-only live write) so any still-unfulfilled orders re-submit.',
+      'Re-run the missed-shipments diagnosis to confirm the window cleared.',
+    ],
   },
   {
     id: 'close_unfulfilled_fos',
@@ -126,6 +142,12 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       source: 'main.rs:841 -> close degenerate FulfillmentOrders',
     },
     writeCapable: true,
+    steps: [
+      'Run a recovery replay FIRST so blocked_by_tag / order_fetch_failed names the specific degenerate FulfillmentOrders.',
+      'Confirm each target order is genuinely un-fulfillable (cancelled / duplicated / zero-line), NOT merely awaiting shipment.',
+      'Close only those named shopify_order_ids (Admin-only live write). Never a bulk close: closing a live FO cancels a shippable order.',
+      'Verify the degenerate FulfillmentOrders are closed and the order can proceed.',
+    ],
   },
   {
     // Round 3 (Unit 3): the FS floor-at-zero fix. NOT back_sync / submit_fulfillment:
@@ -173,6 +195,11 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       diagnostic: 'GET /api/nav/stuck-staging (header_status = 1, Not Auto-released)',
     },
     writeCapable: true,
+    steps: [
+      'Run the stuck-staging diagnosis and confirm the rows are header_status = 1 (Not Auto-released), not a Blocked SKU or a duplicate Source Id.',
+      'In NAV, re-run the CU 50009 auto-release codeunit so the staged rows promote (NAV admin action; no middleware endpoint does this).',
+      'Re-run the stuck-staging diagnosis to confirm the rows promoted and the order cleared staging.',
+    ],
   },
   {
     // Round 3 (Unit 3), finding: reconcile webhook_resubscribe with the OUTCOME
@@ -193,6 +220,12 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       diagnostic: 'Shopify orders present with no matching NAV arrival (subscription intact)',
     },
     writeCapable: true,
+    steps: [
+      'Confirm the webhook subscription is intact (Shopify admin) so this is an outcome gap, not a dropped subscription; re-subscribing will not help.',
+      'Identify the specific Shopify orders present in Shopify with no matching NAV arrival.',
+      'Re-drive each missing order through the forward-sync path (per-order re-drive) so it stages in NAV.',
+      'Confirm the orders now appear in NAV staging.',
+    ],
   },
   {
     id: 'stuck_staging_dedupe',
@@ -216,6 +249,12 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       heldReason: 'deletes NAV staging rows with no documented rollback; per ADR-0010 held disarmed pending a rollback story',
     },
     writeCapable: true,
+    steps: [
+      'Run the duplicate-staging preview (read-only) to see exactly which loser rows a dedupe would delete for the order.',
+      'Confirm the duplication is a genuine duplicate Source Id (not a Blocked SKU or a Not-Auto-released row, which have their own tools).',
+      'This delete is HELD from the one-click live path (no rollback for a deleted staging row): use the Preview here, then have Symmetry / IT run the dedupe deliberately.',
+      'After the dedupe, confirm the survivor row promotes via CU 50009 auto-release.',
+    ],
   },
   {
     id: 'unblock_and_repromote',
@@ -226,9 +265,15 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
     runbook: {
       ref: 'runbooks/nav-staging-unblock.md',
       command: 'Set [GRUS$Item].Blocked = 0 for the SKU (NAV admin), then wait for CU 50009 auto-release',
-      diagnostic: 'GET /api/nav/staging/stuck',
+      diagnostic: 'GET /api/nav/stuck-staging',
     },
     writeCapable: true,
+    steps: [
+      'Run the stuck-staging diagnosis to identify the referenced SKU that is blocking promotion.',
+      'In NAV, clear the Blocked flag on that item ([GRUS$Item].Blocked = 0) (NAV admin action).',
+      'Wait for the next CU 50009 auto-release tick to re-promote the staged order.',
+      'Re-run the stuck-staging diagnosis to confirm the order cleared staging.',
+    ],
   },
   {
     id: 'atomic_watcher_restart',
@@ -241,6 +286,12 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       command: 'systemctl restart grundens-middleware',
     },
     writeCapable: true,
+    steps: [
+      'Confirm the watcher is dead / not advancing (liveness red: heartbeat aging, watcher down), not merely a stale watermark behind a live watcher.',
+      'IT / Symmetry: restart the middleware service on the VM (systemctl restart grundens-middleware).',
+      'Confirm the watcher re-attached to the job queue and resumed from its last entry.',
+      'Watch inventory-sync freshness / liveness recover on the next snapshot.',
+    ],
   },
   {
     id: 'clear_cu50007_job',
@@ -254,6 +305,12 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       diagnostic: 'GET /api/nav/job-queue/health',
     },
     writeCapable: true,
+    steps: [
+      'Run the NAV job-queue health diagnosis to confirm a CU 50007 Job Queue Entry is hung (long-running / in-process) ahead of CU 50009 auto-release.',
+      'In NAV, cancel that stuck CU 50007 Job Queue Entry so the queue de-serializes (NAV admin action; the endpoint is read-only).',
+      'Confirm CU 50009 auto-release resumes and the pending staging backlog drains.',
+      'Re-run the job-queue health diagnosis to confirm the queue is moving again.',
+    ],
   },
   {
     id: 'reconcile_audit',
@@ -266,6 +323,11 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       command: 'Run reconcile_audit (read-only classification of the dry-run vs live delta)',
     },
     writeCapable: false,
+    steps: [
+      'Read the inventory-sync divergence signal: the dry-run would-push count versus the live push set.',
+      'Classify the delta (which SKUs / locations differ and why); this is read-only investigation, it writes nothing.',
+      'If the divergence is benign (e.g. untracked-quantity filtering), record it. If not, escalate to the push tooling; do NOT force a push from here.',
+    ],
   },
   {
     id: 'webhook_resubscribe',
@@ -276,9 +338,14 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
     runbook: {
       ref: 'runbooks/shopify-webhook-resubscribe.md',
       command: 'Re-register the webhook subscription (Shopify admin) and verify the WAF skip rule',
-      diagnostic: 'GET /api/webhooks/shopify/health',
     },
     writeCapable: true,
+    steps: [
+      'Confirm the failure is a REMOVED / absent subscription (not an intact subscription with orders not arriving, which is the outcome-gap tool instead).',
+      'Re-register the missing Shopify webhook topic subscription (Shopify admin).',
+      'Verify the Cloudflare WAF skip rule for /webhooks/shopify/ is still in place so deliveries are not blocked.',
+      'Send / await a test event and confirm the topic is receiving again.',
+    ],
   },
   {
     id: 'allocator_reallocate',
@@ -289,9 +356,14 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
     runbook: {
       ref: 'runbooks/allocator-restart.md',
       command: 'Restart the warehouse-splitter service, then re-run failed allocations',
-      diagnostic: 'GET /api/allocator/status',
     },
     writeCapable: true,
+    steps: [
+      'Read the allocator split-sanity signal to confirm a high un-allocatable / failed split share (not a single stuck order, which uses the per-order re-drive).',
+      'IT / Symmetry: restart the warehouse-splitter service so it resumes allocating.',
+      'Re-drive the un-allocatable / failed orders from the allocation log through the allocator (per-order re-drive).',
+      'Confirm the split-sanity share drops on the next snapshot.',
+    ],
   },
   // --- WI3 (#89): NAV-conditioned OOS-held routing tools --------------------
   {
@@ -341,6 +413,12 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       diagnostic: 'GRUS$Sales Header present for the order but the dropped SKU is absent from GRUS$Sales Line',
     },
     writeCapable: true,
+    steps: [
+      'Check NAV presence to confirm the order reached NAV (Sales Header present) but the dropped SKU line is missing.',
+      'Add the missing SKU line to the NAV sales order by hand (NAV admin action; no middleware endpoint adds a partial line).',
+      'Do NOT forward-sync replay: a re-drive DuplicateSkips an order already in NAV and cannot recover the line.',
+      'Let the normal promotion + allocation flow ship the order, then confirm the OOS hold clears.',
+    ],
   },
   {
     // in_nav_line_present: the order reached NAV whole; the hold record is stale.
@@ -357,6 +435,12 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       diagnostic: 'GRUS$Sales Header + the dropped SKU line both present for the order',
     },
     writeCapable: true,
+    steps: [
+      'Check NAV presence to confirm the order is in NAV WITH its line present (it staged whole), so the hold record is stale.',
+      'Confirm the NAV order is progressing normally (promotion / shipment), not actually held.',
+      'Clear the stale oos_held record. This is not a re-drive (a re-drive would DuplicateSkip an in-NAV order).',
+      'If the NAV shipment posted but the Shopify fulfillment never fired, use the recovery replay FIX instead of clearing.',
+    ],
   },
   {
     // The oos_held PIPE-level primary: the correct action is per-order and depends
@@ -376,6 +460,13 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
       diagnostic: 'GET /api/oos-held joined to GRUS$Sales Header + GRUS$Sales Line',
     },
     writeCapable: false,
+    steps: [
+      'Read the OOS-held backlog by NAV-join bucket (shown in this modal) and check NAV presence per order.',
+      'Not in NAV: re-drive it (forward-sync replay FIX, Admin-only) so it re-stages in NAV.',
+      'In NAV, line missing: add the dropped NAV line by hand (NAV admin); never re-drive (DuplicateSkip).',
+      'In NAV, line present: clear the stale hold, or recovery-replay the fulfillment if the NAV shipment posted but Shopify never fulfilled.',
+      'Do NOT run a blanket re-drive across the backlog: it no-ops (DuplicateSkip) on every in-NAV order.',
+    ],
   },
   // --- WI2 (#88): FS-location re-floor tools (the divergence root-cause fix) ---
   {

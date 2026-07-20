@@ -11,9 +11,12 @@ import type {
 import {
   fetchFulfillmentOrders,
   fetchJobQueueHealth,
+  fetchMissedShipments,
   fetchNavInventory,
   fetchOrderPresence,
   fetchPendingFulfillment,
+  fetchStuckStaging,
+  fetchStuckStagingDuplicates,
   triggerRemediation,
   type DiagnosticEnvelope,
 } from '../api';
@@ -96,15 +99,34 @@ function modeChip(tool: RemediationTool | null): { label: string; cls: string } 
   return { label: `${owner.label} action required`, cls: 'instruct' };
 }
 
-function callShape(tool: RemediationTool): string {
-  if (tool.kind === 'middleware_endpoint' && tool.endpoint) {
-    return `${tool.endpoint.method} ${tool.endpoint.path}  (${tool.endpoint.source})`;
-  }
-  if (tool.runbook) {
-    const diag = tool.runbook.diagnostic ? `diagnose: ${tool.runbook.diagnostic}\n` : '';
-    return `${diag}runbook ${tool.runbook.ref}${tool.runbook.command ? `\n${tool.runbook.command}` : ''}`;
-  }
-  return '';
+// --- Per-tool DIAGNOSE reads (the "Run diagnosis" buttons) -----------------
+// The HARD UI RULE: never render a raw endpoint string or a runbook filename as
+// content. Instead, each tool whose diagnosis maps to a REAL middleware read gets a
+// clickable "Run diagnosis" button that executes the read via the order-health
+// diagnostic proxy and renders the RESULT inline. Tools whose "diagnostic" is a NAV
+// SQL description or a non-existent endpoint (allocator/status, webhooks/health) get
+// no button; their DIAGNOSE is the WHY + inline steps, never a dead string.
+const TOOL_DIAGNOSTIC: Record<string, { label: string; load: () => Promise<DiagnosticEnvelope> }> = {
+  clear_cu50007_job: { label: 'Run NAV job-queue health check', load: fetchJobQueueHealth },
+  rerun_auto_release: { label: 'Run stuck-staging check', load: fetchStuckStaging },
+  unblock_and_repromote: { label: 'Run stuck-staging check', load: fetchStuckStaging },
+  stuck_staging_dedupe: { label: 'Preview duplicate staging rows (read-only)', load: fetchStuckStagingDuplicates },
+  back_sync_run_now: { label: 'Run missed-shipments check', load: fetchMissedShipments },
+  back_sync_rescan_from: { label: 'Run missed-shipments check', load: fetchMissedShipments },
+  recovery_sweep: { label: 'Run pending-fulfillment check', load: fetchPendingFulfillment },
+  submit_fulfillment_request: { label: 'Run pending-fulfillment check', load: fetchPendingFulfillment },
+};
+
+// Order-targeted endpoints that REQUIRE a numeric Shopify order id. For an order
+// subject the subjectKey is the classification signal (e.g. 'fs_floor_at_zero'),
+// NOT the id, so the id is threaded via subject.orderId; when it is absent / not
+// numeric the FIX is DISABLED with a clear reason rather than firing a 0 (the 502).
+const NEEDS_ORDER_ID = new Set(['forward_sync_replay', 'recovery_sweep', 'submit_fulfillment_request']);
+
+function numericOrderId(id: string | number | undefined): string | null {
+  if (id === undefined) return null;
+  const s = String(id);
+  return /^\d+$/.test(s) ? s : null;
 }
 
 // Compact primitive rows from an unknown diagnostic payload, so the DIAGNOSE region
@@ -189,11 +211,18 @@ type Read = { key: string; title: string; load: () => Promise<DiagnosticEnvelope
 function readsFor(subject: RemediationSubject): Read[] {
   const reads: Read[] = [];
   const isOosHeld = subject.subjectKey === 'oos_held';
-  if (isOosHeld || subject.subjectKey === 'nav_job_queue') {
+  if (isOosHeld || subject.subjectKey === 'nav_job_queue' || subject.subjectKey === 'inventory_sync') {
     reads.push({ key: 'jq', title: 'NAV job-queue health (CU 50007 / CU 50009)', load: fetchJobQueueHealth });
   }
-  if (isOosHeld || subject.subjectKey === 'back_sync') {
+  if (isOosHeld || subject.subjectKey === 'back_sync' || subject.subjectKey === 'missed_back_sync') {
     reads.push({ key: 'pf', title: 'Pending fulfillment requests', load: fetchPendingFulfillment });
+  }
+  if (subject.subjectKey === 'back_sync' || subject.subjectKey === 'missed_back_sync') {
+    reads.push({ key: 'ms', title: 'Missed NAV shipments (no Shopify fulfillment)', load: fetchMissedShipments });
+  }
+  if (subject.subjectKey === 'nav_staging_stuck') {
+    reads.push({ key: 'ss', title: 'Stuck NAV staging rows', load: fetchStuckStaging });
+    reads.push({ key: 'ssd', title: 'Duplicate staging rows (dedupe preview, read-only)', load: fetchStuckStagingDuplicates });
   }
   if (subject.orderId !== undefined) {
     const id = String(subject.orderId);
@@ -255,12 +284,14 @@ function DiagnoseRegion({ subject }: { subject: RemediationSubject }): JSX.Eleme
 function ConfirmPanel({
   tool,
   live,
+  orderId,
   busy,
   onConfirm,
   onCancel,
 }: {
   tool: RemediationTool;
   live: boolean;
+  orderId?: string | null;
   busy: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -277,11 +308,17 @@ function ConfirmPanel({
       </p>
       <div className="rm-confirm-rows">
         <div className="rm-cf-row">
-          <span className="rm-k">Call</span>
-          <span className="rm-v mono">{ep ? `${ep.method} ${ep.path}` : tool.runbook?.ref ?? 'ops runbook'}</span>
+          <span className="rm-k">Action</span>
+          <span className="rm-v mono">{ep ? `${ep.method} ${ep.path}` : tool.name}</span>
         </div>
+        {orderId !== undefined && orderId !== null && (
+          <div className="rm-cf-row">
+            <span className="rm-k">Target order</span>
+            <span className="rm-v mono">{orderId}</span>
+          </div>
+        )}
         <div className="rm-cf-row">
-          <span className="rm-k">Params</span>
+          <span className="rm-k">Auth</span>
           <span className="rm-v mono">set_by=order-health-operator{gated ? ' + NAV_TOGGLE_PASSWORD' : ''}</span>
         </div>
       </div>
@@ -307,11 +344,13 @@ function LiveAction({
   subjectKind,
   subjectKey,
   isAdmin,
+  shopifyOrderId,
 }: {
   tool: RemediationTool;
   subjectKind: 'pipe' | 'signal' | 'order';
   subjectKey: string;
   isAdmin: boolean;
+  shopifyOrderId?: string | number;
 }): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [previewed, setPreviewed] = useState(false);
@@ -323,11 +362,23 @@ function LiveAction({
   const held = ep?.heldFromLivePath === true;
   const supportsDryRun = ep?.supportsDryRun === true;
 
+  // Order-targeted fixes need the NUMERIC Shopify id. When it is absent / not numeric
+  // the FIX is DISABLED with a clear reason: we never fire a 0 (which 502-ed the
+  // middleware). subjectKey for an order is the classification signal, not the id.
+  const numericId = numericOrderId(shopifyOrderId);
+  const idMissing = NEEDS_ORDER_ID.has(tool.id) && numericId === null;
+
   async function fire(dryRun: boolean): Promise<void> {
     setBusy(true);
     setError(null);
     try {
-      const res = await triggerRemediation(tool.id, { subjectKind, subjectKey }, true, dryRun);
+      const res = await triggerRemediation(
+        tool.id,
+        { subjectKind, subjectKey },
+        true,
+        dryRun,
+        numericId ?? undefined,
+      );
       setResult(res);
       if (dryRun) setPreviewed(true);
     } catch (e) {
@@ -338,11 +389,23 @@ function LiveAction({
     }
   }
 
+  if (idMissing) {
+    return (
+      <p className="rm-when rm-err">
+        This fix targets a specific Shopify order, but no numeric Shopify order id is available for this
+        item (its id is a classification or a split order name). Open the fix from the individual order so its
+        Shopify id is carried, or resolve it another way; the fix is disabled here so it cannot fire against
+        order 0.
+      </p>
+    );
+  }
+
   if (confirming) {
     return (
       <ConfirmPanel
         tool={tool}
         live={!held}
+        orderId={numericId}
         busy={busy}
         onConfirm={() => void fire(false)}
         onCancel={() => setConfirming(false)}
@@ -448,12 +511,74 @@ function ResolveCard({
           ))}
         </ol>
       )}
-      {tool.runbook?.diagnostic !== undefined && <p className="rm-when">Diagnosis: {tool.runbook.diagnostic}</p>}
-      <pre className="rm-call">{callShape(tool)}</pre>
+      {/* DIAGNOSE: a clickable "Run diagnosis" that executes the read via the proxy
+          and renders the RESULT inline. Never a raw endpoint string / filename. */}
+      {TOOL_DIAGNOSTIC[tool.id] !== undefined && (
+        <RunDiagnosis label={TOOL_DIAGNOSTIC[tool.id]!.label} load={TOOL_DIAGNOSTIC[tool.id]!.load} />
+      )}
       {isEndpoint ? (
-        <LiveAction tool={tool} subjectKind={subject.subjectKind} subjectKey={subject.subjectKey} isAdmin={isAdmin} />
+        <LiveAction
+          tool={tool}
+          subjectKind={subject.subjectKind}
+          subjectKey={subject.subjectKey}
+          isAdmin={isAdmin}
+          shopifyOrderId={subject.orderId}
+        />
       ) : (
-        <p className="rm-instruct-note">Owner: {owner.label}. No API call: follow the steps above by hand.</p>
+        <p className="rm-instruct-note">Owner: {owner.label}. No API call: follow the numbered steps above by hand.</p>
+      )}
+    </div>
+  );
+}
+
+// A single "Run diagnosis" button that executes a read-only middleware proxy read
+// on demand and renders the RESULT inline (facts, not a raw endpoint string). Used
+// in RESOLVE beside a tool whose diagnosis maps to a real middleware read.
+function RunDiagnosis({
+  label,
+  load,
+}: {
+  label: string;
+  load: () => Promise<DiagnosticEnvelope>;
+}): JSX.Element {
+  const [state, setState] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
+  const [data, setData] = useState<unknown>(null);
+  async function run(): Promise<void> {
+    setState('loading');
+    try {
+      const res = await load();
+      setData(res.data);
+      setState('ok');
+    } catch {
+      setState('error');
+    }
+  }
+  const rows = state === 'ok' ? primitiveRows(data) : [];
+  return (
+    <div className="rm-rundiag">
+      <button className="rm-btn ghost sm" onClick={() => void run()} disabled={state === 'loading'}>
+        {state === 'loading' ? 'Running diagnosis...' : label}
+      </button>
+      {state === 'error' && (
+        <div className="rm-diag-body rm-diag-muted" role="status">
+          diagnostic unavailable (the middleware read did not respond)
+        </div>
+      )}
+      {state === 'ok' && (
+        <div className="rm-diag-body" role="status" aria-live="polite">
+          {rows.length > 0 ? (
+            <div className="rm-kv">
+              {rows.map((r) => (
+                <div className="rm-kv-row" key={r.k}>
+                  <span className="rm-k">{r.k}</span>
+                  <span className="rm-v mono">{r.v}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <pre className="rm-diag-json">{JSON.stringify(data, null, 2).slice(0, 700)}</pre>
+          )}
+        </div>
       )}
     </div>
   );
@@ -531,7 +656,13 @@ function OosHeldResolve({
         {o.last_detail !== null && <p className="rm-when">Last: {o.last_detail}</p>}
         {o.order_id !== null && <OrderPresenceCheck orderId={o.order_id} />}
         {bucket === 'not_in_nav' && forwardReplay !== null && (
-          <LiveAction tool={forwardReplay} subjectKind="order" subjectKey={o.order_id ?? ''} isAdmin={isAdmin} />
+          <LiveAction
+            tool={forwardReplay}
+            subjectKind="order"
+            subjectKey={o.order_id ?? ''}
+            isAdmin={isAdmin}
+            shopifyOrderId={o.order_id ?? undefined}
+          />
         )}
         {bucket === 'in_nav_line_missing' && lineAdd !== null && (
           <div className="rm-instruct">
@@ -551,7 +682,13 @@ function OosHeldResolve({
             {recovery !== null && (
               <>
                 <p className="rm-when">If the NAV shipment posted but the Shopify fulfillment never fired, replay it:</p>
-                <LiveAction tool={recovery} subjectKind="order" subjectKey={o.order_id ?? ''} isAdmin={isAdmin} />
+                <LiveAction
+                  tool={recovery}
+                  subjectKind="order"
+                  subjectKey={o.order_id ?? ''}
+                  isAdmin={isAdmin}
+                  shopifyOrderId={o.order_id ?? undefined}
+                />
               </>
             )}
           </div>

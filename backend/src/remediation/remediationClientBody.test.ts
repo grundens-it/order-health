@@ -54,3 +54,31 @@ test('a numeric subjectKey still works as a fallback (the OOS-held per-order pat
   );
   assert.deepEqual(fwd, { shopify_order_id: 458812 });
 });
+
+// --- Correction 1: the Holman inventory push body (verified PushSkuRequest) ----
+const holman = getRemediationTool('oos_held_inventory_push')!;
+test('Holman push builds { sku, location_code, channel, set_by } from params (HF1FTZ / DTC)', () => {
+  const body = buildRequestBody(
+    holman,
+    { subjectKind: 'order', subjectKey: '458812' },
+    { confirmed: true, params: { sku: 'ABC-123', location_code: 'HF1FTZ', channel: 'DTC' } },
+  );
+  // Password is added by firePost for gated endpoints, never here.
+  assert.deepEqual(body, {
+    sku: 'ABC-123',
+    location_code: 'HF1FTZ',
+    channel: 'DTC',
+    set_by: 'order-health-operator',
+  });
+});
+
+// --- Correction 3: fs-floor-one takes its SKU from params, not subjectKey ------
+const floorOne = getRemediationTool('fs_location_floor_one')!;
+test('fs-floor-one uses params.sku (from order data), not subjectKey', () => {
+  const body = buildRequestBody(
+    floorOne,
+    { subjectKind: 'order', subjectKey: 'fs_floor_at_zero' },
+    { confirmed: true, dryRun: true, params: { sku: 'SKU-9' } },
+  );
+  assert.deepEqual(body, { sku: 'SKU-9', dry_run: true, set_by: 'order-health-operator' });
+});

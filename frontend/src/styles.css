@@ -349,6 +349,22 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .rm-rundiag { margin: 8px 0; display: flex; flex-direction: column; gap: 6px; }
 .rm-result { margin-top: 10px; }
 
+/* Healthy gate: a green subject has nothing to remediate (Correction 4). */
+.rm-mode.healthy { color: var(--green); background: var(--green-bg); border-color: var(--green-bd); }
+.rm-healthy { border: 1px solid var(--green-bd); background: var(--green-bg); border-radius: 8px; padding: 10px 12px; }
+
+/* Param inputs (Correction 3): auto-filled from data, prompted, or locked (fixed). */
+.rm-params { display: grid; gap: 8px; margin: 8px 0; }
+.rm-param { display: grid; grid-template-columns: 130px 1fr; align-items: center; gap: 10px; }
+.rm-param-l { font-size: 12px; color: var(--faint); }
+.rm-param-req { color: var(--red); }
+.rm-param-in { background: var(--band); border: 1px solid var(--line); color: var(--ink); border-radius: 6px; padding: 6px 9px; font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.rm-param-in:focus-visible { outline: 2px solid var(--orange); outline-offset: 1px; }
+.rm-param-in:read-only { color: var(--muted); background: var(--sunken); }
+
+/* Per-order fix block inside the OOS-held resolution (primary + secondary). */
+.rm-order-fix { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line2); }
+
 /* --- Reduced motion (accessibility) ---------------------------------------
    Respect the OS "reduce motion" setting: neutralize any animation/transition
    (defensive; the shell is largely static today) and keep behaviour instant. */

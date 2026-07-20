@@ -100,11 +100,17 @@ test('order-level signals map to their tools (missed_back_sync, nav_staging_stuc
   assert.ok(staging.includes('stuck_staging_dedupe'));
 });
 
-test('Round 3: fs_floor_at_zero maps to the FS re-floor, never to a fulfillment tool', () => {
+test('Correction 2: fs_floor_at_zero primary is the callable FS floor-one Run, never a fulfillment tool', () => {
   const tool = primaryRemediationForSubject('fs_floor_at_zero');
-  assert.equal(tool?.id, 'fs_refloor');
-  assert.equal(tool?.kind, 'ops_runbook'); // an FS re-floor, not a middleware fulfillment call
+  // The primary is now the native fulfillment-service-floor-one endpoint (a one-click
+  // Run, dry-run first), not the manual Symmetry re-floor step.
+  assert.equal(tool?.id, 'fs_location_floor_one');
+  assert.equal(tool?.kind, 'middleware_endpoint');
+  assert.equal(tool?.endpoint?.path, '/api/nav/inventory-sync/fulfillment-service-floor-one');
   const ids = remediationsForSubject('fs_floor_at_zero').map((m) => m.toolId);
+  // The manual fs_refloor ops path stays only as a fallback alternative.
+  assert.ok(ids.includes('fs_refloor'));
+  // Still never a fulfillment tool (a fulfillment cannot fix a floored location).
   assert.ok(!ids.includes('submit_fulfillment_request'));
   assert.ok(!ids.includes('recovery_sweep'));
 });
@@ -168,4 +174,41 @@ test('WI2: fs_location_divergence primary re-floors the FS location, gated by NA
   const ids = remediationsForSubject('fs_location_divergence').map((m) => m.toolId);
   assert.ok(ids.includes('fs_location_floor_one'));
   assert.ok(ids.includes('fs_location_sweep'));
+});
+
+// --- Correction 1: the Holman inventory release is the OOS-held PRIMARY fix ----
+test('Correction 1: oos_held_not_in_nav primary is the Holman inventory push (per-SKU at HF1FTZ)', () => {
+  const tool = primaryRemediationForSubject('oos_held_not_in_nav');
+  assert.equal(tool?.id, 'oos_held_inventory_push');
+  assert.equal(tool?.kind, 'middleware_endpoint');
+  // Live write is the per-SKU push; the dry-run preview is the read-only check.
+  assert.equal(tool?.endpoint?.path, '/api/nav/inventory-sync/push');
+  assert.equal(tool?.endpoint?.checkPath, '/api/nav/inventory-sync/check');
+  assert.equal(tool?.endpoint?.gated, true); // push is password-gated
+  // Params: SKU from the order, location pinned to Holman (HF1FTZ), channel DTC.
+  const byName = new Map((tool?.endpoint?.params ?? []).map((p) => [p.name, p]));
+  assert.equal(byName.get('sku')?.source, 'order_sku');
+  assert.equal(byName.get('location_code')?.fixed, 'HF1FTZ');
+  assert.equal(byName.get('channel')?.fixed, 'DTC');
+  // forward_sync_replay is demoted to a secondary (still mapped, no longer primary).
+  const ids = remediationsForSubject('oos_held_not_in_nav').map((m) => m.toolId);
+  assert.ok(ids.includes('forward_sync_replay'));
+});
+
+// --- Correction 2: reconcile_audit is now a callable READ (not a manual step list) --
+test('Correction 2: reconcile_audit is a read-only inventory-sync/check Run', () => {
+  const tool = getRemediationTool('reconcile_audit');
+  assert.equal(tool?.kind, 'middleware_endpoint');
+  assert.equal(tool?.endpoint?.path, '/api/nav/inventory-sync/check');
+  assert.equal(tool?.endpoint?.readOnly, true);
+  assert.equal(tool?.writeCapable, false); // still read-only, no writes
+  assert.notEqual(tool?.endpoint?.gated, true); // a read needs no NAV write-gate
+});
+
+// --- Correction 3: fs_location_floor_one sources its SKU from the order data ----
+test('Correction 3: fs_location_floor_one takes its SKU from order data, not subjectKey', () => {
+  const tool = getRemediationTool('fs_location_floor_one');
+  const sku = (tool?.endpoint?.params ?? []).find((p) => p.name === 'sku');
+  assert.equal(sku?.source, 'order_sku');
+  assert.equal(sku?.required, true);
 });

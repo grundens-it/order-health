@@ -107,6 +107,26 @@ jobs:
       # secure param, source it with `az keyvault secret show` and pass it with
       # `--parameters name=$VALUE` after `echo "::add-mask::$VALUE"`.
 
+      # Open the Grundens IP lockdown to THIS runner so the post-deploy smoke can
+      # hit the real /api/health/ping. Done HERE, before any site-config write,
+      # so the access-restriction write is not racing a container restart. That
+      # race (running it right after the image swap) is what 400-ed the earlier
+      # attempts; from a settled config the same command succeeds. Bicep does not
+      # manage access restrictions, so this rule survives the deploy. The Remove
+      # step restores the lockdown on every outcome.
+      - name: Allow this runner through the IP lockdown (temporary)
+        id: ciallow
+        run: |
+          set -euo pipefail
+          runner_ip=$(curl -fsS --max-time 10 https://api.ipify.org)
+          echo "Runner egress IP: $runner_ip"
+          az webapp config access-restriction add \
+            --resource-group "$AZURE_RESOURCE_GROUP" --name "$APP_NAME" \
+            --rule-name ci-health-temp --action Allow --priority 90 \
+            --ip-address "$runner_ip/32" \
+            --description "Transient CI health probe; removed after smoke"
+          echo "Temporary allow rule added."
+
       # Bicep is the slowest step and is pure overhead on a code-only change.
       # Run it only when infra/ or this workflow changed, or on a manual run.
       - name: Detect infra changes
@@ -158,39 +178,46 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --container-image-name "$ACR_LOGIN_SERVER/$IMAGE_REPOSITORY:$IMAGE_TAG"
 
-      # Validate the deploy WITHOUT touching the public endpoint. The site is
-      # locked to Grundens IPs and Kudu is a separate container here, so neither
-      # an external HTTP probe nor a localhost probe works from CI. Watch the
-      # platform container-log stream instead: it is control plane (SCM, allow
-      # all), so the data-plane IP lockdown never blocks it, it opens the app to
-      # no one, and it changes no access rules. The app logs "Server listening"
-      # once the new image is up; awk exits on the first fresh match and closes
-      # the stream; timeout bounds the wait if the container never comes up.
-      - name: Validate the new container booted (platform log, no public probe)
+      # Post-deploy smoke against the REAL health API. The runner is allow-listed
+      # for the moment (see the Allow step above), so it can reach the locked
+      # site. /api/health/ping is also excluded from Easy Auth, so an
+      # unauthenticated 200 with "ok":true is the true readiness signal. A
+      # container restart takes 2 to 4 min to warm up; retry with backoff.
+      - name: Validate health
         run: |
-          set -u
-          echo "Watching the LIVE container log (up to 5 min) for a fresh listen on the new image..."
-          # az webapp log tail replays recent history first (which may hold an
-          # OLD boot line) and then streams live behind a "Starting Live Log
-          # Stream" banner. Ignore the replay and only accept a "Server
-          # listening" that arrives AFTER that banner, so an old line can never
-          # give a false pass. The swap-triggered boot lands in the live stream
-          # because warmup takes 1 to 3 min while the tail connects in seconds.
-          if timeout 300 az webapp log tail \
-               --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --provider docker 2>/dev/null \
-             | awk '/Starting Live Log Stream/{live=1} live && /Server listening at http:\/\/0\.0\.0\.0:8080/{print "FRESH BOOT"; exit}' \
-             | grep -q "FRESH BOOT"; then
-            echo "New container booted fresh on the new image."
-          else
-            echo "::error::New container did not report a fresh listen within 5 minutes. Deploy failed."
-            exit 1
-          fi
-          state=$(az webapp show --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query state -o tsv)
-          echo "Site state: $state"
-          if [ "$state" != "Running" ]; then
-            echo "::error::Site is not Running (state=$state). Deploy failed."
-            exit 1
-          fi
+          set -euo pipefail
+          host=$(az webapp show --name "$APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" \
+                   --query defaultHostName -o tsv)
+          echo "Probing https://$host/api/health/ping (warmup can take 2 to 4 minutes) ..."
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 10 "https://$host/api/health/ping" | grep -q '"ok":true'; then
+              echo "Healthy after ${i} attempt(s)."
+              exit 0
+            fi
+            echo "  attempt ${i}/30: not ready, sleeping 10s"
+            sleep 10
+          done
+          echo "::error::Backend did not report healthy within ~5 minutes. Deploy failed."
+          exit 1
+
+      # ALWAYS restore the Grundens-only lockdown, whatever the smoke did. Fail
+      # the job if the rule cannot be removed, so a lingering allow is never
+      # silent. Retry in case a late config write is still settling.
+      - name: Remove the temporary CI allow rule
+        if: always() && steps.ciallow.outcome == 'success'
+        run: |
+          for i in $(seq 1 6); do
+            if az webapp config access-restriction remove \
+                 --resource-group "$AZURE_RESOURCE_GROUP" --name "$APP_NAME" \
+                 --rule-name ci-health-temp >/dev/null 2>&1; then
+              echo "Temporary CI allow rule removed on attempt ${i}; lockdown restored."
+              exit 0
+            fi
+            echo "  remove attempt ${i}/6 failed; sleeping 15s"
+            sleep 15
+          done
+          echo "::error::Could not remove ci-health-temp after 6 attempts. Remove by hand: az webapp config access-restriction remove -g $AZURE_RESOURCE_GROUP -n $APP_NAME --rule-name ci-health-temp"
+          exit 1
 
       # If any step above failed (most importantly the health probe), revert the
       # app to the image it was serving before this run and restart. Prod ends

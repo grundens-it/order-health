@@ -173,6 +173,11 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
         // Thread the dry-run intent to the client. Undefined keeps the safe server
         // default (dry_run true) on endpoints that support it.
         dryRun: body.dryRun,
+        // Thread the numeric Shopify order id for the order-targeted endpoints
+        // (forward-sync replay, recovery replay). The subjectKey for an ORDER is the
+        // classification signal, not the id, so Number(subjectKey) 502-ed. See the
+        // buildRequestBody fix in remediationClient.ts.
+        shopifyOrderId: body.shopifyOrderId,
       });
     },
   );
@@ -256,6 +261,46 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
       const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
       if (principal === null) return reply;
       return proxyMiddleware(reply, 'GET', '/api/middleware/pending-fulfillment-requests');
+    },
+  );
+
+  // --- Comprehensive DIAGNOSE reads (every "Run diagnosis" button in the modal) --
+  // Each proxies an EXISTING middleware GET verified against the main.rs route table:
+  //   nav/stuck-staging            (main.rs:586, ListQuery)  -> staging-stuck diagnosis
+  //   nav/stuck-staging/duplicates (main.rs:594)             -> dedupe preview (read-only)
+  //   back-sync/missed-shipments   (main.rs:576)             -> back-sync missed diagnosis
+  // Read-only, Operator OR Admin, no password, no write. A failure degrades to a
+  // typed 502 so the modal shows "diagnostic unavailable", never a raw endpoint string.
+
+  // GET /api/diagnostics/stuck-staging -> middleware GET /api/nav/stuck-staging.
+  app.get(
+    '/api/diagnostics/stuck-staging',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      return proxyMiddleware(reply, 'GET', '/api/nav/stuck-staging');
+    },
+  );
+
+  // GET /api/diagnostics/stuck-staging-duplicates -> middleware
+  // GET /api/nav/stuck-staging/duplicates (a READ-ONLY preview of the duplicate rows
+  // the destructive dedupe would delete; the dedupe itself stays held from live).
+  app.get(
+    '/api/diagnostics/stuck-staging-duplicates',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      return proxyMiddleware(reply, 'GET', '/api/nav/stuck-staging/duplicates');
+    },
+  );
+
+  // GET /api/diagnostics/missed-shipments -> middleware GET /api/back-sync/missed-shipments.
+  app.get(
+    '/api/diagnostics/missed-shipments',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      return proxyMiddleware(reply, 'GET', '/api/back-sync/missed-shipments');
     },
   );
 }

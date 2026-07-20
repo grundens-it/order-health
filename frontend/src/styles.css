@@ -346,6 +346,7 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .rm-bucket.b-unknown { color: var(--slate); background: var(--slate-bg); border-color: var(--slate-bg); }
 .rm-presence { display: flex; align-items: center; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
 .rm-presence-out { font-size: 11.5px; color: var(--muted); word-break: break-word; }
+.rm-rundiag { margin: 8px 0; display: flex; flex-direction: column; gap: 6px; }
 .rm-result { margin-top: 10px; }
 
 /* --- Reduced motion (accessibility) ---------------------------------------

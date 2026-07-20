@@ -591,6 +591,13 @@ export interface RemediationTriggerInput {
   // supports it, dryRun true previews with no write (the middleware defaults to a
   // dry run); dryRun false is the live apply. Omitted keeps the safe server default.
   dryRun?: boolean;
+  // The NUMERIC Shopify order id for an order-targeted fix (forward-sync replay,
+  // recovery replay, single fulfillment submit). Threaded end-to-end because for an
+  // ORDER subject the subjectKey is the classification signal (e.g. 'fs_floor_at_zero')
+  // or a split order name (SP-#####), NOT the numeric id the middleware needs.
+  // Number(subjectKey) on those is NaN, which sent 0 / [] and 502-ed the middleware.
+  // Absent when the order has no Shopify id (the fix is then disabled, never fired at 0).
+  shopifyOrderId?: string | number;
 }
 
 // The typed result of an operator trigger.

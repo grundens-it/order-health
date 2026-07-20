@@ -57,6 +57,22 @@ test('reconcile_audit is read-only (not write-capable)', () => {
   assert.equal(getRemediationTool('reconcile_audit')?.writeCapable, false);
 });
 
+// --- Comprehensive pass: every tool renders REAL inline steps ----------------
+// The modal never shows a runbook filename; INSTRUCT steps must live inline on the
+// tool. Assert every registered tool carries non-empty numbered steps so a signal
+// can never fall back to a bare filename or endpoint string.
+test('every remediation tool carries inline numbered steps (no filename-only tools)', () => {
+  for (const tool of REMEDIATION_TOOLS) {
+    assert.ok(
+      Array.isArray(tool.steps) && tool.steps.length > 0,
+      `${tool.id} must carry inline steps`,
+    );
+    for (const step of tool.steps ?? []) {
+      assert.ok(step.trim().length > 0, `${tool.id} steps must be non-empty`);
+    }
+  }
+});
+
 // --- The endpoint / runbook boundary ---------------------------------------
 test('every tool has EXACTLY one of endpoint / runbook, matching its kind', () => {
   for (const tool of REMEDIATION_TOOLS) {

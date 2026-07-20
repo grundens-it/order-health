@@ -17,10 +17,12 @@ import {
   fetchNavInventory,
   fetchOrderPresence,
   fetchPendingFulfillment,
+  fetchShopifyOrderLineItems,
   fetchStuckStaging,
   fetchStuckStagingDuplicates,
   triggerRemediation,
   type DiagnosticEnvelope,
+  type OrderLineItem,
 } from '../api';
 
 // The unified remediation modal (UX review Session B). A signal opens to ONE modal
@@ -150,6 +152,20 @@ function primitiveRows(data: unknown): { k: string; v: string }[] {
   return rows;
 }
 
+// The count of genuinely stuck NAV Job Queue entries from the job-queue/health read.
+// The middleware body is { level, summary, last_auto_release, pending_staging,
+// stuck_jobs[], queried_at }, where stuck_jobs is the array of Status=1 (in-process)
+// Job Queue entries; its length is the stuck-job count. Long-running jobs (ATP) run
+// with a different status and never appear here. Returns null when the field is
+// absent / the read shape is unknown (so the gate stays closed, not falsely open).
+function stuckJobsCount(data: unknown): number | null {
+  if (data === null || typeof data !== 'object') return null;
+  const sj = (data as { stuck_jobs?: unknown }).stuck_jobs;
+  if (Array.isArray(sj)) return sj.length;
+  if (typeof sj === 'number') return sj;
+  return null;
+}
+
 // --- DIAGNOSE: one read card, loads once on open --------------------------
 function DiagCard({
   title,
@@ -221,7 +237,10 @@ function readsFor(subject: RemediationSubject): Read[] {
   if (isOosHeld || subject.subjectKey === 'nav_job_queue' || subject.subjectKey === 'inventory_sync') {
     reads.push({ key: 'jq', title: 'NAV job-queue health (CU 50007 / CU 50009)', load: fetchJobQueueHealth });
   }
-  if (isOosHeld || subject.subjectKey === 'back_sync' || subject.subjectKey === 'missed_back_sync') {
+  // The pending-fulfillment read is NOT shown on the OOS-held modal: that middleware
+  // read does not respond there and only degrades to "diagnostic unavailable" noise.
+  // It stays on the back-sync signals, where it is a real queue read.
+  if (subject.subjectKey === 'back_sync' || subject.subjectKey === 'missed_back_sync') {
     reads.push({ key: 'pf', title: 'Pending fulfillment requests', load: fetchPendingFulfillment });
   }
   if (subject.subjectKey === 'back_sync' || subject.subjectKey === 'missed_back_sync') {
@@ -434,6 +453,7 @@ function LiveAction({
   isAdmin,
   shopifyOrderId,
   orderSku,
+  skuOverride,
 }: {
   tool: RemediationTool;
   subjectKind: 'pipe' | 'signal' | 'order';
@@ -441,6 +461,10 @@ function LiveAction({
   isAdmin: boolean;
   shopifyOrderId?: string | number;
   orderSku?: string;
+  // When set (an operator clicked a SKU in the Line-items diagnostic), fill the
+  // editable `sku` param with it, invalidating any prior preview so the operator
+  // re-checks against the picked SKU. Used by the OOS-held per-order fixes.
+  skuOverride?: string;
 }): JSX.Element {
   const ep = tool.endpoint;
   const params = ep?.params ?? [];
@@ -455,6 +479,15 @@ function LiveAction({
   // The read-only check (dry run preview via check, and the reconcile Run) state.
   const [checkState, setCheckState] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
   const [checkData, setCheckData] = useState<unknown>(null);
+
+  // When the operator picks a SKU from the Line-items diagnostic, fill the editable
+  // `sku` param and invalidate any prior preview so they re-check the picked SKU.
+  useEffect(() => {
+    if (skuOverride === undefined || skuOverride.length === 0) return;
+    setParamValues((prev) => (prev.sku === skuOverride ? prev : { ...prev, sku: skuOverride }));
+    setPreviewed(false);
+    setCheckState('idle');
+  }, [skuOverride]);
 
   const held = ep?.heldFromLivePath === true;
   const readOnly = ep?.readOnly === true;
@@ -803,11 +836,234 @@ function OrderPresenceCheck({ orderId }: { orderId: string }): JSX.Element {
   );
 }
 
-// OOS-held RESOLVE: one row per held order, routed by its NAV-join bucket. not_in_nav
-// -> a re-drive FIX (forward-sync replay, admin-only live). in_nav_line_missing ->
-// INSTRUCT (add the dropped NAV line by hand, NAV admin). in_nav_line_present ->
-// INSTRUCT stale-clear (you) plus a recovery-replay FIX if the fulfillment never
-// fired. A blanket re-drive is wrong: it DuplicateSkips every in-NAV order.
+// Pull the normalized line items out of the shopify-order diagnostic envelope.
+function lineItemsFrom(data: unknown): OrderLineItem[] {
+  if (data !== null && typeof data === 'object' && Array.isArray((data as { line_items?: unknown }).line_items)) {
+    return (data as { line_items: OrderLineItem[] }).line_items;
+  }
+  return [];
+}
+
+// The "Line items" DIAGNOSE read for an OOS-held order: a Run button that fetches the
+// order's SKUs (the held-SKU field is often blank, especially for Not-in-NAV orders)
+// and renders each line as SKU + qty + name. Each SKU is clickable and fills the Held
+// SKU param on the order's fix via onPickSku. If the order has exactly one line, its
+// SKU is prefilled automatically.
+function OrderLineItemsCard({
+  orderId,
+  onPickSku,
+}: {
+  orderId: string;
+  onPickSku: (sku: string) => void;
+}): JSX.Element {
+  const [state, setState] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
+  const [items, setItems] = useState<OrderLineItem[]>([]);
+  const autofilled = useRef(false);
+  async function run(): Promise<void> {
+    setState('loading');
+    try {
+      const res = await fetchShopifyOrderLineItems(orderId);
+      const lines = lineItemsFrom(res.data);
+      setItems(lines);
+      setState('ok');
+      // Exactly one line: prefill its SKU into the fix input automatically (once).
+      const only = lines.length === 1 ? lines[0] : undefined;
+      if (only !== undefined && only.sku.length > 0 && !autofilled.current) {
+        autofilled.current = true;
+        onPickSku(only.sku);
+      }
+    } catch {
+      setState('error');
+    }
+  }
+  return (
+    <div className="rm-lineitems">
+      <button className="rm-btn ghost sm" onClick={() => void run()} disabled={state === 'loading'}>
+        {state === 'loading' ? 'Loading line items...' : 'Line items (show SKUs)'}
+      </button>
+      {state === 'error' && (
+        <div className="rm-diag-body rm-diag-muted" role="status">
+          line items unavailable (the Shopify order read did not respond)
+        </div>
+      )}
+      {state === 'ok' && (
+        <div className="rm-diag-body" role="status" aria-live="polite">
+          {items.length === 0 ? (
+            <span className="rm-diag-muted">No line items on this order.</span>
+          ) : (
+            <ul className="rm-li-list">
+              {items.map((li, i) => (
+                <li className="rm-li-row" key={`${li.sku}-${i}`}>
+                  {li.sku.length > 0 ? (
+                    <button
+                      type="button"
+                      className="rm-li-sku mono"
+                      onClick={() => onPickSku(li.sku)}
+                      title="Use this SKU for the held-order fix"
+                    >
+                      {li.sku}
+                    </button>
+                  ) : (
+                    <span className="rm-li-sku mono rm-diag-muted">(no SKU)</span>
+                  )}
+                  <span className="rm-li-qty mono">x{li.quantity}</span>
+                  <span className="rm-li-name">{li.name}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One held-order row, routed by its NAV-join bucket. The PRIMARY fix is chosen by
+// the bucket (a blanket Holman push is wrong: it cannot release a not-in-NAV order,
+// where NAV on-hand is 0 and no Shopify variant matches):
+//   not_in_nav          -> PRIMARY re-drive (forward_sync_replay). Holman NOT offered.
+//   in_nav_line_missing -> PRIMARY NAV line-add INSTRUCT (no middleware endpoint).
+//   in_nav_line_present -> PRIMARY Holman inventory push (the bulk bucket) + the
+//                          stale-clear + recovery-replay secondaries.
+//   not joined          -> default to the Holman push, prompt to confirm the bucket.
+// The Line-items diagnostic feeds the picked SKU into the Held SKU fix input.
+function OosHeldOrderRow({
+  order,
+  isAdmin,
+  holman,
+  forwardReplay,
+  recovery,
+  lineAdd,
+  staleClear,
+}: {
+  order: OosHeldOrder;
+  isAdmin: boolean;
+  holman: RemediationTool | null;
+  forwardReplay: RemediationTool | null;
+  recovery: RemediationTool | null;
+  lineAdd: RemediationTool | null;
+  staleClear: RemediationTool | null;
+}): JSX.Element {
+  const o = order;
+  const bucket = o.nav_bucket;
+  const name = o.order_name ?? o.order_id ?? 'order';
+  const numericId = numericOrderId(o.order_id ?? undefined);
+  // The operator's picked SKU (from the Line-items diagnostic), seeded with the
+  // joined sample SKU. Feeds the Held SKU param on the Holman push.
+  const [pickedSku, setPickedSku] = useState<string | null>(o.sample_sku ?? null);
+
+  // Header owner names who acts on the bucket's PRIMARY fix.
+  const owner =
+    bucket === 'in_nav_line_missing'
+      ? { label: 'NAV admin', cls: 'nav' }
+      : { label: 'Admin (live write)', cls: 'admin' };
+
+  const holmanFix =
+    holman !== null ? (
+      <div className="rm-order-fix">
+        <div className="rm-kicker">Primary fix: push Holman on-hand to Shopify (HF1FTZ)</div>
+        <LiveAction
+          tool={holman}
+          subjectKind="order"
+          subjectKey={o.order_id ?? ''}
+          isAdmin={isAdmin}
+          shopifyOrderId={o.order_id ?? undefined}
+          orderSku={pickedSku ?? o.sample_sku ?? undefined}
+          skuOverride={pickedSku ?? undefined}
+        />
+      </div>
+    ) : null;
+
+  return (
+    <div className="rm-order">
+      <div className="rm-order-hd">
+        <span className="rm-order-nm mono">{name}</span>
+        <span className={`rm-bucket b-${bucket ?? 'unknown'}`}>{bucket ? BUCKET_LABEL[bucket] : 'not joined'}</span>
+        <span className={`rm-owner o-${owner.cls}`}>{owner.label}</span>
+      </div>
+      {o.last_detail !== null && <p className="rm-when">Last: {o.last_detail}</p>}
+      {o.order_id !== null && <OrderPresenceCheck orderId={o.order_id} />}
+      {numericId !== null && <OrderLineItemsCard orderId={numericId} onPickSku={setPickedSku} />}
+
+      {bucket === 'not_in_nav' ? (
+        // The order never reached NAV: the ONLY fix that works is a re-drive. Holman
+        // is NOT offered (it cannot release an order with no NAV on-hand / variant).
+        forwardReplay !== null ? (
+          <div className="rm-order-fix">
+            <div className="rm-kicker">Primary fix: re-drive (order not in NAV)</div>
+            <LiveAction
+              tool={forwardReplay}
+              subjectKind="order"
+              subjectKey={o.order_id ?? ''}
+              isAdmin={isAdmin}
+              shopifyOrderId={o.order_id ?? undefined}
+            />
+            <p className="rm-when">
+              The Holman inventory push is not offered here: it cannot release an order that never reached NAV.
+            </p>
+          </div>
+        ) : null
+      ) : bucket === 'in_nav_line_missing' ? (
+        // In NAV but the dropped line is missing: no middleware endpoint can add it,
+        // so the primary is the NAV-admin line-add INSTRUCT.
+        lineAdd !== null ? (
+          <div className="rm-instruct">
+            <div className="rm-kicker">Primary fix: add the dropped NAV line (NAV admin)</div>
+            <ol className="rm-steps">
+              {(lineAdd.steps ?? []).map((s, i) => (
+                <li key={i}>{s}</li>
+              ))}
+            </ol>
+            <p className="rm-when">{lineAdd.runbook?.command}</p>
+            <p className="rm-instruct-note">
+              Owner: NAV admin. Do NOT forward-sync replay (it DuplicateSkips), and the Holman push cannot add a
+              missing line.
+            </p>
+          </div>
+        ) : null
+      ) : bucket === 'in_nav_line_present' ? (
+        // The bulk bucket: the Holman inventory push is the primary; the stale-clear
+        // INSTRUCT and the recovery replay FIX stay as secondaries.
+        <>
+          {holmanFix}
+          {staleClear !== null && (
+            <div className="rm-instruct">
+              <div className="rm-kicker">Secondary: verify and clear a stale hold</div>
+              <ol className="rm-steps">
+                {(staleClear.steps ?? []).map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ol>
+              <p className="rm-when">{staleClear.runbook?.command}</p>
+            </div>
+          )}
+          {recovery !== null && (
+            <div className="rm-order-fix">
+              <p className="rm-when">If the NAV shipment posted but the Shopify fulfillment never fired, replay it:</p>
+              <LiveAction
+                tool={recovery}
+                subjectKind="order"
+                subjectKey={o.order_id ?? ''}
+                isAdmin={isAdmin}
+                shopifyOrderId={o.order_id ?? undefined}
+              />
+            </div>
+          )}
+        </>
+      ) : (
+        // Bucket not joined: default to the Holman push (the bulk fix), and prompt the
+        // operator to confirm NAV presence before pushing.
+        <>
+          {holmanFix}
+          <p className="rm-when">
+            Bucket not joined yet: check NAV presence to confirm this is an in-NAV, line-present order before pushing.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function OosHeldResolve({
   detail,
   registry,
@@ -826,88 +1082,20 @@ function OosHeldResolve({
   const lineAdd = toolFor(registry, 'oos_held_nav_line_add');
   const staleClear = toolFor(registry, 'oos_held_stale_clear');
 
-  function renderOrder(o: OosHeldOrder): JSX.Element {
-    const bucket = o.nav_bucket;
-    const name = o.order_name ?? o.order_id ?? 'order';
-    const owner =
-      bucket === 'in_nav_line_missing'
-        ? { label: 'NAV admin', cls: 'nav' }
-        : bucket === 'not_in_nav'
-          ? { label: 'Admin (live write)', cls: 'admin' }
-          : { label: 'You (operator)', cls: 'you' };
-    return (
-      <div className="rm-order" key={`${o.order_id ?? name}`}>
-        <div className="rm-order-hd">
-          <span className="rm-order-nm mono">{name}</span>
-          <span className={`rm-bucket b-${bucket ?? 'unknown'}`}>{bucket ? BUCKET_LABEL[bucket] : 'not joined'}</span>
-          <span className={`rm-owner o-${owner.cls}`}>{owner.label}</span>
-        </div>
-        {o.last_detail !== null && <p className="rm-when">Last: {o.last_detail}</p>}
-        {o.order_id !== null && <OrderPresenceCheck orderId={o.order_id} />}
-        {/* Correction 1: the PRIMARY fix for every held order is the Holman inventory
-            release (dry-run check at HF1FTZ, then push NAV on-hand to Shopify). The
-            SKU auto-fills from the held order (sample_sku) or is prompted. */}
-        {holman !== null && (
-          <div className="rm-order-fix">
-            <div className="rm-kicker">Primary fix</div>
-            <LiveAction
-              tool={holman}
-              subjectKind="order"
-              subjectKey={o.order_id ?? ''}
-              isAdmin={isAdmin}
-              shopifyOrderId={o.order_id ?? undefined}
-              orderSku={o.sample_sku ?? undefined}
-            />
-          </div>
-        )}
-        {bucket === 'not_in_nav' && forwardReplay !== null && (
-          <div className="rm-order-fix">
-            <div className="rm-kicker">Secondary: re-drive (order not in NAV)</div>
-            <LiveAction
-              tool={forwardReplay}
-              subjectKind="order"
-              subjectKey={o.order_id ?? ''}
-              isAdmin={isAdmin}
-              shopifyOrderId={o.order_id ?? undefined}
-            />
-          </div>
-        )}
-        {bucket === 'in_nav_line_missing' && lineAdd !== null && (
-          <div className="rm-instruct">
-            <ol className="rm-steps">{(lineAdd.steps ?? []).map((s, i) => <li key={i}>{s}</li>)}</ol>
-            <p className="rm-when">{lineAdd.runbook?.command}</p>
-            <p className="rm-instruct-note">Owner: NAV admin. Do NOT forward-sync replay (it DuplicateSkips).</p>
-          </div>
-        )}
-        {bucket === 'in_nav_line_present' && (
-          <div className="rm-instruct">
-            {staleClear !== null && (
-              <>
-                <ol className="rm-steps">{(staleClear.steps ?? []).map((s, i) => <li key={i}>{s}</li>)}</ol>
-                <p className="rm-when">{staleClear.runbook?.command}</p>
-              </>
-            )}
-            {recovery !== null && (
-              <>
-                <p className="rm-when">If the NAV shipment posted but the Shopify fulfillment never fired, replay it:</p>
-                <LiveAction
-                  tool={recovery}
-                  subjectKind="order"
-                  subjectKey={o.order_id ?? ''}
-                  isAdmin={isAdmin}
-                  shopifyOrderId={o.order_id ?? undefined}
-                />
-              </>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  }
-
   return (
     <div className="rm-orders">
-      {orders.map(renderOrder)}
+      {orders.map((o) => (
+        <OosHeldOrderRow
+          key={`${o.order_id ?? o.order_name ?? 'order'}`}
+          order={o}
+          isAdmin={isAdmin}
+          holman={holman}
+          forwardReplay={forwardReplay}
+          recovery={recovery}
+          lineAdd={lineAdd}
+          staleClear={staleClear}
+        />
+      ))}
       {orders.length === 0 && <p className="rm-diag-muted">No individual held orders in this snapshot.</p>}
       {hidden > 0 && <p className="rm-when">{hidden} more held order(s) not shown; work the buckets above first.</p>}
     </div>
@@ -944,7 +1132,38 @@ export function RemediationModal({
       .sort((a, b) => Number(b.recommended) - Number(a.recommended));
   }, [subject, registry]);
 
-  const headTool = cards.find((c) => c.recommended)?.tool ?? null;
+  // Gate the CU 50007 "clear the hung job" step on a LIVE job-queue health read: it
+  // is almost always bogus (there is usually no hung job). Fetch job-queue/health
+  // when the tool is a candidate card, and render the clear-job card ONLY when the
+  // read reports a genuine stuck job (stuck_jobs > 0). Long-running jobs (ATP) run
+  // under a different status and never count. Until confirmed (loading / unknown /
+  // read failed) the card stays hidden, never falsely offered.
+  const needsJobQueueGate = cards.some((c) => c.tool.id === 'clear_cu50007_job');
+  const [stuckJobs, setStuckJobs] = useState<number | null>(null);
+  useEffect(() => {
+    if (!needsJobQueueGate) {
+      setStuckJobs(null);
+      return;
+    }
+    let cancelled = false;
+    setStuckJobs(null);
+    fetchJobQueueHealth()
+      .then((res) => {
+        if (!cancelled) setStuckJobs(stuckJobsCount(res.data));
+      })
+      .catch(() => {
+        if (!cancelled) setStuckJobs(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [needsJobQueueGate, subject?.subjectKey]);
+
+  const visibleCards = cards.filter(
+    (c) => c.tool.id !== 'clear_cu50007_job' || (stuckJobs !== null && stuckJobs > 0),
+  );
+
+  const headTool = visibleCards.find((c) => c.recommended)?.tool ?? null;
   const isOosHeldPipe = subject?.subjectKey === 'oos_held' && subject.oosHeld !== undefined;
   // Correction 4: when the subject is green/healthy there is nothing to fix, so the
   // RESOLVE actions are suppressed and the mode chip says so. DIAGNOSE stays open so
@@ -1062,7 +1281,7 @@ export function RemediationModal({
               </div>
             ) : isOosHeldPipe ? (
               <OosHeldResolve detail={subject.oosHeld as OosHeldDetail} registry={registry} isAdmin={isAdmin} />
-            ) : cards.length === 0 ? (
+            ) : visibleCards.length === 0 ? (
               <div className="rm-nostep">
                 <p className="rm-desc">No automated remediation tool is mapped for this item.</p>
                 <p className="rm-when">
@@ -1072,7 +1291,7 @@ export function RemediationModal({
                 </p>
               </div>
             ) : (
-              cards.map(({ mapping, tool, recommended }) => (
+              visibleCards.map(({ mapping, tool, recommended }) => (
                 <ResolveCard
                   key={tool.id}
                   mapping={mapping}

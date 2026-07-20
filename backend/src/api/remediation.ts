@@ -26,6 +26,7 @@ import { resolveRemediationFlags } from '../runtime/runtimeSettings';
 import { requireRole } from '../auth/context';
 import { roleGate } from '../auth/principal';
 import { buildUrl } from '../sources/middlewareClient';
+import { buildOrderLineItems } from './orderLineItems';
 
 // Per-request timeout for the read-only diagnostic proxies. A stalled middleware
 // must fail fast into a 502, never block the operator's modal.
@@ -34,12 +35,14 @@ const DIAGNOSTIC_TIMEOUT_MS = 6000;
 // Proxy one READ-ONLY middleware request server-side and hand the JSON back to the
 // modal, so the browser never needs middleware network access. No password is ever
 // attached (these are unauthenticated observability reads). Any failure degrades to
-// a typed 502 / 503; nothing here mutates the middleware or NAV.
+// a typed 502 / 503; nothing here mutates the middleware or NAV. An optional
+// transform normalizes the middleware body before it reaches the modal.
 async function proxyMiddleware(
   reply: FastifyReply,
   method: 'GET' | 'POST',
   path: string,
   body?: Record<string, unknown>,
+  transform?: (json: unknown) => unknown,
 ): Promise<FastifyReply> {
   if (config.middleware.baseUrl.length === 0) {
     return reply.code(503).send({ error: 'middleware base URL not configured' });
@@ -63,7 +66,8 @@ async function proxyMiddleware(
     if (!res.ok) {
       return reply.code(502).send({ error: `middleware responded ${res.status}`, status: res.status });
     }
-    return reply.send({ ok: true, source: path, data: json });
+    const data = transform !== undefined ? transform(json) : json;
+    return reply.send({ ok: true, source: path, data });
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     return reply.code(502).send({ error: `middleware diagnostic unreachable: ${reason}` });
@@ -208,6 +212,24 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
         return reply.code(400).send({ error: 'fulfillment-orders id must be a numeric Shopify order id' });
       }
       return proxyMiddleware(reply, 'GET', `/api/shopify/order/${id}/fulfillment-orders`);
+    },
+  );
+
+  // GET /api/diagnostics/shopify-order/:id -> middleware GET /api/shopify/order/:id
+  // (main.rs:858, shopify::orders::handle_fetch_order, i64, read-only). Returns the
+  // order's line items (sku, quantity, name) so an operator can see the SKUs on a
+  // held order when the held-SKU field is blank (common for Not-in-NAV orders) and
+  // pick the SKU for the Holman push / fs-floor-one fix. Read-only, no password.
+  app.get(
+    '/api/diagnostics/shopify-order/:id',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      const id = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(id)) {
+        return reply.code(400).send({ error: 'shopify-order id must be a numeric Shopify order id' });
+      }
+      return proxyMiddleware(reply, 'GET', `/api/shopify/order/${id}`, undefined, buildOrderLineItems);
     },
   );
 

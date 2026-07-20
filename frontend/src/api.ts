@@ -154,6 +154,23 @@ export function fetchFulfillmentOrders(orderId: string): Promise<DiagnosticEnvel
   );
 }
 
+// A normalized order line for the "Line items" DIAGNOSE read.
+export interface OrderLineItem {
+  sku: string;
+  quantity: number;
+  name: string;
+}
+
+// GET /api/diagnostics/shopify-order/:id -> the middleware Shopify order fetch,
+// normalized server-side to { line_items: [{ sku, quantity, name }] }. Read-only.
+// Lets an operator see the SKUs on a held order (the held-SKU field is often blank,
+// especially for Not-in-NAV orders) and click a SKU to fill the Held SKU fix input.
+export function fetchShopifyOrderLineItems(orderId: string): Promise<DiagnosticEnvelope> {
+  return getJson<DiagnosticEnvelope>(
+    `/api/diagnostics/shopify-order/${encodeURIComponent(orderId)}`,
+  );
+}
+
 // GET /api/diagnostics/nav-inventory?sku=&location= -> the middleware NAV
 // inventory availability check (read-only). location is optional.
 export function fetchNavInventory(sku: string, location?: string): Promise<DiagnosticEnvelope> {

@@ -169,13 +169,30 @@ jobs:
           set -euo pipefail
           runner_ip=$(curl -fsS --max-time 10 https://api.ipify.org)
           echo "Runner egress IP: $runner_ip"
-          az webapp config access-restriction add \
-            --resource-group "$AZURE_RESOURCE_GROUP" --name "$APP_NAME" \
-            --rule-name ci-health-temp --action Allow --priority 90 \
-            --ip-address "$runner_ip/32" \
-            --description "Transient CI health probe; removed after smoke" >/dev/null
-          echo "Temporary allow rule added; waiting 20s for it to take effect."
-          sleep 20
+          # The image swap just triggered a site-config write + restart. A
+          # concurrent access-restriction write while that is settling returns a
+          # transient 400 (Bad Request), which is what broke the first attempt.
+          # The command itself is valid, so retry with backoff until it lands.
+          added=false
+          for i in $(seq 1 6); do
+            if az webapp config access-restriction add \
+                 --resource-group "$AZURE_RESOURCE_GROUP" --name "$APP_NAME" \
+                 --rule-name ci-health-temp --action Allow --priority 90 \
+                 --ip-address "$runner_ip/32" \
+                 --description "Transient CI health probe; removed after smoke" >/dev/null 2>&1; then
+              echo "Temporary allow rule added on attempt ${i}."
+              added=true
+              break
+            fi
+            echo "  add attempt ${i}/6 failed (site config still settling); sleeping 15s"
+            sleep 15
+          done
+          if [ "$added" != "true" ]; then
+            echo "::error::Could not add the temporary CI allow rule after 6 attempts."
+            exit 1
+          fi
+          echo "Waiting 15s for the rule to take effect."
+          sleep 15
 
       # Post-deploy smoke. An App Service container restart normally takes 2 to
       # 4 minutes to warm up; that is expected, not a hang (Pattern 7). Retry
@@ -206,10 +223,21 @@ jobs:
       - name: Remove the temporary CI allow rule
         if: always() && steps.ciallow.outcome == 'success'
         run: |
-          az webapp config access-restriction remove \
-            --resource-group "$AZURE_RESOURCE_GROUP" --name "$APP_NAME" \
-            --rule-name ci-health-temp >/dev/null || true
-          echo "Temporary CI allow rule removed; lockdown restored."
+          # Fail the job if we cannot restore the lockdown: a lingering allow
+          # rule is a real (if small) security gap, so surface it loudly rather
+          # than swallow it. Retry through the same transient config race.
+          for i in $(seq 1 6); do
+            if az webapp config access-restriction remove \
+                 --resource-group "$AZURE_RESOURCE_GROUP" --name "$APP_NAME" \
+                 --rule-name ci-health-temp >/dev/null 2>&1; then
+              echo "Temporary CI allow rule removed on attempt ${i}; lockdown restored."
+              exit 0
+            fi
+            echo "  remove attempt ${i}/6 failed; sleeping 15s"
+            sleep 15
+          done
+          echo "::error::Could not remove ci-health-temp after 6 attempts. Remove it by hand: az webapp config access-restriction remove -g $AZURE_RESOURCE_GROUP -n $APP_NAME --rule-name ci-health-temp"
+          exit 1
 
       # If any step above failed (most importantly the health probe), revert the
       # app to the image it was serving before this run and restart. Prod ends

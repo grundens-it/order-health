@@ -147,8 +147,14 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
       // tools never write, so operators may confirm them (they return a preview).
       const isAdmin = roleGate(principal.roles, [APP_ROLES.admin]);
       const ep = tool.endpoint;
+      // readOnly endpoints (reconcile_audit's inventory-sync/check) never write, so
+      // they are not a live-executable write and do not need Admin (they are normally
+      // run via the read-only diagnostic proxy anyway).
       const isLiveExecutable =
-        tool.kind === 'middleware_endpoint' && ep !== undefined && ep.heldFromLivePath !== true;
+        tool.kind === 'middleware_endpoint' &&
+        ep !== undefined &&
+        ep.heldFromLivePath !== true &&
+        ep.readOnly !== true;
       const isDryRunPreview = ep?.supportsDryRun === true && body.dryRun !== false;
       const wouldWriteLive = isLiveExecutable && body.confirmed === true && !isDryRunPreview;
       if (wouldWriteLive && !isAdmin) {
@@ -178,6 +184,9 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
         // classification signal, not the id, so Number(subjectKey) 502-ed. See the
         // buildRequestBody fix in remediationClient.ts.
         shopifyOrderId: body.shopifyOrderId,
+        // Thread the resolved param values (sku, location_code, channel) for the
+        // per-SKU endpoints (inventory-sync/push, fulfillment-service-floor-one).
+        params: body.params,
       });
     },
   );
@@ -218,6 +227,32 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
       if (q.location && q.location.trim().length > 0) invBody.locations = [q.location.trim()];
       if (q.channel && q.channel.trim().length > 0) invBody.channel = q.channel.trim();
       return proxyMiddleware(reply, 'POST', '/api/nav/inventory/check', invBody);
+    },
+  );
+
+  // GET /api/diagnostics/inventory-sync-check?sku=&location=&channel= -> middleware
+  // POST /api/nav/inventory-sync/check (CheckSkuRequest { sku, location_code, channel }).
+  // The READ-ONLY per-SKU dry run behind the reconcile + the Holman-release preview:
+  // it returns NAV on-hand, Shopify current on-hand, and what a push WOULD set, so the
+  // modal shows the would-push vs live delta inline. No password, no write. location
+  // defaults to HF1FTZ (Holman) and channel to DTC when omitted.
+  app.get(
+    '/api/diagnostics/inventory-sync-check',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      const q = req.query as { sku?: string; location?: string; channel?: string };
+      const sku = (q.sku ?? '').trim();
+      if (sku.length === 0) {
+        return reply.code(400).send({ error: 'sku query parameter is required' });
+      }
+      const location = (q.location ?? '').trim() || 'HF1FTZ';
+      const channel = (q.channel ?? '').trim() || 'DTC';
+      return proxyMiddleware(reply, 'POST', '/api/nav/inventory-sync/check', {
+        sku,
+        location_code: location,
+        channel,
+      });
     },
   );
 

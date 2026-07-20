@@ -106,6 +106,7 @@ export async function triggerRemediation(
   confirmed: boolean,
   dryRun?: boolean,
   shopifyOrderId?: string | number,
+  params?: Record<string, string | number>,
 ): Promise<RemediationTriggerResult> {
   const res = await fetch(`/api/remediation/${encodeURIComponent(toolId)}/trigger`, {
     method: 'POST',
@@ -121,6 +122,7 @@ export async function triggerRemediation(
       confirmed,
       ...(dryRun === undefined ? {} : { dryRun }),
       ...(shopifyOrderId === undefined ? {} : { shopifyOrderId }),
+      ...(params === undefined ? {} : { params }),
     }),
   });
   if (!res.ok) {
@@ -158,6 +160,20 @@ export function fetchNavInventory(sku: string, location?: string): Promise<Diagn
   const params = new URLSearchParams({ sku });
   if (location && location.length > 0) params.set('location', location);
   return getJson<DiagnosticEnvelope>(`/api/diagnostics/nav-inventory?${params.toString()}`);
+}
+
+// GET /api/diagnostics/inventory-sync-check?sku=&location=&channel= -> the
+// inventory-sync per-SKU check (read-only dry run): NAV on-hand vs Shopify current
+// vs would_set. Drives the reconcile Run and the Holman-release dry-run preview.
+export function fetchInventorySyncCheck(
+  sku: string,
+  location?: string,
+  channel?: string,
+): Promise<DiagnosticEnvelope> {
+  const params = new URLSearchParams({ sku });
+  if (location && location.length > 0) params.set('location', location);
+  if (channel && channel.length > 0) params.set('channel', channel);
+  return getJson<DiagnosticEnvelope>(`/api/diagnostics/inventory-sync-check?${params.toString()}`);
 }
 
 // --- Unit 1 OOS-held DIAGNOSE reads (read-only proxies) --------------------

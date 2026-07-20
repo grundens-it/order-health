@@ -3,6 +3,7 @@ import type {
   OosHeldDetail,
   OosHeldOrder,
   RemediationMapping,
+  RemediationParam,
   RemediationRegistry,
   RemediationTool,
   RemediationTriggerResult,
@@ -10,6 +11,7 @@ import type {
 } from '@order-health/shared';
 import {
   fetchFulfillmentOrders,
+  fetchInventorySyncCheck,
   fetchJobQueueHealth,
   fetchMissedShipments,
   fetchNavInventory,
@@ -74,7 +76,11 @@ const THREE_PL = new Set(['genuine_3pl_delay_chase']);
 const OPERATOR = new Set(['oos_held_stale_clear', 'reconcile_audit', 'oos_held_triage']);
 
 function ownerFor(tool: RemediationTool): Owner {
-  if (tool.kind === 'middleware_endpoint') return { label: 'Admin (live write)', cls: 'admin' };
+  if (tool.kind === 'middleware_endpoint') {
+    // A read-only endpoint (reconcile_audit's check) is operator-runnable, not a write.
+    if (tool.endpoint?.readOnly === true) return { label: 'You (operator)', cls: 'you' };
+    return { label: 'Admin (live write)', cls: 'admin' };
+  }
   if (NAV_ADMIN.has(tool.id)) return { label: 'NAV admin', cls: 'nav' };
   if (IT_SYMMETRY.has(tool.id)) return { label: 'IT / Symmetry', cls: 'it' };
   if (SHOPIFY_ADMIN.has(tool.id)) return { label: 'Shopify admin', cls: 'shopify' };
@@ -87,8 +93,9 @@ function ownerFor(tool: RemediationTool): Owner {
 function modeChip(tool: RemediationTool | null): { label: string; cls: string } {
   if (tool === null) return { label: 'No automated fix: investigate', cls: 'diagnose' };
   if (tool.kind === 'middleware_endpoint') {
+    if (tool.endpoint?.readOnly === true) return { label: 'Read-only check (no changes)', cls: 'diagnose' };
     if (tool.endpoint?.heldFromLivePath === true) return { label: 'Preview only (held from live)', cls: 'diagnose' };
-    return tool.endpoint?.supportsDryRun === true
+    return tool.endpoint?.supportsDryRun === true || tool.endpoint?.checkPath !== undefined
       ? { label: 'One-click fix available (dry run first)', cls: 'fix' }
       : { label: 'One-click fix available (live write)', cls: 'fix' };
   }
@@ -285,6 +292,7 @@ function ConfirmPanel({
   tool,
   live,
   orderId,
+  paramValues,
   busy,
   onConfirm,
   onCancel,
@@ -292,24 +300,28 @@ function ConfirmPanel({
   tool: RemediationTool;
   live: boolean;
   orderId?: string | null;
+  paramValues?: Record<string, string>;
   busy: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }): JSX.Element {
   const ep = tool.endpoint;
   const gated = ep?.gated === true;
+  const params = ep?.params ?? [];
+  // HARD UI RULE (Correction 5): show the HUMAN action name and its parameters,
+  // never a raw endpoint string / method + path.
   return (
     <div className="rm-confirm" role="group" aria-label="Confirm and run">
       <div className="rm-confirm-hd">{live ? 'Confirm live write' : 'Confirm and run'}</div>
       <p className="rm-confirm-lead">
         {live
           ? 'This writes to NAV / Shopify via the middleware. It runs only if remediation is armed on the server; otherwise the server returns a disarmed preview.'
-          : 'This authorises the exact call below. It runs only if remediation is armed on the server.'}
+          : 'This authorises the action below. It runs only if remediation is armed on the server.'}
       </p>
       <div className="rm-confirm-rows">
         <div className="rm-cf-row">
           <span className="rm-k">Action</span>
-          <span className="rm-v mono">{ep ? `${ep.method} ${ep.path}` : tool.name}</span>
+          <span className="rm-v">{tool.name}</span>
         </div>
         {orderId !== undefined && orderId !== null && (
           <div className="rm-cf-row">
@@ -317,6 +329,12 @@ function ConfirmPanel({
             <span className="rm-v mono">{orderId}</span>
           </div>
         )}
+        {params.map((p) => (
+          <div className="rm-cf-row" key={p.name}>
+            <span className="rm-k">{p.label}</span>
+            <span className="rm-v mono">{paramValues?.[p.name] ?? ''}</span>
+          </div>
+        ))}
         <div className="rm-cf-row">
           <span className="rm-k">Auth</span>
           <span className="rm-v mono">set_by=order-health-operator{gated ? ' + NAV_TOGGLE_PASSWORD' : ''}</span>
@@ -334,6 +352,76 @@ function ConfirmPanel({
   );
 }
 
+// Resolve a tool's declared params into initial values: a locked constant (fixed),
+// the order/signal-sourced value (source), a prefilled editable default, or empty
+// (prompted). Fixed params are not operator-editable; the rest render as inputs.
+function initialParamValues(
+  params: readonly RemediationParam[],
+  orderSku?: string,
+  orderId?: string | number,
+): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const p of params) {
+    if (p.fixed !== undefined) {
+      values[p.name] = p.fixed;
+      continue;
+    }
+    const sourced =
+      p.source === 'order_sku'
+        ? orderSku ?? ''
+        : p.source === 'order_id'
+          ? orderId !== undefined
+            ? String(orderId)
+            : ''
+          : '';
+    values[p.name] = sourced || p.default || '';
+  }
+  return values;
+}
+
+// The labelled param inputs (Correction 3): auto-filled from data when available,
+// otherwise a prompted input; fixed params are shown locked. A required-but-empty
+// param disables the Run button (enforced by the caller via missingRequired).
+function ParamFields({
+  params,
+  values,
+  onChange,
+  disabled,
+}: {
+  params: readonly RemediationParam[];
+  values: Record<string, string>;
+  onChange: (name: string, value: string) => void;
+  disabled: boolean;
+}): JSX.Element | null {
+  if (params.length === 0) return null;
+  return (
+    <div className="rm-params">
+      {params.map((p) => {
+        const locked = p.fixed !== undefined;
+        const id = `rm-param-${p.name}`;
+        return (
+          <label className="rm-param" key={p.name} htmlFor={id}>
+            <span className="rm-param-l">
+              {p.label}
+              {p.required && <span className="rm-param-req" aria-hidden="true"> *</span>}
+            </span>
+            <input
+              id={id}
+              className="rm-param-in"
+              type="text"
+              value={values[p.name] ?? ''}
+              readOnly={locked}
+              disabled={disabled || locked}
+              onChange={(e) => onChange(p.name, e.target.value)}
+              aria-label={p.label}
+            />
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
 // The FIX affordance for a callable middleware endpoint: dry-run first where the
 // endpoint supports it, a separate visually-heavier live write disabled until a dry
 // run has been previewed, admin-only for the live write. Endpoints with no dry_run
@@ -345,28 +433,68 @@ function LiveAction({
   subjectKey,
   isAdmin,
   shopifyOrderId,
+  orderSku,
 }: {
   tool: RemediationTool;
   subjectKind: 'pipe' | 'signal' | 'order';
   subjectKey: string;
   isAdmin: boolean;
   shopifyOrderId?: string | number;
+  orderSku?: string;
 }): JSX.Element {
+  const ep = tool.endpoint;
+  const params = ep?.params ?? [];
   const [busy, setBusy] = useState(false);
   const [previewed, setPreviewed] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState<RemediationTriggerResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [paramValues, setParamValues] = useState<Record<string, string>>(() =>
+    initialParamValues(params, orderSku, shopifyOrderId),
+  );
+  // The read-only check (dry run preview via check, and the reconcile Run) state.
+  const [checkState, setCheckState] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
+  const [checkData, setCheckData] = useState<unknown>(null);
 
-  const ep = tool.endpoint;
   const held = ep?.heldFromLivePath === true;
+  const readOnly = ep?.readOnly === true;
   const supportsDryRun = ep?.supportsDryRun === true;
+  const hasCheck = ep?.checkPath !== undefined;
+  const hasPreview = hasCheck || supportsDryRun;
 
   // Order-targeted fixes need the NUMERIC Shopify id. When it is absent / not numeric
   // the FIX is DISABLED with a clear reason: we never fire a 0 (which 502-ed the
   // middleware). subjectKey for an order is the classification signal, not the id.
   const numericId = numericOrderId(shopifyOrderId);
   const idMissing = NEEDS_ORDER_ID.has(tool.id) && numericId === null;
+  // A required param with no value disables the fire (Correction 3): never a zero/blank.
+  const missingRequired = params.some((p) => p.required && (paramValues[p.name] ?? '').trim().length === 0);
+
+  function setParam(name: string, value: string): void {
+    setParamValues((prev) => ({ ...prev, [name]: value }));
+    // Editing a param invalidates a prior preview so the operator re-checks.
+    setPreviewed(false);
+    setCheckState('idle');
+  }
+
+  // The read-only inventory-sync/check: the reconcile Run and the Holman-release dry
+  // run. Executes the proxy (no write) and shows the NAV vs Shopify vs would_set delta.
+  async function runCheck(): Promise<void> {
+    setCheckState('loading');
+    setError(null);
+    try {
+      const res = await fetchInventorySyncCheck(
+        paramValues.sku ?? '',
+        paramValues.location_code,
+        paramValues.channel,
+      );
+      setCheckData(res.data);
+      setCheckState('ok');
+      setPreviewed(true);
+    } catch {
+      setCheckState('error');
+    }
+  }
 
   async function fire(dryRun: boolean): Promise<void> {
     setBusy(true);
@@ -378,6 +506,7 @@ function LiveAction({
         true,
         dryRun,
         numericId ?? undefined,
+        params.length > 0 ? paramValues : undefined,
       );
       setResult(res);
       if (dryRun) setPreviewed(true);
@@ -400,12 +529,56 @@ function LiveAction({
     );
   }
 
+  const checkResult = (
+    <>
+      {checkState === 'error' && (
+        <div className="rm-diag-body rm-diag-muted" role="status">
+          check unavailable (the middleware read did not respond)
+        </div>
+      )}
+      {checkState === 'ok' && (
+        <div className="rm-diag-body" role="status" aria-live="polite">
+          <div className="rm-kv">
+            {primitiveRows(checkData).map((r) => (
+              <div className="rm-kv-row" key={r.k}>
+                <span className="rm-k">{r.k}</span>
+                <span className="rm-v mono">{r.v}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  );
+
+  // READ-ONLY tool (reconcile_audit): a single Run that executes the check and shows
+  // the delta inline. No live write, no confirm; operators may run it.
+  if (readOnly) {
+    return (
+      <>
+        <ParamFields params={params} values={paramValues} onChange={setParam} disabled={checkState === 'loading'} />
+        <div className="rm-actions">
+          <button
+            className="rm-btn"
+            onClick={() => void runCheck()}
+            disabled={checkState === 'loading' || missingRequired}
+            title={missingRequired ? 'Fill the required fields first' : 'Read-only, no changes'}
+          >
+            {checkState === 'loading' ? 'Running...' : 'Run reconcile (read-only, no changes)'}
+          </button>
+        </div>
+        {checkResult}
+      </>
+    );
+  }
+
   if (confirming) {
     return (
       <ConfirmPanel
         tool={tool}
         live={!held}
         orderId={numericId}
+        paramValues={paramValues}
         busy={busy}
         onConfirm={() => void fire(false)}
         onCancel={() => setConfirming(false)}
@@ -413,15 +586,18 @@ function LiveAction({
     );
   }
 
-  const liveDisabled = !isAdmin || busy || (supportsDryRun && !previewed);
+  const liveDisabled = !isAdmin || busy || missingRequired || (hasPreview && !previewed);
   const liveTitle = !isAdmin
     ? 'Admin only'
-    : supportsDryRun && !previewed
-      ? 'Run a dry run first'
-      : 'Writes to NAV / Shopify';
+    : missingRequired
+      ? 'Fill the required fields first'
+      : hasPreview && !previewed
+        ? 'Run a dry run first'
+        : 'Writes to NAV / Shopify';
 
   return (
     <>
+      <ParamFields params={params} values={paramValues} onChange={setParam} disabled={busy} />
       <div className="rm-actions">
         {held ? (
           <button className="rm-btn" onClick={() => void fire(true)} disabled={busy}>
@@ -429,10 +605,20 @@ function LiveAction({
           </button>
         ) : (
           <>
-            {supportsDryRun && (
-              <button className="rm-btn" onClick={() => void fire(true)} disabled={busy}>
-                {busy ? 'Running...' : 'Dry run (preview, no changes)'}
+            {hasCheck ? (
+              <button
+                className="rm-btn"
+                onClick={() => void runCheck()}
+                disabled={checkState === 'loading' || missingRequired}
+              >
+                {checkState === 'loading' ? 'Running...' : 'Dry run (preview via check)'}
               </button>
+            ) : (
+              supportsDryRun && (
+                <button className="rm-btn" onClick={() => void fire(true)} disabled={busy || missingRequired}>
+                  {busy ? 'Running...' : 'Dry run (preview, no changes)'}
+                </button>
+              )
             )}
             <button
               className="rm-btn rm-live"
@@ -442,7 +628,7 @@ function LiveAction({
               aria-label={
                 !isAdmin
                   ? 'Run live, Admin only'
-                  : supportsDryRun && !previewed
+                  : hasPreview && !previewed
                     ? 'Run live, disabled until dry run'
                     : 'Run live write'
               }
@@ -452,6 +638,7 @@ function LiveAction({
           </>
         )}
       </div>
+      {hasCheck && checkResult}
       {!isAdmin && !held && <p className="rm-when">Live write is Admin only; you may run the dry run / preview.</p>}
       {error !== null && <div className="rm-err">{error}</div>}
       {result !== null && (
@@ -523,6 +710,7 @@ function ResolveCard({
           subjectKey={subject.subjectKey}
           isAdmin={isAdmin}
           shopifyOrderId={subject.orderId}
+          orderSku={subject.diagSku}
         />
       ) : (
         <p className="rm-instruct-note">Owner: {owner.label}. No API call: follow the numbered steps above by hand.</p>
@@ -632,6 +820,7 @@ function OosHeldResolve({
   const CAP = 20;
   const orders = detail.held_orders.slice(0, CAP);
   const hidden = detail.held_orders.length - orders.length;
+  const holman = toolFor(registry, 'oos_held_inventory_push');
   const forwardReplay = toolFor(registry, 'forward_sync_replay');
   const recovery = toolFor(registry, 'recovery_sweep');
   const lineAdd = toolFor(registry, 'oos_held_nav_line_add');
@@ -655,14 +844,33 @@ function OosHeldResolve({
         </div>
         {o.last_detail !== null && <p className="rm-when">Last: {o.last_detail}</p>}
         {o.order_id !== null && <OrderPresenceCheck orderId={o.order_id} />}
+        {/* Correction 1: the PRIMARY fix for every held order is the Holman inventory
+            release (dry-run check at HF1FTZ, then push NAV on-hand to Shopify). The
+            SKU auto-fills from the held order (sample_sku) or is prompted. */}
+        {holman !== null && (
+          <div className="rm-order-fix">
+            <div className="rm-kicker">Primary fix</div>
+            <LiveAction
+              tool={holman}
+              subjectKind="order"
+              subjectKey={o.order_id ?? ''}
+              isAdmin={isAdmin}
+              shopifyOrderId={o.order_id ?? undefined}
+              orderSku={o.sample_sku ?? undefined}
+            />
+          </div>
+        )}
         {bucket === 'not_in_nav' && forwardReplay !== null && (
-          <LiveAction
-            tool={forwardReplay}
-            subjectKind="order"
-            subjectKey={o.order_id ?? ''}
-            isAdmin={isAdmin}
-            shopifyOrderId={o.order_id ?? undefined}
-          />
+          <div className="rm-order-fix">
+            <div className="rm-kicker">Secondary: re-drive (order not in NAV)</div>
+            <LiveAction
+              tool={forwardReplay}
+              subjectKind="order"
+              subjectKey={o.order_id ?? ''}
+              isAdmin={isAdmin}
+              shopifyOrderId={o.order_id ?? undefined}
+            />
+          </div>
         )}
         {bucket === 'in_nav_line_missing' && lineAdd !== null && (
           <div className="rm-instruct">
@@ -738,9 +946,15 @@ export function RemediationModal({
 
   const headTool = cards.find((c) => c.recommended)?.tool ?? null;
   const isOosHeldPipe = subject?.subjectKey === 'oos_held' && subject.oosHeld !== undefined;
-  const mode = isOosHeldPipe
-    ? { label: 'Triage by NAV bucket, then fix or instruct per order', cls: 'diagnose' }
-    : modeChip(headTool);
+  // Correction 4: when the subject is green/healthy there is nothing to fix, so the
+  // RESOLVE actions are suppressed and the mode chip says so. DIAGNOSE stays open so
+  // a healthy signal can still be inspected (a green card is still openable).
+  const isHealthy = subject?.verdict === 'green';
+  const mode = isHealthy
+    ? { label: 'Healthy: no remediation needed', cls: 'healthy' }
+    : isOosHeldPipe
+      ? { label: 'Triage by NAV bucket, then fix or instruct per order', cls: 'diagnose' }
+      : modeChip(headTool);
 
   // Focus management: capture the opener, focus the close button on open, return
   // focus to the opener on close.
@@ -839,7 +1053,14 @@ export function RemediationModal({
               Resolve
             </h4>
             <div className={`rm-mode ${mode.cls}`}>{mode.label}</div>
-            {isOosHeldPipe ? (
+            {isHealthy ? (
+              <div className="rm-healthy" role="status">
+                <p className="rm-desc">
+                  This signal is healthy (green), so there is nothing to remediate. The read-only
+                  Diagnose section above stays available if you want to inspect it or run a dry-run check.
+                </p>
+              </div>
+            ) : isOosHeldPipe ? (
               <OosHeldResolve detail={subject.oosHeld as OosHeldDetail} registry={registry} isAdmin={isAdmin} />
             ) : cards.length === 0 ? (
               <div className="rm-nostep">

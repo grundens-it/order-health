@@ -271,6 +271,11 @@ export interface OosHeldOrder {
   age_s: number | null;          // wall-clock age since first_seen_at (filled by the grader)
   nav_bucket: OosHeldNavBucket | null;   // WI3 routing bucket (null until joined)
   remediation_tool_id: string | null;   // the tool routed for this bucket (null until joined)
+  // A representative SKU on the held order (the line the allocator could not
+  // satisfy), used to auto-fill the Holman inventory-release fix (push NAV on-hand
+  // to Shopify at HF1FTZ). Null when the join has not resolved a SKU; the modal
+  // then prompts the operator for it rather than firing against an empty SKU.
+  sample_sku?: string | null;
 }
 
 // The typed detail bag for the oos_held pipe. held_verdict is depth-and-age banded
@@ -536,6 +541,40 @@ export interface RemediationEndpoint {
   // returns 'would_trigger'; the live POST is never issued. heldReason explains why.
   heldFromLivePath?: boolean;
   heldReason?: string;
+  // READ-ONLY endpoint (a check / preview that mutates nothing). Rendered as a
+  // single "Run (read-only)" button that executes the read via the diagnostic
+  // proxy and shows the result inline; it NEVER offers a live-write button and
+  // never routes through the armed trigger path. Used by reconcile_audit (the
+  // inventory-sync/check reconcile) so a former "manual step list" becomes a Run.
+  readOnly?: boolean;
+  // PREVIEW-VIA-CHECK path: a DISTINCT read-only endpoint the modal calls first to
+  // show what the live write would do (the inventory-sync/check per-SKU dry run
+  // that returns nav on-hand vs shopify current vs would_set). When set, the modal
+  // renders a "Dry run (preview via check)" button that executes this read through
+  // the diagnostic proxy with the tool's params, shows the delta inline, and only
+  // then enables the live write to `path`. Distinct from supportsDryRun (a body
+  // flag on the SAME path). The Holman OOS-held release uses it: check at HF1FTZ,
+  // then push to release.
+  checkPath?: string;
+  // Declared request parameters, read from the middleware source. Each is filled
+  // from the order/signal data when available (source), pinned to a constant
+  // (fixed), or prompted from the operator (an input in the modal). A live fire is
+  // disabled until every required param has a value; we never fire a wrong/zero.
+  params?: RemediationParam[];
+}
+
+// One declared parameter of a remediation action (read from the middleware source).
+// Resolution order in the modal: `fixed` (a locked constant, e.g. location_code =
+// HF1FTZ) -> `source` (auto-filled from the order/signal, e.g. the held SKU) ->
+// `default` (prefilled but editable) -> an empty prompted input. Required params
+// with no value disable the Run button.
+export interface RemediationParam {
+  name: string;        // the request-body field name (sku, location_code, channel)
+  label: string;       // the human label shown on the input in the modal
+  fixed?: string;      // a locked constant value (not operator-editable)
+  default?: string;    // a prefilled but editable default
+  source?: 'order_sku' | 'order_id'; // auto-fill from the subject's order data
+  required: boolean;
 }
 
 // A documented ops runbook reference (no live call, no middleware endpoint).
@@ -598,6 +637,12 @@ export interface RemediationTriggerInput {
   // Number(subjectKey) on those is NaN, which sent 0 / [] and 502-ed the middleware.
   // Absent when the order has no Shopify id (the fix is then disabled, never fired at 0).
   shopifyOrderId?: string | number;
+  // Resolved values for the tool's declared params (RemediationParam.name -> value),
+  // filled from order/signal data or from the operator's modal input. The client's
+  // buildRequestBody reads these for the per-SKU endpoints (inventory-sync/push,
+  // fulfillment-service-floor-one). A required param with no value disables the fix
+  // in the modal, so this never carries an empty required field on a live fire.
+  params?: Record<string, string | number>;
 }
 
 // The typed result of an operator trigger.

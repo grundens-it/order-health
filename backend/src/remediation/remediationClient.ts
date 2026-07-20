@@ -44,6 +44,11 @@ export interface TriggerOptions {
   // classification signal string or a split order name (SP-#####), never the numeric
   // id. Number(subjectKey) was NaN and sent 0 / [], which 502-ed the middleware.
   shopifyOrderId?: string | number;
+  // Resolved param values (RemediationParam.name -> value) for the per-SKU endpoints
+  // (inventory-sync/push + /check, fulfillment-service-floor-one). Filled from the
+  // order/signal data or the operator's modal input; the modal disables the fire
+  // until every required param has a value, so this never carries an empty required.
+  params?: Record<string, string | number>;
 }
 
 // Per-request timeout for the live POST. A stalled middleware must fail fast into
@@ -82,7 +87,10 @@ function isLiveExecutable(tool: RemediationTool): boolean {
   return (
     tool.kind === 'middleware_endpoint' &&
     tool.endpoint !== undefined &&
-    tool.endpoint.heldFromLivePath !== true
+    tool.endpoint.heldFromLivePath !== true &&
+    // A read-only endpoint (reconcile_audit's check) never mutates, so it is not a
+    // live write: it always previews and is run via the read-only diagnostic proxy.
+    tool.endpoint.readOnly !== true
   );
 }
 
@@ -143,10 +151,31 @@ export function buildRequestBody(
     case '/api/nav/inventory-sync/fulfillment-service-floor':
     case '/api/nav/inventory-sync/fulfillment-service-sweep':
       return { dry_run: dryRun, set_by: setBy };
-    // fs-floor one SKU: adds the SKU from the subject (the caller supplies the SKU
-    // as subjectKey). dry_run (default true) + set_by; password added when gated.
+    // fs-floor one SKU (FsFloorOneRequest { sku, dry_run, password, set_by }). The
+    // SKU comes from the tool's params (auto-filled from the ORDER data, else prompted
+    // in the modal), NOT from subjectKey (Correction 3). Falls back to a numeric-free
+    // subjectKey only as a legacy path. dry_run default true; password added by firePost.
     case '/api/nav/inventory-sync/fulfillment-service-floor-one':
-      return { sku: subjectKey ?? '', dry_run: dryRun, set_by: setBy };
+      return { sku: String(options.params?.sku ?? subjectKey ?? ''), dry_run: dryRun, set_by: setBy };
+    // Holman OOS-held release, live per-SKU push (PushSkuRequest { sku, location_code,
+    // channel, password, set_by }). sku is from the order/prompt; location_code + channel
+    // are pinned (HF1FTZ / DTC) via the tool's params. Password added by firePost (gated).
+    case '/api/nav/inventory-sync/push':
+      return {
+        sku: String(options.params?.sku ?? ''),
+        location_code: String(options.params?.location_code ?? 'HF1FTZ'),
+        channel: String(options.params?.channel ?? 'DTC'),
+        set_by: setBy,
+      };
+    // inventory-sync/check (CheckSkuRequest { sku, location_code, channel }): a READ
+    // (no password, no write). Normally executed via the read-only diagnostic proxy;
+    // this body is here so a direct trigger still sends the verified shape.
+    case '/api/nav/inventory-sync/check':
+      return {
+        sku: String(options.params?.sku ?? ''),
+        location_code: String(options.params?.location_code ?? 'HF1FTZ'),
+        channel: String(options.params?.channel ?? 'DTC'),
+      };
     // forward-sync replay (verified: ReplayRequest { shopify_order_id: i64 }). ONE
     // numeric shopify_order_id; un-gated, real mode, no dry_run and no set_by (the
     // middleware struct carries only this field). Uses the threaded numeric id, never

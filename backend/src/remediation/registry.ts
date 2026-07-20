@@ -313,20 +313,72 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
     ],
   },
   {
+    // Correction 2 (default to Run): this WAS a manual step list; it now EXECUTES the
+    // reconcile. It runs the inventory-sync/check per-SKU dry run (a read: it returns
+    // NAV on-hand, Shopify current on-hand, and would_set) and shows the would-push
+    // vs live delta inline. READ-ONLY: check mutates nothing (verified against source,
+    // CheckSkuRequest { sku, location_code, channel }), so it routes through the
+    // read-only diagnostic proxy, never the armed write path, and offers no live button.
     id: 'reconcile_audit',
-    name: 'Reconcile dry-run vs live accounting',
+    name: 'Reconcile: what would push vs what Shopify holds',
     description:
-      'Read-only investigation: compares the dry-run would-push predicate against the live walk push set and classifies the delta. No writes.',
-    kind: 'ops_runbook',
-    runbook: {
-      ref: 'runbooks/inventory-reconcile-audit.md',
-      command: 'Run reconcile_audit (read-only classification of the dry-run vs live delta)',
+      'Runs the inventory-sync per-SKU check (a read-only dry run) for a SKU + location and shows ' +
+      'the delta inline: NAV on-hand, what Shopify currently holds, and what a push would set. ' +
+      'Use it to classify a divergence before deciding to push. It writes nothing.',
+    kind: 'middleware_endpoint',
+    endpoint: {
+      method: 'POST',
+      path: '/api/nav/inventory-sync/check',
+      source: 'inventory_sync.rs::handle_check_sku (CheckSkuRequest { sku, location_code, channel }) - read-only per-SKU dry run',
+      readOnly: true,
+      checkPath: '/api/nav/inventory-sync/check',
+      params: [
+        { name: 'sku', label: 'SKU to reconcile', required: true },
+        { name: 'location_code', label: 'Location code', default: 'HF1FTZ', required: true },
+        { name: 'channel', label: 'Channel', default: 'DTC', required: true },
+      ],
     },
     writeCapable: false,
     steps: [
-      'Read the inventory-sync divergence signal: the dry-run would-push count versus the live push set.',
-      'Classify the delta (which SKUs / locations differ and why); this is read-only investigation, it writes nothing.',
-      'If the divergence is benign (e.g. untracked-quantity filtering), record it. If not, escalate to the push tooling; do NOT force a push from here.',
+      'Enter the SKU (and location) to reconcile; the check reads NAV on-hand, Shopify current on-hand, and what a push would set.',
+      'Read the delta inline: if Shopify current already equals what would be set, there is nothing to push (benign).',
+      'If Shopify is behind what NAV holds, the SKU needs a push; use the per-SKU push / Holman release. This check writes nothing.',
+    ],
+  },
+  {
+    // Correction 1: the Holman OOS-held PRIMARY fix. Holman (Tigers) is the DTC 3PL
+    // at location code HF1FTZ. NAV holds the true on-hand; the inventory-sync push
+    // writes it to Shopify, so a held SKU at Holman goes available 0 -> N and the
+    // order releases. The DRY RUN is the read-only inventory-sync/check at HF1FTZ
+    // (shows Shopify-0 vs would-set-N); the LIVE write is the per-SKU push (gated).
+    // Both bodies verified against source: CheckSkuRequest { sku, location_code,
+    // channel } and PushSkuRequest { sku, location_code, channel, password, set_by }.
+    id: 'oos_held_inventory_push',
+    name: 'Release the held order: push Holman on-hand to Shopify (HF1FTZ)',
+    description:
+      'The root-cause fix for an OOS-held DTC order: NAV holds true on-hand at Holman (HF1FTZ) but ' +
+      'Shopify reads it as 0, so the order is held. Dry run the inventory-sync check for the held ' +
+      'SKU at HF1FTZ (channel DTC) to see Shopify-0 vs would-set-N, then push it live so Shopify ' +
+      'goes 0 -> N in one call and the order releases. Per-SKU and gated (NAV_TOGGLE_PASSWORD).',
+    kind: 'middleware_endpoint',
+    endpoint: {
+      method: 'POST',
+      path: '/api/nav/inventory-sync/push',
+      source: 'inventory_sync.rs::handle_push_sku (PushSkuRequest { sku, location_code, channel, password, set_by }) - live per-SKU Shopify push',
+      gated: true,
+      checkPath: '/api/nav/inventory-sync/check',
+      params: [
+        { name: 'sku', label: 'Held SKU', source: 'order_sku', required: true },
+        { name: 'location_code', label: 'Location code', fixed: 'HF1FTZ', required: true },
+        { name: 'channel', label: 'Channel', fixed: 'DTC', required: true },
+      ],
+    },
+    writeCapable: true,
+    steps: [
+      'Dry run the inventory-sync check for the held SKU at HF1FTZ (channel DTC): confirm Shopify current on-hand is 0 (or behind) while NAV on-hand is positive.',
+      'Confirm the SKU is the line holding the order (the awaiting-ship sample SKU, or the SKU on the order).',
+      'Push it live (Admin-only, gated): Shopify on-hand for that SKU at HF1FTZ goes 0 -> N in one call.',
+      'Verify Shopify now shows the SKU available at Holman and the held order releases to ship.',
     ],
   },
   {
@@ -509,9 +561,13 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
     endpoint: {
       method: 'POST',
       path: '/api/nav/inventory-sync/fulfillment-service-floor-one',
-      source: 'inventory-sync fulfillment-service-floor-one (fs-floor API; dry_run defaults on, password-gated)',
+      source: 'inventory_sync.rs::handle_fs_floor_one_post (FsFloorOneRequest { sku, dry_run, password, set_by })',
       gated: true,
       supportsDryRun: true,
+      // Correction 3: the SKU comes from the ORDER data (the diverging SKU on the
+      // order), not from subjectKey. Auto-filled from the subject when present, else
+      // prompted in the modal; the fire is disabled until it is set.
+      params: [{ name: 'sku', label: 'Diverging SKU', source: 'order_sku', required: true }],
     },
     writeCapable: true,
     steps: [
@@ -733,13 +789,27 @@ export const REMEDIATION_MAPPINGS: readonly RemediationMapping[] = [
   // Round 3 (Unit 1/3): an FS floor-at-zero order. Map to the FS re-floor, NEVER to
   // back_sync / submit_fulfillment (a fulfillment cannot fix a floored location).
   {
+    // Correction 2 (default to Run): the FS floor-at-zero fix is now the CALLABLE
+    // native fs-floor-one endpoint (a one-click Run, dry-run first), not the manual
+    // "trigger the Symmetry re-floor" step. The SKU comes from the order (Correction
+    // 3). The manual fs_refloor ops path stays only as a fallback alternative.
     subjectKind: 'signal',
     subjectKey: 'fs_floor_at_zero',
     appliesWhen:
       'An awaiting_ship order is held by the FS floor-at-zero bug: Shopify FS-location available < 0 ' +
-      'while the NAV warehouse is stocked. Re-floor the FS location (ADR-0003), do not chase a 3PL delay.',
-    toolId: 'fs_refloor',
+      'while the NAV warehouse is stocked. Re-floor the diverging SKU at the FS location (native ' +
+      'fulfillment-service-floor-one, dry run then live); do not chase a 3PL delay.',
+    toolId: 'fs_location_floor_one',
     primary: true,
+  },
+  {
+    subjectKind: 'signal',
+    subjectKey: 'fs_floor_at_zero',
+    appliesWhen:
+      'Fallback if the native fs-floor is unavailable: trigger the Symmetry event-driven FS re-floor ' +
+      '(ADR-0003) by hand. Prefer the one-click floor-one Run above.',
+    toolId: 'fs_refloor',
+    primary: false,
   },
   // Round 3 (Unit 1/3): a genuine 3PL delay. In stock at HF1FTZ, FS available >= 0,
   // unshipped past the SLO. There is no middleware fix; the modal is READ-ONLY and
@@ -768,12 +838,28 @@ export const REMEDIATION_MAPPINGS: readonly RemediationMapping[] = [
   // --- WI3 (#89): the three NAV-join buckets, each routed to the CORRECT tool.
   // forward_sync_replay is mapped ONLY to not-in-NAV (never to an in-NAV bucket). ---
   {
+    // Correction 1: the PRIMARY OOS-held fix is the Holman inventory release (push
+    // NAV on-hand to Shopify at HF1FTZ), the root cause of the hold. The forward-sync
+    // re-drive is demoted to a secondary action below.
     subjectKind: 'signal',
     subjectKey: 'oos_held_not_in_nav',
     appliesWhen:
-      'A held order is NOT in NAV: the re-drive falls through and re-stages it. forward_sync_replay is valid.',
-    toolId: 'forward_sync_replay',
+      'A held DTC order at Holman: NAV has on-hand at HF1FTZ but Shopify reads 0. Dry run the ' +
+      'inventory check for the held SKU, then push it live so Shopify goes 0 -> N and the order releases.',
+    toolId: 'oos_held_inventory_push',
     primary: true,
+  },
+  {
+    // Demoted to secondary (Correction 1). Still valid ONLY for a not-in-NAV held
+    // order (a re-drive DuplicateSkips an in-NAV order), so it maps here and nowhere
+    // else (asserted in registry.test.ts).
+    subjectKind: 'signal',
+    subjectKey: 'oos_held_not_in_nav',
+    appliesWhen:
+      'Secondary: if the order never reached NAV, re-drive it through forward-sync so it re-stages ' +
+      '(valid only for a not-in-NAV order; a re-drive no-ops on an in-NAV order).',
+    toolId: 'forward_sync_replay',
+    primary: false,
   },
   {
     subjectKind: 'signal',

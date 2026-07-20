@@ -519,6 +519,18 @@ export interface RemediationEndpoint {
   // body (never logged). Seed ONLY from documented evidence; where the middleware's
   // per-endpoint auth shape is unconfirmed, leave it unset and confirm before arming.
   gated?: boolean;
+  // DRY-RUN SUPPORT: the middleware endpoint accepts a `dry_run` flag and defaults
+  // it to true (a safe preview with no write). When set, the modal offers a
+  // "Dry run" action (dryRun:true) and a separate red "Run live" action
+  // (dryRun:false); the live write stays disabled until a dry run has been
+  // previewed. Endpoints without this flag (recovery replay, forward-sync replay,
+  // back-sync run-now) have no preview: any confirmed fire is a live action.
+  supportsDryRun?: boolean;
+  // DESTRUCTIVE: the endpoint deletes / irreversibly mutates data (e.g. the
+  // stuck-staging dedupe DELETEs rows). Destructive endpoints get the loud red
+  // typed-confirm treatment and, when there is no rollback story, are also
+  // heldFromLivePath so they never fire one-click.
+  destructive?: boolean;
   // HELD OUT of the Tier 1 live path even when armed + confirmed (ADR-0010): a
   // destructive / irreversible action with no clear rollback story. It always
   // returns 'would_trigger'; the live POST is never issued. heldReason explains why.
@@ -542,6 +554,9 @@ export interface RemediationTool {
   endpoint?: RemediationEndpoint; // set when kind === 'middleware_endpoint'
   runbook?: RemediationRunbook;   // set when kind === 'ops_runbook'
   writeCapable: boolean; // true = it mutates via an existing ops path; false = read-only / guidance only
+  // Optional numbered runbook steps rendered in the modal (from the runbook draft).
+  // Additive and backward compatible: tools without steps render as before.
+  steps?: string[];
 }
 
 // Which subject (pipe / order-level signal) a tool applies to, and the red
@@ -572,6 +587,10 @@ export interface RemediationTriggerInput {
   subjectKind?: HealthTransition['subject_kind'];
   subjectKey?: string;
   confirmed?: boolean;
+  // Executable remediation (Tier 1): when the tool is a middleware_endpoint that
+  // supports it, dryRun true previews with no write (the middleware defaults to a
+  // dry run); dryRun false is the live apply. Omitted keeps the safe server default.
+  dryRun?: boolean;
 }
 
 // The typed result of an operator trigger.

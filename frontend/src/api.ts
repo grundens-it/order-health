@@ -104,14 +104,49 @@ export async function triggerRemediation(
   toolId: string,
   subject: { subjectKind: 'pipe' | 'signal' | 'order'; subjectKey: string } | null,
   confirmed: boolean,
+  dryRun?: boolean,
 ): Promise<RemediationTriggerResult> {
   const res = await fetch(`/api/remediation/${encodeURIComponent(toolId)}/trigger`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...(subject ?? {}), confirmed }),
+    // dryRun is sent only when specified: undefined keeps the safe server default
+    // (dry_run true) on endpoints that support it. dryRun:false is the live apply
+    // (Admin-only on the server); a non-Admin request for it returns 403.
+    body: JSON.stringify({ ...(subject ?? {}), confirmed, ...(dryRun === undefined ? {} : { dryRun }) }),
   });
   if (!res.ok) {
-    throw new Error(`remediation trigger responded ${res.status}`);
+    let detail = '';
+    try {
+      const parsed = (await res.json()) as { error?: string };
+      if (parsed && typeof parsed.error === 'string') detail = `: ${parsed.error}`;
+    } catch {
+      // non-JSON body; fall through to the status-only message
+    }
+    throw new Error(`remediation trigger responded ${res.status}${detail}`);
   }
   return (await res.json()) as RemediationTriggerResult;
+}
+
+// The read-only diagnostic proxies (genuine_3pl_delay modal). The backend calls the
+// middleware's existing read endpoints server-side and returns the JSON, so the
+// browser never touches the middleware directly. Operator OR Admin.
+export interface DiagnosticEnvelope {
+  ok: boolean;
+  source: string;
+  data: unknown;
+}
+
+// GET /api/diagnostics/fulfillment-orders/:id -> the middleware FO Inspector.
+export function fetchFulfillmentOrders(orderId: string): Promise<DiagnosticEnvelope> {
+  return getJson<DiagnosticEnvelope>(
+    `/api/diagnostics/fulfillment-orders/${encodeURIComponent(orderId)}`,
+  );
+}
+
+// GET /api/diagnostics/nav-inventory?sku=&location= -> the middleware NAV
+// inventory availability check (read-only). location is optional.
+export function fetchNavInventory(sku: string, location?: string): Promise<DiagnosticEnvelope> {
+  const params = new URLSearchParams({ sku });
+  if (location && location.length > 0) params.set('location', location);
+  return getJson<DiagnosticEnvelope>(`/api/diagnostics/nav-inventory?${params.toString()}`);
 }

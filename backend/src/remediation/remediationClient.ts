@@ -32,6 +32,12 @@ import { resolveRemediationFlags } from '../runtime/runtimeSettings';
 export interface TriggerOptions {
   confirmed: boolean; // the per-action operator sign-off (ADR-0010)
   actor?: string;     // the authenticated principal name recorded on the audit entry (issue #96)
+  // Executable remediation dry-run intent (Tier 1). Undefined or true previews with
+  // no write on endpoints that support dry_run (the middleware defaults dry_run
+  // true); an explicit false is the live apply. Endpoints without a dry_run flag
+  // ignore this: for them any confirmed live fire is a write, gated to Admin at the
+  // route. Never widens the arming gate; a live call still requires armed+confirmed.
+  dryRun?: boolean;
 }
 
 // Per-request timeout for the live POST. A stalled middleware must fail fast into
@@ -76,17 +82,75 @@ function isLiveExecutable(tool: RemediationTool): boolean {
 
 // The NON-SECRET call parameters recorded in the audit log and echoed to the
 // operator. The password and the bearer token are deliberately excluded.
-function auditParams(tool: RemediationTool, confirmed: boolean): Record<string, unknown> {
+function auditParams(tool: RemediationTool, confirmed: boolean, dryRun: boolean): Record<string, unknown> {
   if (tool.kind === 'middleware_endpoint' && tool.endpoint) {
     return {
       method: tool.endpoint.method,
       path: tool.endpoint.path,
       gated: tool.endpoint.gated === true,
       held: tool.endpoint.heldFromLivePath === true,
+      // The effective dry_run the live body carried (true = preview, no write).
+      // Only meaningful on endpoints that support it; recorded for accountability.
+      dry_run: tool.endpoint.supportsDryRun === true ? dryRun : null,
       confirmed,
     };
   }
   return { kind: tool.kind, runbook: tool.runbook?.ref ?? null, confirmed };
+}
+
+// Build the EXACT per-endpoint request body for a live POST. Each middleware
+// endpoint has its own confirmed contract (verified against the middleware source,
+// see the PR notes), so we never send a one-size-fits-all body. Returns undefined
+// for an endpoint that takes NO request body (back-sync run-now). The NAV
+// write-gate password is added by firePost for gated endpoints only, never here.
+function buildRequestBody(
+  tool: RemediationTool,
+  resolvedSubject: RemediationTriggerResult['resolvedSubject'],
+  options: TriggerOptions,
+): Record<string, unknown> | undefined {
+  const setBy = 'order-health-operator';
+  const subjectKey = resolvedSubject?.subjectKey ?? null;
+  // dry_run defaults TRUE (safe preview) unless the caller explicitly passed false.
+  const dryRun = options.dryRun !== false;
+  const path = tool.endpoint?.path ?? '';
+
+  switch (path) {
+    // recovery.rs BATCH replay: a list of numeric shopify_order_ids + set_by. NO
+    // dry_run (the endpoint has none; it is idempotent, already-submitted reported).
+    // A single-order subject becomes a one-element list.
+    case '/api/recovery/replay-fulfillment-requests': {
+      const id = subjectKey !== null ? Number(subjectKey) : NaN;
+      return { shopify_order_ids: Number.isFinite(id) ? [id] : [], set_by: setBy };
+    }
+    // fs-floor sweep + full sweep: dry_run (default true) + set_by. Password added
+    // by firePost when gated. Async (returns 202); progress read separately.
+    case '/api/nav/inventory-sync/fulfillment-service-floor':
+    case '/api/nav/inventory-sync/fulfillment-service-sweep':
+      return { dry_run: dryRun, set_by: setBy };
+    // fs-floor one SKU: adds the SKU from the subject (the caller supplies the SKU
+    // as subjectKey). dry_run (default true) + set_by; password added when gated.
+    case '/api/nav/inventory-sync/fulfillment-service-floor-one':
+      return { sku: subjectKey ?? '', dry_run: dryRun, set_by: setBy };
+    // forward-sync replay: ONE numeric shopify_order_id. Un-gated, real mode, no
+    // dry_run and no set_by (the middleware ReplayRequest carries only this field).
+    case '/api/forward-sync/replay': {
+      const id = subjectKey !== null ? Number(subjectKey) : NaN;
+      return { shopify_order_id: Number.isFinite(id) ? id : 0 };
+    }
+    // back-sync run-now: the route takes NO json body (fires one back-sync pass).
+    case '/api/back-sync/run-now':
+      return undefined;
+    // Any other middleware endpoint keeps the prior generic, honest body (the
+    // health subject plus set_by). These endpoints' exact bodies are NOT yet
+    // confirmed against the middleware source and must be verified before a live
+    // fire is relied on; see the PR notes.
+    default:
+      return {
+        set_by: setBy,
+        subjectKind: resolvedSubject?.subjectKind ?? null,
+        subjectKey,
+      };
+  }
 }
 
 // The live authenticated POST to the middleware's EXISTING endpoint. Sends
@@ -96,19 +160,16 @@ function auditParams(tool: RemediationTool, confirmed: boolean): Record<string, 
 async function firePost(
   tool: RemediationTool,
   resolvedSubject: RemediationTriggerResult['resolvedSubject'],
+  options: TriggerOptions,
 ): Promise<number> {
   const endpoint = tool.endpoint;
   if (endpoint === undefined) throw new Error('no endpoint to fire');
 
-  // Minimal, honest body: the health subject being remediated plus set_by; gated
-  // endpoints add the NAV write-gate password. The exact per-endpoint body shape
-  // beyond this is a middleware contract to confirm before arming (see PR notes).
-  const body: Record<string, unknown> = {
-    set_by: 'order-health-operator',
-    subjectKind: resolvedSubject?.subjectKind ?? null,
-    subjectKey: resolvedSubject?.subjectKey ?? null,
-  };
-  if (endpoint.gated === true) {
+  // The EXACT per-endpoint body (verified against the middleware source). undefined
+  // means the route takes no body (back-sync run-now). Gated endpoints add the NAV
+  // write-gate password here (never logged); run-now has no body to attach one to.
+  const body = buildRequestBody(tool, resolvedSubject, options);
+  if (endpoint.gated === true && body !== undefined) {
     body.password = config.remediation.togglePassword;
   }
 
@@ -126,9 +187,10 @@ async function firePost(
     const res = await fetch(buildUrl(config.middleware.baseUrl, endpoint.path), {
       method: endpoint.method,
       headers,
-      body: JSON.stringify(body),
+      body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
     });
+    // Any 2xx is success, including the fs-floor 202 Accepted (async apply).
     if (!res.ok) {
       throw new Error(`${endpoint.method} ${endpoint.path} -> HTTP ${res.status}`);
     }
@@ -172,7 +234,7 @@ export async function triggerRemediation(
       toolId: tool.id,
       subjectKind: resolvedSubject?.subjectKind ?? null,
       subjectKey: resolvedSubject?.subjectKey ?? null,
-      params: auditParams(tool, options.confirmed),
+      params: auditParams(tool, options.confirmed, options.dryRun !== false),
       outcome,
     });
   };
@@ -194,7 +256,7 @@ export async function triggerRemediation(
 
   // ARMED + confirmed + live-executable: fire the authenticated middleware POST.
   try {
-    const httpStatus = await firePost(tool, resolvedSubject);
+    const httpStatus = await firePost(tool, resolvedSubject, options);
     // eslint-disable-next-line no-console
     console.info(`[remediation] operator FIRED "${tool.id}" live -> HTTP ${httpStatus}`);
     record('triggered');

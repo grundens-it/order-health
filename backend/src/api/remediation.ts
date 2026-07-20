@@ -24,6 +24,53 @@ import { triggerRemediation } from '../remediation/remediationClient';
 import { resolveForRemediation } from '../repo/transitionRepo';
 import { resolveRemediationFlags } from '../runtime/runtimeSettings';
 import { requireRole } from '../auth/context';
+import { roleGate } from '../auth/principal';
+import { buildUrl } from '../sources/middlewareClient';
+
+// Per-request timeout for the read-only diagnostic proxies. A stalled middleware
+// must fail fast into a 502, never block the operator's modal.
+const DIAGNOSTIC_TIMEOUT_MS = 6000;
+
+// Proxy one READ-ONLY middleware request server-side and hand the JSON back to the
+// modal, so the browser never needs middleware network access. No password is ever
+// attached (these are unauthenticated observability reads). Any failure degrades to
+// a typed 502 / 503; nothing here mutates the middleware or NAV.
+async function proxyMiddleware(
+  reply: FastifyReply,
+  method: 'GET' | 'POST',
+  path: string,
+  body?: Record<string, unknown>,
+): Promise<FastifyReply> {
+  if (config.middleware.baseUrl.length === 0) {
+    return reply.code(503).send({ error: 'middleware base URL not configured' });
+  }
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (method === 'POST') headers['content-type'] = 'application/json';
+  // Bearer only if configured; the read endpoints are normally unauthenticated.
+  if (config.middleware.authToken.length > 0) {
+    headers.Authorization = `Bearer ${config.middleware.authToken}`;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DIAGNOSTIC_TIMEOUT_MS);
+  try {
+    const res = await fetch(buildUrl(config.middleware.baseUrl, path), {
+      method,
+      headers,
+      body: method === 'POST' ? JSON.stringify(body ?? {}) : undefined,
+      signal: controller.signal,
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      return reply.code(502).send({ error: `middleware responded ${res.status}`, status: res.status });
+    }
+    return reply.send({ ok: true, source: path, data: json });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return reply.code(502).send({ error: `middleware diagnostic unreachable: ${reason}` });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // Operator gate. When REMEDIATION_OPERATOR_TOKEN is set, require a matching
 // Authorization: Bearer / x-operator-token header. When empty (scaffold) it logs
@@ -91,6 +138,27 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
         if (resolved) resolvedSubject = { subjectKind: body.subjectKind, subjectKey: body.subjectKey };
       }
 
+      // ADMIN-ONLY LIVE WRITE (executable remediation). Operators keep read-only +
+      // dry-run; only an Admin may cause an actual write. A confirmed fire WRITES
+      // unless it is a dry-run preview on a dry-run-capable, not-held middleware
+      // endpoint. Everything else that is live-executable (dryRun:false, or an
+      // endpoint with no dry_run flag such as recovery replay / forward-sync replay
+      // / back-sync run-now) is a write and requires Admin. ops_runbook and held
+      // tools never write, so operators may confirm them (they return a preview).
+      const isAdmin = roleGate(principal.roles, [APP_ROLES.admin]);
+      const ep = tool.endpoint;
+      const isLiveExecutable =
+        tool.kind === 'middleware_endpoint' && ep !== undefined && ep.heldFromLivePath !== true;
+      const isDryRunPreview = ep?.supportsDryRun === true && body.dryRun !== false;
+      const wouldWriteLive = isLiveExecutable && body.confirmed === true && !isDryRunPreview;
+      if (wouldWriteLive && !isAdmin) {
+        return reply.code(403).send({
+          error:
+            'live remediation (an actual write) is Admin-only; operators may preview or dry-run. ' +
+            'Re-run as a dry run, or ask an Admin to apply.',
+        });
+      }
+
       // The confirm gate + kill switch, enforced here before the client sees a live
       // intent. A live fire requires an explicit confirmed:true AND the kill switch
       // off; otherwise we pass confirmed:false so the client returns the disarmed
@@ -102,7 +170,49 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
       return triggerRemediation(tool, resolvedSubject, nowIso, {
         confirmed,
         actor: principal.name,
+        // Thread the dry-run intent to the client. Undefined keeps the safe server
+        // default (dry_run true) on endpoints that support it.
+        dryRun: body.dryRun,
       });
+    },
+  );
+
+  // --- Read-only diagnostic proxies (genuine_3pl_delay modal, FO Inspector) -----
+  // These call the middleware's EXISTING read endpoints server-side and return the
+  // JSON, so the modal never needs middleware network access from the browser. They
+  // are READ ONLY: no password, no write, Operator OR Admin allowed. They mutate
+  // nothing (the NAV inventory check is a read-only availability lookup).
+
+  // GET /api/diagnostics/fulfillment-orders/:id -> middleware FO Inspector.
+  app.get(
+    '/api/diagnostics/fulfillment-orders/:id',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      const id = (req.params as { id: string }).id;
+      if (!/^\d+$/.test(id)) {
+        return reply.code(400).send({ error: 'fulfillment-orders id must be a numeric Shopify order id' });
+      }
+      return proxyMiddleware(reply, 'GET', `/api/shopify/order/${id}/fulfillment-orders`);
+    },
+  );
+
+  // GET /api/diagnostics/nav-inventory?sku=&location=&channel= -> middleware
+  // POST /api/nav/inventory/check (a read-only per-SKU availability lookup).
+  app.get(
+    '/api/diagnostics/nav-inventory',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      const q = req.query as { sku?: string; location?: string; channel?: string };
+      const sku = (q.sku ?? '').trim();
+      if (sku.length === 0) {
+        return reply.code(400).send({ error: 'sku query parameter is required' });
+      }
+      const invBody: Record<string, unknown> = { skus: [sku] };
+      if (q.location && q.location.trim().length > 0) invBody.locations = [q.location.trim()];
+      if (q.channel && q.channel.trim().length > 0) invBody.channel = q.channel.trim();
+      return proxyMiddleware(reply, 'POST', '/api/nav/inventory/check', invBody);
     },
   );
 }

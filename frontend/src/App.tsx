@@ -7,8 +7,9 @@ import type {
   PipelineHealth,
   RemediationRegistry,
 } from '@order-health/shared';
-import { detectRemediationTool } from '@order-health/shared';
-import { ApiError, fetchOrders, fetchPipelines, fetchRemediationRegistry, fetchRollup } from './api';
+import { APP_ROLES, detectRemediationTool } from '@order-health/shared';
+import { ApiError, fetchAuthMe, fetchOrders, fetchPipelines, fetchRemediationRegistry, fetchRollup } from './api';
+import { AdminPanel } from './components/AdminPanel';
 import { LeadershipStrip, type DrillTarget } from './components/LeadershipStrip';
 import { PipelineStrip } from './components/PipelineStrip';
 import { RemediationModal, type RemediationSubject } from './components/RemediationModal';
@@ -142,6 +143,23 @@ export function App(): JSX.Element {
   // Unit 7: remediation registry + the subject whose modal is open (null = closed).
   const [registry, setRegistry] = useState<RemediationRegistry | null>(null);
   const [remediationSubject, setRemediationSubject] = useState<RemediationSubject | null>(null);
+
+  // RBAC (issue #96): resolve the principal so the Admin-only arm/disarm panel
+  // renders for Admins only. The server is still the real gate on every write.
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    fetchAuthMe()
+      .then((me) => {
+        if (!cancelled) setIsAdmin(me.roles.includes(APP_ROLES.admin));
+      })
+      .catch(() => {
+        // Non-critical: without a resolvable principal the panel simply stays hidden.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -432,6 +450,8 @@ export function App(): JSX.Element {
               </span>
             </div>
             <OrderTable orders={shownOrders} onSelect={openOrderRemediation} />
+
+            {isAdmin && <AdminPanel />}
           </>
         )}
 

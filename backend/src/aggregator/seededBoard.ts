@@ -25,8 +25,11 @@ import type {
   NavInventoryAvailabilityRow,
   NavJobQueueState,
   NavOrderLifecycleRow,
+  NavEdiSendRow,
+  NavHoldRow,
   NavIabcRow,
   NavOrderLine,
+  NavTraceRow,
   NavShipmentHeader,
   NavWatermarkState,
 } from '../sources/navClient';
@@ -143,6 +146,15 @@ class SeededNavClient implements NavClient {
   }
   async getIabcBySku(): Promise<NavIabcRow[]> {
     return this.seed.iabc ?? [];
+  }
+  async getEdiSendStatus(): Promise<NavEdiSendRow[]> {
+    return [];
+  }
+  async getSplitShipTrace(): Promise<NavTraceRow[]> {
+    return [];
+  }
+  async getOrderHolds(): Promise<NavHoldRow[]> {
+    return [];
   }
   async queryReadOnly<T>(): Promise<T[]> {
     return [];

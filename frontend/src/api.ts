@@ -202,6 +202,24 @@ export function orderInfoFrom(data: unknown): OrderInfo | null {
   };
 }
 
+// One NAV IABC row: on-hand + available-to-ship for a SKU at a warehouse/channel.
+export interface NavIabcRow {
+  sku: string | null;
+  location: string | null;
+  channel: string | null;
+  onHand: number | null;
+  available: number | null;
+  earliestShipDate: string | null;
+}
+
+// GET /api/diagnostics/nav-availability?sku= -> NAV IABC on-hand + available-to-ship
+// across HF1FTZ (Holman) and TAC, per channel. NAV is the source of truth.
+export function fetchNavAvailability(sku: string): Promise<{ sku: string; rows: NavIabcRow[] }> {
+  return getJson<{ sku: string; rows: NavIabcRow[] }>(
+    `/api/diagnostics/nav-availability?sku=${encodeURIComponent(sku)}`,
+  );
+}
+
 // GET /api/diagnostics/shopify-order/:id -> the middleware Shopify order fetch,
 // normalized server-side to { line_items: [{ sku, quantity, name }] }. Read-only.
 // Lets an operator see the SKUs on a held order (the held-SKU field is often blank,

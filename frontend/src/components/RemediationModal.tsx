@@ -14,6 +14,7 @@ import {
   fetchInventorySyncCheck,
   fetchJobQueueHealth,
   fetchMissedShipments,
+  fetchNavAvailability,
   fetchNavInventory,
   fetchOrderPresence,
   fetchPendingFulfillment,
@@ -23,6 +24,7 @@ import {
   orderInfoFrom,
   triggerRemediation,
   type DiagnosticEnvelope,
+  type NavIabcRow,
   type OrderInfo,
   type OrderLineItem,
 } from '../api';
@@ -918,6 +920,79 @@ function OrderPanel({ orderId }: { orderId: string }): JSX.Element {
   );
 }
 
+// Inventory across BOTH physical warehouses (HF1FTZ / Holman and TAC): on-hand AND
+// available-to-ship for the order's SKU, straight from NAV IABC (the source of truth).
+// Answers "where does TAC have inventory" and puts available-to-ship next to on-hand.
+function WarehousesCard({ sku }: { sku: string }): JSX.Element {
+  const [state, setState] = useState<'loading' | 'ok' | 'error'>('loading');
+  const [rows, setRows] = useState<NavIabcRow[]>([]);
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const res = await fetchNavAvailability(sku);
+        if (!live) return;
+        setRows(res.rows ?? []);
+        setState('ok');
+      } catch {
+        if (live) setState('error');
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [sku]);
+  // Prefer the DTC channel (the storefront); fall back to all channels if none.
+  const dtc = rows.filter((r) => (r.channel ?? '').toUpperCase() === 'DTC');
+  const show = dtc.length > 0 ? dtc : rows;
+  return (
+    <section className="rm-section" aria-labelledby="rm-wh-h">
+      <h4 id="rm-wh-h" className="rm-sec-h">
+        Warehouse inventory ({sku})
+      </h4>
+      {state === 'loading' && (
+        <div className="rm-diag-body rm-diag-muted" role="status">
+          loading inventory...
+        </div>
+      )}
+      {state === 'error' && (
+        <div className="rm-diag-body rm-diag-muted" role="status">
+          inventory unavailable (the NAV read did not respond)
+        </div>
+      )}
+      {state === 'ok' && (
+        <div className="rm-diag-body">
+          {show.length === 0 ? (
+            <span className="rm-diag-muted">No NAV inventory for this SKU at HF1FTZ or TAC.</span>
+          ) : (
+            <table className="rm-wh-table">
+              <thead>
+                <tr>
+                  <th>Warehouse</th>
+                  <th>On hand</th>
+                  <th>Available to ship</th>
+                </tr>
+              </thead>
+              <tbody>
+                {show.map((r, i) => (
+                  <tr key={`${r.location}-${r.channel}-${i}`}>
+                    <td className="mono">
+                      {r.location ?? '?'}
+                      {dtc.length === 0 && r.channel ? ` / ${r.channel}` : ''}
+                    </td>
+                    <td className="mono">{r.onHand ?? '-'}</td>
+                    <td className="mono">{r.available ?? '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 // The "Line items" DIAGNOSE read for an OOS-held order: a Run button that fetches the
 // order's SKUs (the held-SKU field is often blank, especially for Not-in-NAV orders)
 // and renders each line as SKU + qty + name. Each SKU is clickable and fills the Held
@@ -1335,6 +1410,11 @@ export function RemediationModal({
           {/* ORDER - universal on every order-level modal (all lines + total) */}
           {numericOrderId(subject.orderId) !== null && (
             <OrderPanel orderId={numericOrderId(subject.orderId) as string} />
+          )}
+
+          {/* WAREHOUSE INVENTORY - HF1FTZ + TAC on-hand + available-to-ship (NAV) */}
+          {typeof subject.diagSku === 'string' && subject.diagSku.length > 0 && (
+            <WarehousesCard sku={subject.diagSku} />
           )}
 
           {/* DIAGNOSE */}

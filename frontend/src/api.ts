@@ -161,6 +161,47 @@ export interface OrderLineItem {
   name: string;
 }
 
+// Richer order view for the universal Order panel (buildOrderInfo server-side).
+export interface OrderInfoLine {
+  sku: string;
+  quantity: number;
+  name: string;
+  unit_price: string | null;
+}
+export interface OrderInfo {
+  line_items: OrderInfoLine[];
+  order_total: string | null;
+  subtotal: string | null;
+  currency: string | null;
+  financial_status: string | null;
+  fulfillment_status: string | null;
+}
+
+// Narrow an unknown diagnostic payload to OrderInfo, tolerating a missing body.
+export function orderInfoFrom(data: unknown): OrderInfo | null {
+  if (data === null || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  if (!Array.isArray(d.line_items)) return null;
+  const lines: OrderInfoLine[] = (d.line_items as unknown[]).map((li) => {
+    const r = (li !== null && typeof li === 'object' ? li : {}) as Record<string, unknown>;
+    return {
+      sku: r.sku !== undefined && r.sku !== null ? String(r.sku) : '',
+      quantity: Number.isFinite(Number(r.quantity)) ? Number(r.quantity) : 0,
+      name: r.name !== undefined && r.name !== null ? String(r.name) : '',
+      unit_price: r.unit_price !== undefined && r.unit_price !== null ? String(r.unit_price) : null,
+    };
+  });
+  const s = (k: string): string | null => (d[k] !== undefined && d[k] !== null ? String(d[k]) : null);
+  return {
+    line_items: lines,
+    order_total: s('order_total'),
+    subtotal: s('subtotal'),
+    currency: s('currency'),
+    financial_status: s('financial_status'),
+    fulfillment_status: s('fulfillment_status'),
+  };
+}
+
 // GET /api/diagnostics/shopify-order/:id -> the middleware Shopify order fetch,
 // normalized server-side to { line_items: [{ sku, quantity, name }] }. Read-only.
 // Lets an operator see the SKUs on a held order (the held-SKU field is often blank,

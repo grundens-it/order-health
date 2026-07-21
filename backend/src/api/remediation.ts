@@ -26,7 +26,7 @@ import { resolveRemediationFlags } from '../runtime/runtimeSettings';
 import { requireRole } from '../auth/context';
 import { roleGate } from '../auth/principal';
 import { buildUrl } from '../sources/middlewareClient';
-import { buildOrderLineItems } from './orderLineItems';
+import { buildOrderInfo } from './orderLineItems';
 
 // Per-request timeout for the read-only diagnostic proxies. A stalled middleware
 // must fail fast into a 502, never block the operator's modal.
@@ -229,7 +229,7 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
       if (!/^\d+$/.test(id)) {
         return reply.code(400).send({ error: 'shopify-order id must be a numeric Shopify order id' });
       }
-      return proxyMiddleware(reply, 'GET', `/api/shopify/order/${id}`, undefined, buildOrderLineItems);
+      return proxyMiddleware(reply, 'GET', `/api/shopify/order/${id}`, undefined, buildOrderInfo);
     },
   );
 

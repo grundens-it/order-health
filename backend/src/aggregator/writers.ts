@@ -7,7 +7,7 @@
 // STUB STATUS: the verdict computation is stubbed (returns 'unknown' with empty
 // source reads) because live sources are DevOps-gated. The SHAPE is real so
 // Phase W units drop a real verdict computation into the marked seams.
-import type { OrderHealth, PipelineHealth } from '@order-health/shared';
+import { ORDER_HANDOFF_LABEL, type OrderHealth, type PipelineHealth } from '@order-health/shared';
 import { config } from '../config';
 import { getPool } from '../db/pool';
 import type { MiddlewareClient } from '../sources/middlewareClient';
@@ -285,6 +285,20 @@ export async function computeOosHeldPipeline(sources: Sources): Promise<Pipeline
 // Only a genuine handoff failure grades red. An acked 940 is green however old it is:
 // Holman being behind is their SLA. Preseason is excluded outright.
 export async function computeOrderHandoffPipeline(sources: Sources): Promise<PipelineHealth> {
+  const { results, byState, byOwner } = await classifyAllHandoffs(sources);
+  return handoffPipelineFrom(results, byState, byOwner);
+}
+
+// One classification pass over every open order, shared by the order_handoff PIPE and
+// by the ORDER LAYER. Both must agree: it made no sense for the pipe to call an order
+// "with Holman" while the order table called the same order "unhealthy" purely because
+// its ship stage dot was red. This is the single source of that judgement.
+export async function classifyAllHandoffs(sources: Sources): Promise<{
+  results: HandoffResult[];
+  byOrder: Map<string, HandoffResult>;
+  byState: Record<string, number>;
+  byOwner: Record<string, number>;
+}> {
   const [orders, lines, edi, holds, skipped, avail] = await Promise.all([
     sources.nav.getOrderLifecycleRows(),
     sources.nav.getOutstandingOrderLines(5000),
@@ -320,6 +334,7 @@ export async function computeOrderHandoffPipeline(sources: Sources): Promise<Pip
 
   const nowMs = Date.now();
   const results: HandoffResult[] = [];
+  const byOrder = new Map<string, HandoffResult>();
   const byState: Record<string, number> = {};
   const byOwner: Record<string, number> = {};
 
@@ -346,10 +361,20 @@ export async function computeOrderHandoffPipeline(sources: Sources): Promise<Pip
       ageDays,
     });
     results.push(r);
+    byOrder.set(orderNo, r);
     byState[r.state] = (byState[r.state] ?? 0) + 1;
     byOwner[r.owner] = (byOwner[r.owner] ?? 0) + 1;
   }
 
+  return { results, byOrder, byState, byOwner };
+}
+
+// Shape the classified set into the order_handoff pipe row. Pure.
+function handoffPipelineFrom(
+  results: HandoffResult[],
+  byState: Record<string, number>,
+  byOwner: Record<string, number>,
+): PipelineHealth {
   const roll = rollupHandoff(results);
   const verdict: Verdict =
     roll.verdict === 'red' ? 'red' : roll.verdict === 'amber' ? 'amber' : 'green';
@@ -771,7 +796,66 @@ export async function computeOrders(sources: Sources): Promise<OrderHealth[]> {
   if (awaiting.length > 0) {
     await classifyAwaitingShipOrders(sources, awaiting.map((a) => a.health));
   }
+
+  // Round 4: the ORDER VERDICT now comes from the handoff classifier, not from the
+  // stage grading. The old behaviour graded an order red purely because its ship stage
+  // dot was red, i.e. purely on elapsed time, which meant a clean, EDI-acknowledged
+  // handoff sitting in Holman's queue was reported as "stuck" and an operator was sent
+  // to chase something that is not ours and has no defect. Ownership, not age:
+  //   red   = OUR defect (the handoff actually failed)
+  //   amber = real work owned by a named party (Holman past their window, Finance / CS
+  //           hold, or the CU 5790 code defect)
+  //   green = with Holman inside the window, in flight, or a genuine backorder
+  //   excluded (preseason) is carried as green and labelled; it has its own card
+  // The stage dot is left untouched so the lifecycle view still shows WHERE the order
+  // is; the verdict now says WHOSE it is.
+  await applyHandoffVerdicts(sources, paired);
   return graded;
+}
+
+// Overlay the handoff classification onto graded order rows. Orders with no NAV order
+// number (orphan / Shopify-only records) keep their legacy grading: there is no NAV
+// handoff to classify, and those are exactly the records the orphan grading exists for.
+async function applyHandoffVerdicts(
+  sources: Sources,
+  paired: { health: OrderHealth; row: NavOrderLifecycleRow }[],
+): Promise<void> {
+  let byOrder: Map<string, HandoffResult>;
+  try {
+    ({ byOrder } = await classifyAllHandoffs(sources));
+  } catch (err) {
+    // If the handoff reads fail we keep the legacy verdicts rather than silently
+    // grading everything green. A missing overlay is visible; a false green is not.
+    console.error('[aggregator] handoff classification failed, keeping stage verdicts', err);
+    return;
+  }
+
+  for (const { health } of paired) {
+    const orderNo = health.nav_order_no;
+    if (orderNo === null) continue;
+    const r = byOrder.get(orderNo);
+    if (r === undefined) continue;
+    // A return was already resolved above and must stay green.
+    if (health.classification === 'return') continue;
+    // NEVER downgrade a PROVEN defect. fs_floor_at_zero is a measured middleware bug
+    // (NAV warehouse stocked while the FS location reads negative) with a real fix, and
+    // it is invisible to the EDI view: a TAC order cuts no 940, so the handoff
+    // classifier would call it "in flight" and quietly hide a genuine stall. The
+    // classifier grades the Holman handoff; it does not get to overrule evidence.
+    if (health.classification === 'fs_floor_at_zero') continue;
+
+    health.order_verdict = r.verdict === 'red' ? 'red' : r.verdict === 'amber' ? 'amber' : 'green';
+    health.handoff = {
+      state: r.state,
+      owner: r.owner,
+      reason: r.reason,
+      label: ORDER_HANDOFF_LABEL[r.state],
+    };
+    health.note = r.reason;
+    // "Oldest stuck age" must measure OUR defects only, otherwise it just reports how
+    // far behind Holman is and the headline goes red for someone else's backlog.
+    if (health.order_verdict !== 'red') health.oldest_stuck_age_s = null;
+  }
 }
 
 // Round 3 (Unit 1). Gather the FS-location available (Shopify) and NAV warehouse
@@ -875,13 +959,14 @@ export async function writeOrderSnapshot(asOf: string, orders: OrderHealth[]): P
       `INSERT INTO order_health_snapshot
          (as_of, channel, nav_order_no, shopify_order_id, shopify_order_name,
           customer_ref, current_stage, order_verdict, oldest_stuck_age_s,
-          is_orphan_suspect, note, classification, awaiting_ship_detail)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+          is_orphan_suspect, note, classification, awaiting_ship_detail, handoff)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [
         asOf, o.channel, o.nav_order_no, o.shopify_order_id, o.shopify_order_name,
         o.customer_ref, o.current_stage, o.order_verdict, o.oldest_stuck_age_s,
         o.is_orphan_suspect, o.note, o.classification ?? null,
         o.awaiting_ship_detail ? JSON.stringify(o.awaiting_ship_detail) : null,
+        o.handoff ? JSON.stringify(o.handoff) : null,
       ],
     );
   }

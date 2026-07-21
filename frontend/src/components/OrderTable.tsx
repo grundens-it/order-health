@@ -155,6 +155,14 @@ export function OrderTable({
                   <td>{formatAge(o.oldest_stuck_age_s)}</td>
                   <td>
                     <VerdictChip verdict={o.order_verdict} />
+                    {/* The verdict says red/amber/green; the handoff label says WHOSE it
+                        is. An amber order sitting with Holman past their ship window is
+                        a risk to watch, not something for an operator to chase. */}
+                    {o.handoff && (
+                      <span className={`tag owner ${o.handoff.owner}`} title={o.handoff.reason}>
+                        {o.handoff.label}
+                      </span>
+                    )}
                     {o.is_orphan_suspect && <span className="tag orphan">orphan?</span>}
                   </td>
                   <td className="ord-action">

@@ -130,11 +130,19 @@ test('a wholesale order is graded on its NAV-only chain and NEVER orphan-flags',
 });
 
 // --- A genuinely stalled DTC order reds the order layer and the headline -----
-test('a DTC order unshipped past the SLO reds the order layer and drives the headline stuck with the oldest-stuck age', async () => {
+// Round 4: "stalled" now means a real HANDOFF DEFECT, not elapsed time. This order is
+// released with stock on hand and no EDI 940 was ever cut, so it never reached Holman:
+// that is ours, and it alone must drive the headline. (An order merely sitting past a
+// ship SLO no longer reds anything; that was the old model that produced fake numbers.)
+test('a DTC order whose handoff failed reds the order layer and drives the headline stuck with the oldest-stuck age', async () => {
   const now = Date.now();
   const sources = makeSeededSources({
     now,
-    orders: [greenDtcOrder('1001', now), stuckStagingDtcOrder('1002', now)],
+    orders: [greenDtcOrder('1001', now), { ...stuckStagingDtcOrder('1002', now), navStatus: 1 }],
+    orderLines: [{ orderNo: '1002', sku: 'A', location: 'HF1FTZ', outstandingQty: 1 }],
+    inventoryAvailability: [{ sku: 'A', location: 'HF1FTZ', availableQty: 50 }],
+    fsInventory: [{ sku: 'A', available: 7, onHand: 7, committed: 0 }], // FS healthy: not the floor bug
+    ediHandoff: [], // no 940 at all: the handoff never happened
   });
 
   const pipes = await computePipelines(sources); // all pipes green
@@ -146,8 +154,10 @@ test('a DTC order unshipped past the SLO reds the order layer and drives the hea
   assert.equal(stuck.order_verdict, 'red');
   assert.equal(stuck.current_stage, 'awaiting_ship'); // stalled awaiting shipment, past the SLO
 
-  // No pipe is red, yet the red ORDER alone drives the headline to stuck.
-  assert.ok(pipes.every((p) => p.pipe_verdict === 'green'));
+  // No SYNC pipe is red, yet the red ORDER alone drives the headline to stuck. The
+  // order_handoff pipe is excluded from this check on purpose: it grades the very same
+  // defect from the same facts, so it reds with the order, by design.
+  assert.ok(pipes.filter((p) => p.pipe !== 'order_handoff').every((p) => p.pipe_verdict === 'green'));
   assert.equal(rollup.headline, 'stuck');
   assert.equal(rollup.headline_verdict, 'red');
   // Oldest stuck age reflects the days-old unshipped order (past the 72h red band).

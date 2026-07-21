@@ -22,25 +22,18 @@
 //
 // Pure: no I/O, no clock beyond the injected nowMs. Every branch is unit-testable.
 
-// Who owns the next action on this order.
-export type HandoffOwner =
-  | 'holman'      // handed off and acknowledged; their SLA
-  | 'finance'     // Finance / AR hold
-  | 'customer_service'
-  | 'engineering' // a known code defect (CU 5790 / EL- autorelease skip)
-  | 'grundens_ops' // OUR pipeline defect: the handoff itself failed
-  | 'none';       // nothing to do (in flight, or not yet due)
+// Owner and state are declared once, in shared, so the UI and the classifier cannot
+// drift apart. Re-exported here under the backend's original names.
+//   holman           handed off and acknowledged; their SLA
+//   finance          Finance / AR hold
+//   customer_service CS hold
+//   engineering      a known code defect (CU 5790 / EL- autorelease skip)
+//   grundens_ops     OUR pipeline defect: the handoff itself failed
+//   none             nothing to do (in flight, or not yet due)
+import type { OrderHandoffOwner, OrderHandoffState } from '@order-health/shared';
 
-export type HandoffState =
-  | 'preseason'          // excluded from active health, own card
-  | 'with_holman'        // 940 sent + acked
-  | 'awaiting_ack'       // 940 sent, 997 not back yet
-  | 'handoff_failed'     // released but no 940, or 940 created and never sent
-  | 'held_finance'
-  | 'held_customer_service'
-  | 'blocked_code_defect' // EL- / CU 5790 autorelease skip
-  | 'backorder'          // no stock, a real supply wait
-  | 'in_flight';         // recently created, nothing wrong yet
+export type HandoffOwner = OrderHandoffOwner;
+export type HandoffState = OrderHandoffState;
 
 // A verdict the health rollup can consume. Only 'red' means WE have a defect.
 export type HandoffVerdict = 'red' | 'amber' | 'green' | 'excluded';
@@ -80,6 +73,11 @@ export const ACK_GRACE_DAYS = 2;
 // the 940 is near-immediate on release, so anything past this is a real failure.
 export const HANDOFF_GRACE_DAYS = 1;
 
+// Holman's ship window for an acknowledged 940. Past this the order is a customer-facing
+// risk (amber) but still Holman's to work: they are behind and improving their process,
+// and the EDI already proves we handed it off cleanly. Never escalates to red.
+export const HOLMAN_SLA_DAYS = 3;
+
 export function classifyHandoff(f: HandoffFacts): HandoffResult {
   // 1. Preseason is not active order health at all.
   if (f.isPreseason) {
@@ -91,15 +89,24 @@ export function classifyHandoff(f: HandoffFacts): HandoffResult {
     };
   }
 
-  // 2. TRUST THE EDI. Acked = in Holman's court = healthy, regardless of age and
-  //    regardless of what the NAV header status says.
+  // 2. TRUST THE EDI. Acked = in Holman's court, regardless of what the NAV header
+  //    status says. It is never OUR defect, so it is never red. But once it sits past
+  //    Holman's ship window it is a customer-facing RISK, so it grades AMBER and stays
+  //    owned by Holman. That keeps the backlog visible without calling it stuck.
   if (f.ediSent && f.ediAcked) {
-    return {
-      state: 'with_holman',
-      owner: 'holman',
-      verdict: 'green',
-      reason: 'EDI 940 sent and 997 acknowledged: the order is in Holman\'s court. Any delay from here is Holman throughput, not a pipeline defect.',
-    };
+    return f.ageDays > HOLMAN_SLA_DAYS
+      ? {
+          state: 'holman_delayed',
+          owner: 'holman',
+          verdict: 'amber',
+          reason: `EDI 940 sent and 997 acknowledged ${f.ageDays} days ago, past Holman's ${HOLMAN_SLA_DAYS}-day ship window. At risk on Holman's throughput, not a pipeline defect: do not re-drive it.`,
+        }
+      : {
+          state: 'with_holman',
+          owner: 'holman',
+          verdict: 'green',
+          reason: "EDI 940 sent and 997 acknowledged: the order is in Holman's court and inside their ship window.",
+        };
   }
 
   // 3. Sent but not yet acknowledged: in flight, only our problem if it lingers.

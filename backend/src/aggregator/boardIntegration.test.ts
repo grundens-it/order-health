@@ -44,7 +44,7 @@ function missed(n: number): MissedShipment[] {
 }
 
 // --- All-green board: healthy headline --------------------------------------
-test('all-green board: every one of the eight pipes is green and the headline is healthy/green', async () => {
+test('all-green board: every one of the nine pipes is green and the headline is healthy/green', async () => {
   const now = Date.now();
   const sources = makeSeededSources({
     now,
@@ -57,7 +57,7 @@ test('all-green board: every one of the eight pipes is green and the headline is
 
   // Every pipe in the fixed strip order is present and green (WI1 oos_held + WI2
   // fs_location_divergence are added additively; their seeded defaults are green).
-  assert.equal(pipes.length, 8);
+  assert.equal(pipes.length, 9);
   for (const key of [
     'inventory_sync',
     'back_sync',
@@ -67,6 +67,7 @@ test('all-green board: every one of the eight pipes is green and the headline is
     'allocator',
     'oos_held',
     'fs_location_divergence',
+    'order_handoff',
   ]) {
     assert.equal(byPipe(pipes, key).pipe_verdict, 'green', `${key} green`);
   }

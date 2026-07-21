@@ -25,8 +25,10 @@ import type {
   NavInventoryAvailabilityRow,
   NavJobQueueState,
   NavOrderLifecycleRow,
+  NavEdiHandoffRow,
   NavEdiSendRow,
   NavHoldRow,
+  NavHoldSummaryRow,
   NavIabcRow,
   NavOrderLine,
   NavTraceRow,
@@ -70,6 +72,9 @@ export interface BoardSeed {
   orderLines?: NavOrderLine[]; // Round 3: outstanding order lines for FS classification
   shippedOrderLines?: NavOrderLine[]; // Per-line: SKUs already shipped (Sales Shipment Line)
   iabc?: NavIabcRow[]; // Per-SKU on-hand + available-to-ship (HF1FTZ + TAC)
+  ediHandoff?: NavEdiHandoffRow[];      // Holman 940 sent/acked per order
+  activeHolds?: NavHoldSummaryRow[];    // active hold reason per order
+  autoReleaseSkipped?: string[];        // orders with the EL- autorelease skip
   inventoryAvailability?: NavInventoryAvailabilityRow[]; // Round 3: NAV warehouse on-hand
   fsInventory?: ShopifyFsInventory[]; // Round 3: Shopify FS-location available per SKU
   oosHeld?: OosHeldOrder[] | null;    // WI1 (#87): OOS-held backlog rows (default [] => green)
@@ -155,6 +160,15 @@ class SeededNavClient implements NavClient {
   }
   async getOrderHolds(): Promise<NavHoldRow[]> {
     return [];
+  }
+  async getEdiHandoffBulk(): Promise<NavEdiHandoffRow[]> {
+    return this.seed.ediHandoff ?? [];
+  }
+  async getActiveHoldsBulk(): Promise<NavHoldSummaryRow[]> {
+    return this.seed.activeHolds ?? [];
+  }
+  async getAutoReleaseSkippedBulk(): Promise<string[]> {
+    return this.seed.autoReleaseSkipped ?? [];
   }
   async queryReadOnly<T>(): Promise<T[]> {
     return [];

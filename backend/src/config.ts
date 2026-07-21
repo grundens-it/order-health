@@ -144,6 +144,12 @@ export interface Config {
     ageAmberSeconds: number;   // oldest needs_operator row age >= this => AMBER
     ageRedSeconds: number;     // ...>= this => RED
   };
+  // Reshaped order-health model. The EDI lookback bounds the bulk Holman 940 read
+  // (that table holds full history, 400k+ documents), so it must comfortably exceed
+  // the age of any order we still consider open.
+  orderHandoff: {
+    ediLookbackDays: number;
+  };
   // Per-location availability divergence thresholds (WI2 #88). Count of SKUs NAV
   // shows stocked at the FS-fed warehouse location (Qty Available > 0) but whose
   // middleware FS-location availability reads <= 0. Count-banded, allowed to RED.
@@ -303,6 +309,11 @@ export const config: Config = {
     depthRedCount: num('OOS_HELD_DEPTH_RED_COUNT', 100),
     ageAmberSeconds: num('OOS_HELD_AGE_AMBER_SECONDS', 86400),   // 24h
     ageRedSeconds: num('OOS_HELD_AGE_RED_SECONDS', 259200),      // 72h
+  },
+  // Reshaped model: bound the bulk Holman 940 read. 180 days comfortably covers the
+  // oldest order we still treat as open (the worst observed backlog was ~42 days).
+  orderHandoff: {
+    ediLookbackDays: num('ORDER_HANDOFF_EDI_LOOKBACK_DAYS', 180),
   },
   // WI2 (#88): per-location availability divergence. A single diverging SKU is the
   // leading indicator, so amber fires at 1; a cluster (the limited-edition drop had

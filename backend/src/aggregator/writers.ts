@@ -40,13 +40,14 @@ import {
   type HeldNavFacts,
   type OosHeldInput,
 } from './oosHeld';
+import { classifyHandoff, rollupHandoff, type HandoffResult } from './orderHandoffClass';
 import {
   computeFsLocationDivergence,
   type FsLocationDivergenceInput,
   type NavLocationAvailabilityRow,
 } from './fsLocationDivergence';
 import { MIDDLEWARE_PATHS } from '../sources/middlewareClient';
-import type { OosHeldOrder } from '@order-health/shared';
+import type { OosHeldOrder, Verdict } from '@order-health/shared';
 import { computeJobQueue, type JobQueueInput } from './jobQueue';
 import { computePriceSync, type PriceSyncInput } from './priceSync';
 import { computeShopifyWebhook, type ShopifyWebhookInput } from './shopifyWebhook';
@@ -63,6 +64,7 @@ import {
 // oos_held (WI1 #87) and fs_location_divergence (WI2 #88) are added additively;
 // they do not change any existing pipe's compute.
 export const PIPES = [
+  'order_handoff',
   'inventory_sync',
   'back_sync',
   'price_sync',
@@ -267,6 +269,113 @@ export async function computeOosHeldPipeline(sources: Sources): Promise<Pipeline
     // The counts, the bucket tallies, and the routed per-order list (WI3) live in
     // the typed detail bag (OosHeldDetail).
     detail: r.detail as unknown as Record<string, unknown>,
+  };
+}
+
+// The reshaped order-health seam. Replaces time-threshold grading with DEFECT-based
+// classification, attributing every order to the party that owns the next action.
+//
+// Reads (all NAV, read-only, all bulk):
+//   * open DTC orders + their preseason flag and released status
+//   * the Holman EDI 940 handoff state per order (sent / 997-acked)
+//   * the active NAV hold reason per order (names Finance or Customer Service)
+//   * orders whose autorelease was skipped (EL- / pending CU 5790)
+//   * per-SKU availability, to tell a real backorder from a stuck order
+//
+// Only a genuine handoff failure grades red. An acked 940 is green however old it is:
+// Holman being behind is their SLA. Preseason is excluded outright.
+export async function computeOrderHandoffPipeline(sources: Sources): Promise<PipelineHealth> {
+  const [orders, lines, edi, holds, skipped, avail] = await Promise.all([
+    sources.nav.getOrderLifecycleRows(),
+    sources.nav.getOutstandingOrderLines(5000),
+    sources.nav.getEdiHandoffBulk(config.orderHandoff.ediLookbackDays),
+    sources.nav.getActiveHoldsBulk(),
+    sources.nav.getAutoReleaseSkippedBulk(),
+    sources.nav.getInventoryAvailability(),
+  ]);
+
+  const ediByOrder = new Map<string, { sent: boolean; acked: boolean }>();
+  for (const e of edi) {
+    if (e.orderNo === null) continue;
+    ediByOrder.set(e.orderNo, { sent: e.sent === 1, acked: e.acked === 1 });
+  }
+  const holdByOrder = new Map<string, string>();
+  for (const h of holds) {
+    if (h.orderNo === null || h.reasonCode === null) continue;
+    holdByOrder.set(h.orderNo, h.reasonCode);
+  }
+  const skippedSet = new Set(skipped);
+  const availBySku = new Map<string, number>();
+  for (const a of avail) {
+    if (a.sku === null || a.availableQty === null) continue;
+    availBySku.set(a.sku, (availBySku.get(a.sku) ?? 0) + a.availableQty);
+  }
+  const linesByOrder = new Map<string, string[]>();
+  for (const l of lines) {
+    if (l.orderNo === null || l.sku === null) continue;
+    const arr = linesByOrder.get(l.orderNo) ?? [];
+    arr.push(l.sku);
+    linesByOrder.set(l.orderNo, arr);
+  }
+
+  const nowMs = Date.now();
+  const results: HandoffResult[] = [];
+  const byState: Record<string, number> = {};
+  const byOwner: Record<string, number> = {};
+
+  for (const o of orders) {
+    const orderNo = o.navOrderNo;
+    if (orderNo === null) continue;
+    const e = ediByOrder.get(orderNo);
+    const skus = linesByOrder.get(orderNo) ?? [];
+    const orderAt = o.orderAt ?? o.shopifyOrderAt;
+    const ageDays =
+      orderAt !== null && orderAt !== undefined
+        ? Math.max(0, Math.floor((nowMs - Date.parse(orderAt)) / 86_400_000))
+        : 0;
+
+    const r = classifyHandoff({
+      isPreseason: o.isPreseason === true,
+      released: o.navStatus === 1,
+      ediSent: e?.sent === true,
+      ediAcked: e?.acked === true,
+      ediDocExists: e !== undefined,
+      activeHoldReason: holdByOrder.get(orderNo) ?? null,
+      autoReleaseSkipped: skippedSet.has(orderNo),
+      hasStock: skus.some((s) => (availBySku.get(s) ?? 0) > 0),
+      ageDays,
+    });
+    results.push(r);
+    byState[r.state] = (byState[r.state] ?? 0) + 1;
+    byOwner[r.owner] = (byOwner[r.owner] ?? 0) + 1;
+  }
+
+  const roll = rollupHandoff(results);
+  const verdict: Verdict =
+    roll.verdict === 'red' ? 'red' : roll.verdict === 'amber' ? 'amber' : 'green';
+
+  return {
+    pipe: 'order_handoff',
+    pipe_verdict: verdict,
+    freshness_verdict: verdict,
+    watermark_lag_s: null,
+    last_progress_at: null,
+    liveness_verdict: verdict,
+    heartbeat_at: null,
+    heartbeat_age_s: null,
+    detail: {
+      // Only these are OUR pipeline defects. This is the number that replaces the old
+      // time-threshold "unhealthy" count.
+      defects: roll.defects,
+      // Real work, but owned by a named team (Finance / CS) or by engineering (CU 5790).
+      owned_elsewhere: roll.ownedElsewhere,
+      // With Holman, in flight, or a genuine backorder. Not a defect.
+      healthy: roll.healthy,
+      // Preseason, graded on stock coverage instead of dates.
+      excluded_preseason: roll.excluded,
+      by_state: byState,
+      by_owner: byOwner,
+    } as unknown as Record<string, unknown>,
   };
 }
 
@@ -517,6 +626,7 @@ export async function computePipelines(sources: Sources): Promise<PipelineHealth
     computeAllocatorPipeline(sources),      // Unit 4
     computeOosHeldPipeline(sources),        // WI1 (#87)
     computeFsLocationDivergencePipeline(sources), // WI2 (#88)
+    computeOrderHandoffPipeline(sources),   // reshaped, defect-based order health
   ]);
   const real = new Map<string, PipelineHealth>(landed.map((p) => [p.pipe, p]));
   return PIPES.map((p) => real.get(p) ?? placeholderPipe(p));

@@ -376,3 +376,10 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
     scroll-behavior: auto !important;
   }
 }
+
+/* Universal Order panel (modal) */
+.rm-order { font-size: 13px; }
+.rm-li-price { margin-left: auto; opacity: 0.85; }
+.rm-order-foot { display: flex; gap: 16px; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.08); }
+.rm-order-total { font-weight: 600; }
+.rm-order-status { text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.8; }

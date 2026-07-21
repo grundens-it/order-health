@@ -20,8 +20,10 @@ import {
   fetchShopifyOrderLineItems,
   fetchStuckStaging,
   fetchStuckStagingDuplicates,
+  orderInfoFrom,
   triggerRemediation,
   type DiagnosticEnvelope,
+  type OrderInfo,
   type OrderLineItem,
 } from '../api';
 
@@ -844,6 +846,78 @@ function lineItemsFrom(data: unknown): OrderLineItem[] {
   return [];
 }
 
+// The universal ORDER panel: shown on every order-level modal. Auto-loads the full
+// Shopify order (every line with SKU, qty, name, unit price) plus the order total and
+// fulfillment status, so an operator sees the whole order at a glance instead of one
+// SKU. Read-only; degrades quietly if the order read does not respond.
+function OrderPanel({ orderId }: { orderId: string }): JSX.Element {
+  const [state, setState] = useState<'loading' | 'ok' | 'error'>('loading');
+  const [info, setInfo] = useState<OrderInfo | null>(null);
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const res = await fetchShopifyOrderLineItems(orderId);
+        const oi = orderInfoFrom(res.data);
+        if (!live) return;
+        setInfo(oi);
+        setState(oi === null ? 'error' : 'ok');
+      } catch {
+        if (live) setState('error');
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [orderId]);
+
+  return (
+    <section className="rm-section" aria-labelledby="rm-order-h">
+      <h4 id="rm-order-h" className="rm-sec-h">
+        Order
+      </h4>
+      {state === 'loading' && (
+        <div className="rm-diag-body rm-diag-muted" role="status">
+          loading order...
+        </div>
+      )}
+      {state === 'error' && (
+        <div className="rm-diag-body rm-diag-muted" role="status">
+          order detail unavailable (the Shopify order read did not respond)
+        </div>
+      )}
+      {state === 'ok' && info !== null && (
+        <div className="rm-order">
+          <ul className="rm-li-list">
+            {info.line_items.length === 0 ? (
+              <li className="rm-diag-muted">No line items on this order.</li>
+            ) : (
+              info.line_items.map((li, i) => (
+                <li className="rm-li-row" key={`${li.sku}-${i}`}>
+                  <span className="rm-li-sku mono">{li.sku.length > 0 ? li.sku : '(no SKU)'}</span>
+                  <span className="rm-li-qty mono">x{li.quantity}</span>
+                  <span className="rm-li-name">{li.name}</span>
+                  {li.unit_price !== null && <span className="rm-li-price mono">{li.unit_price}</span>}
+                </li>
+              ))
+            )}
+          </ul>
+          <div className="rm-order-foot">
+            {info.order_total !== null && (
+              <span className="rm-order-total">
+                Total {info.currency ?? ''} {info.order_total}
+              </span>
+            )}
+            {info.fulfillment_status !== null && (
+              <span className="rm-order-status">{info.fulfillment_status}</span>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 // The "Line items" DIAGNOSE read for an OOS-held order: a Run button that fetches the
 // order's SKUs (the held-SKU field is often blank, especially for Not-in-NAV orders)
 // and renders each line as SKU + qty + name. Each SKU is clickable and fills the Held
@@ -1257,6 +1331,11 @@ export function RemediationModal({
               )}
             </div>
           </section>
+
+          {/* ORDER - universal on every order-level modal (all lines + total) */}
+          {numericOrderId(subject.orderId) !== null && (
+            <OrderPanel orderId={numericOrderId(subject.orderId) as string} />
+          )}
 
           {/* DIAGNOSE */}
           <section className="rm-section" aria-labelledby="rm-diag-h">

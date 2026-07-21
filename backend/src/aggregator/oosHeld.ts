@@ -109,6 +109,13 @@ export const FORWARD_SYNC_REPLAY_TOOL = 'forward_sync_replay';
 export const NAV_LINE_ADD_TOOL = 'oos_held_nav_line_add';
 export const STALE_HOLD_CLEAR_TOOL = 'oos_held_stale_clear';
 
+// The dropped SKU parsed from last_detail is a STYLE token (e.g. "50625-425"),
+// while NAV line/shipment SKUs are full item numbers (e.g. "50625-425-0018"). Match
+// by prefix so a shipped/present full SKU is recognized as the held style.
+function skuPresent(presentSkus: string[], droppedSku: string): boolean {
+  return presentSkus.some((s) => s === droppedSku || s.startsWith(droppedSku));
+}
+
 export function routeHeldOrder(facts: HeldNavFacts): HeldRoute {
   // The "present" set is evaluated ACROSS ALL LINES of the order: a SKU counts as
   // present if it is on an open NAV leg OR already shipped. This is the fix for
@@ -125,12 +132,28 @@ export function routeHeldOrder(facts: HeldNavFacts): HeldRoute {
   // open leg NOR a shipment: that line was DROPPED at intake (oversold) and never
   // staged. A whole-order re-drive returns DuplicateSkip and no-ops, so this routes
   // to creating the missing NAV leg, NEVER to forward_sync_replay.
-  if (facts.droppedSku !== null && !presentSkus.includes(facts.droppedSku)) {
+  if (facts.droppedSku !== null && !skuPresent(presentSkus, facts.droppedSku)) {
     return { bucket: 'in_nav_line_missing', toolId: NAV_LINE_ADD_TOOL };
   }
   // In NAV with the held line present (open or shipped): the order reached NAV with
   // this line; the hold record is stale. An ops step verifies and clears it.
   return { bucket: 'in_nav_line_present', toolId: STALE_HOLD_CLEAR_TOOL };
+}
+
+// NAV is the final source of truth. An order NAV shows as COMPLETE (posted
+// shipment(s) exist, no outstanding open lines remain, and the held line's SKU
+// itself shipped or is unknown) is done regardless of a lingering middleware hold
+// record. Callers mark such rows resolved so a fully shipped + invoiced order stops
+// driving the health verdict red (kills the false positives like SP-322580). A
+// partially-shipped order with a genuinely dropped line (SP-322494) is NOT complete:
+// its dropped SKU is on no shipment, so this returns false and it stays actionable.
+export function isNavComplete(facts: HeldNavFacts): boolean {
+  const shipped = facts.shippedSkus ?? [];
+  if (!facts.inNav) return false;
+  if (shipped.length === 0) return false;      // nothing posted => not complete
+  if (facts.navLineSkus.length > 0) return false; // still has open outstanding lines
+  if (facts.droppedSku === null) return true;  // nothing outstanding, no known dropped line
+  return skuPresent(shipped, facts.droppedSku); // the held line itself shipped
 }
 
 // Enrich a held order with its WI3 bucket + routed tool from the NAV-join facts.

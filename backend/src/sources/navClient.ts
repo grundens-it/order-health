@@ -57,6 +57,12 @@ export interface NavOrderLifecycleRow {
   // 5 = Return Order. Happy Returns are Document Type 5 (No_ like "HR-...", empty
   // customer); they are NOT outbound stalls and must never be graded awaiting_ship.
   documentType: number | null;
+  // Reshaped health model: preseason is excluded from active order health entirely,
+  // and released state gates whether a missing 940 is a defect or simply not due yet.
+  // Optional so existing seeded fixtures stay valid; absent reads as "not known".
+  isPreseason?: boolean | null; // [Preseason Order]
+  navStatus?: number | null;    // [Status] 0 = Open, 1 = Released
+  orderAt?: string | null;      // [Order Date], for age without assuming a channel
 }
 
 // Round 3 (Unit 1). One outstanding sales-order line, used to map an awaiting_ship
@@ -123,6 +129,20 @@ export interface NavHoldRow {
   enteredBy: string | null;      // [Entered By]
   released: number | null;       // [Released] 0 = still holding
   autoEntry: number | null;      // [Auto Entry] 1 = raised by the release checker
+}
+
+// BULK reads backing the reshaped health model (one row per order, not per lookup).
+// Holman handoff state for many orders at once.
+export interface NavEdiHandoffRow {
+  orderNo: string | null;
+  sent: number | null;   // 1 = a 940 was transmitted
+  acked: number | null;  // 1 = the 997 came back
+}
+
+// The active (unreleased) hold on an order, if any. Names the owning team.
+export interface NavHoldSummaryRow {
+  orderNo: string | null;
+  reasonCode: string | null;
 }
 
 // Unit 3b (inventory dry-run reconstruction). Current NAV available-to-promise
@@ -206,6 +226,12 @@ export interface NavClient {
   getSplitShipTrace(orderNo: string): Promise<NavTraceRow[]>;
   // Order holds with reason codes (names the owning team for an unreleased order).
   getOrderHolds(orderNo: string): Promise<NavHoldRow[]>;
+  // BULK, for the reshaped health model: Holman 940 handoff state per order.
+  getEdiHandoffBulk(sinceDays: number): Promise<NavEdiHandoffRow[]>;
+  // BULK: active hold reason per order (names the owning team).
+  getActiveHoldsBulk(): Promise<NavHoldSummaryRow[]>;
+  // BULK: orders whose autorelease was skipped (EL- / pending CU 5790).
+  getAutoReleaseSkippedBulk(): Promise<string[]>;
   // Read-only SQL passthrough for curated templates (design.md section 2).
   queryReadOnly<T>(templateName: string, params?: Record<string, unknown>): Promise<T[]>;
 }
@@ -266,6 +292,9 @@ export interface NavQueries {
   ediSendStatus: string;         // Lanham EDI outbound docs (the Holman 940) for one order
   splitShipTrace: string;        // NAV allocator/routing decision log for one order
   orderHolds: string;            // Active + historical holds with reason codes for one order
+  ediHandoffBulk: string;        // Holman 940 sent/acked state, one row per order
+  activeHoldsBulk: string;       // Active hold reason, one row per order
+  autoReleaseSkippedBulk: string; // Orders whose autorelease was skipped (EL- / CU 5790)
 }
 
 export function buildQueries(company: string): NavQueries {
@@ -307,6 +336,7 @@ ORDER BY [Entry No_] DESC;`,
     orderLifecycle: `SELECT TOP (@limit) h.[No_] AS navOrderNo, h.[Sell-to Customer No_] AS customerRef,
        h.[Order Date] AS orderDate, h.[WebId] AS webId, h.[WebOrder] AS webOrder,
        h.[Document Type] AS documentType,
+       CAST(h.[Preseason Order] AS int) AS isPreseason, h.[Status] AS navStatus,
        st.[Status] AS navStagingStatus,
        (SELECT MAX(sh.[Posting Date]) FROM ${shipment} sh WHERE sh.[Order No_] = h.[No_]) AS navShipmentAt
 FROM ${salesHeader} h
@@ -411,6 +441,24 @@ ORDER BY [Entry No_];`,
 FROM ${holdEntry}
 WHERE [Document No_] = @orderNo AND [Document Type] = 1
 ORDER BY [Entry No_] DESC;`,
+    // BULK: Holman 940 handoff state per order. Bounded by @sinceDays so this stays a
+    // small read against a table that holds full history (400k+ documents).
+    ediHandoffBulk: `SELECT [Document No_] AS orderNo,
+       MAX(CAST([Document Sent] AS int)) AS sent,
+       MAX([Funct_ Group Ack_ Status]) AS acked
+FROM ${ediSend}
+WHERE [Trade Partner No_] = '2538727140' AND [EDI Document No_] = '940'
+  AND [Created Date] > DATEADD(day, -@sinceDays, GETDATE())
+GROUP BY [Document No_];`,
+    // BULK: the active (unreleased) hold reason per order. Names the owning team.
+    activeHoldsBulk: `SELECT [Document No_] AS orderNo, MAX([Hold Reason Code]) AS reasonCode
+FROM ${holdEntry}
+WHERE [Document Type] = 1 AND ISNULL([Released], 0) = 0
+GROUP BY [Document No_];`,
+    // BULK: orders whose autorelease was intentionally skipped (EL- / pending CU 5790).
+    autoReleaseSkippedBulk: `SELECT DISTINCT [Nav Order No_] AS orderNo
+FROM ${splitTrace}
+WHERE [Decision Point] = 'EL.NoHoldNoRelease';`,
   };
 }
 
@@ -520,6 +568,9 @@ export function mapOrderLifecycleRow(row: Row): NavOrderLifecycleRow {
     backSyncAt: null,
     missedBackSync: false,
     documentType: toNum(row.documentType),
+    isPreseason: row.isPreseason === undefined ? null : toNum(row.isPreseason) === 1,
+    navStatus: toNum(row.navStatus),
+    orderAt,
   };
 }
 
@@ -554,6 +605,21 @@ export function mapEdiSendRow(row: Row): NavEdiSendRow {
     sentDate: toIso(row.sentDate),
     groupAck: toNum(row.groupAck),
     createdDate: toIso(row.createdDate),
+  };
+}
+
+export function mapEdiHandoffRow(row: Row): NavEdiHandoffRow {
+  return {
+    orderNo: toStr(row.orderNo),
+    sent: toNum(row.sent),
+    acked: toNum(row.acked),
+  };
+}
+
+export function mapHoldSummaryRow(row: Row): NavHoldSummaryRow {
+  return {
+    orderNo: toStr(row.orderNo),
+    reasonCode: toStr(row.reasonCode),
   };
 }
 
@@ -744,6 +810,18 @@ export class NavClientStub implements NavClient {
   }
   async getOrderHolds(orderNo: string): Promise<NavHoldRow[]> {
     this.note(`order holds (${orderNo})`);
+    return [];
+  }
+  async getEdiHandoffBulk(sinceDays: number): Promise<NavEdiHandoffRow[]> {
+    this.note(`edi handoff bulk (${sinceDays}d)`);
+    return [];
+  }
+  async getActiveHoldsBulk(): Promise<NavHoldSummaryRow[]> {
+    this.note('active holds bulk');
+    return [];
+  }
+  async getAutoReleaseSkippedBulk(): Promise<string[]> {
+    this.note('autorelease skipped bulk');
     return [];
   }
   async queryReadOnly<T>(templateName: string): Promise<T[]> {
@@ -944,6 +1022,30 @@ class NavClientLive implements NavClient {
       return rows.map(mapHoldRow);
     } catch (err) {
       return this.degrade('order holds', err, this.stub.getOrderHolds(orderNo));
+    }
+  }
+  async getEdiHandoffBulk(sinceDays: number): Promise<NavEdiHandoffRow[]> {
+    try {
+      const rows = await this.select(this.queries.ediHandoffBulk, { sinceDays });
+      return rows.map(mapEdiHandoffRow);
+    } catch (err) {
+      return this.degrade('edi handoff bulk', err, this.stub.getEdiHandoffBulk(sinceDays));
+    }
+  }
+  async getActiveHoldsBulk(): Promise<NavHoldSummaryRow[]> {
+    try {
+      const rows = await this.select(this.queries.activeHoldsBulk);
+      return rows.map(mapHoldSummaryRow);
+    } catch (err) {
+      return this.degrade('active holds bulk', err, this.stub.getActiveHoldsBulk());
+    }
+  }
+  async getAutoReleaseSkippedBulk(): Promise<string[]> {
+    try {
+      const rows = await this.select(this.queries.autoReleaseSkippedBulk);
+      return rows.map((r) => toStr(r.orderNo)).filter((x): x is string => x !== null);
+    } catch (err) {
+      return this.degrade('autorelease skipped bulk', err, this.stub.getAutoReleaseSkippedBulk());
     }
   }
 

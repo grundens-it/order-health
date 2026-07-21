@@ -276,6 +276,27 @@ export const REMEDIATION_TOOLS: readonly RemediationTool[] = [
     ],
   },
   {
+    id: 'order_handoff_recut_940',
+    name: 'Re-cut the Holman EDI 940 for this order',
+    description:
+      'The order is released with stock in NAV but no Lanham EDI 940 ever reached Holman Logistics (trade partner 2538727140), so the 3PL never received it. A middleware re-drive does NOT fix this: the order is already in NAV, so forward-sync/replay returns DuplicateSkip and no-ops. There is no API to force an EDI send, so the 940 is re-cut in NAV.',
+    kind: 'ops_runbook',
+    runbook: {
+      ref: 'runbooks/order-handoff-recut-940.md',
+      command:
+        'In NAV: confirm the order is Released and has no 940 in E.D.I. Send Document Hdr., then re-release it so the 940 is generated; confirm Document Sent = 1 and that the 997 group ack returns',
+      diagnostic: 'GET /api/diagnostics/edi-handoff?orderNo=',
+    },
+    writeCapable: true,
+    steps: [
+      'Run the EDI handoff diagnosis to confirm there is genuinely no 940 for this order (no row for trade partner 2538727140, document 940). If a 940 exists and is sent and acknowledged, the order is already in Holman\'s court and nothing is wrong.',
+      'Confirm in NAV that the order is Released and still has outstanding lines with stock. If it is Open, it was never released and this is not a handoff failure: check the order holds diagnosis for the owning team instead.',
+      'Do NOT re-drive the order through the middleware. It is already in NAV, so forward-sync/replay returns DuplicateSkip and changes nothing.',
+      'In NAV, re-release the order (reopen then release) so the Lanham EDI 940 is generated for Holman.',
+      'Re-run the EDI handoff diagnosis and confirm Document Sent = 1 with a Sent Date, then that the 997 functional acknowledgment returns. Once acked, the order is in Holman\'s court and is healthy.',
+    ],
+  },
+  {
     id: 'atomic_watcher_restart',
     name: 'Atomic restart of the middleware watcher',
     description:
@@ -919,6 +940,19 @@ export const REMEDIATION_MAPPINGS: readonly RemediationMapping[] = [
     appliesWhen: 'A WIDESPREAD divergence: sweep the whole FS location, re-flooring every diverged SKU.',
     toolId: 'fs_location_sweep',
     primary: false,
+  },
+  // order_handoff (the reshaped, defect-based order health). The ONLY red this pipe
+  // raises is a FAILED HANDOFF to Holman: released with stock but no EDI 940, or a 940
+  // created and never sent. Re-driving the order makes it release and cut its 940.
+  // Everything else this pipe reports is owned elsewhere and must NEVER route here:
+  // an acked 940 is with Holman (their SLA), holds belong to Finance / Customer
+  // Service, the EL- skip is the CU 5790 code defect, and no-stock is a backorder.
+  {
+    subjectKind: 'pipe',
+    subjectKey: 'order_handoff',
+    appliesWhen: 'Released with stock but the EDI 940 never reached Holman; re-cut the 940 in NAV.',
+    toolId: 'order_handoff_recut_940',
+    primary: true,
   },
 ] as const;
 

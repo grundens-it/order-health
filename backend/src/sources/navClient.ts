@@ -70,6 +70,18 @@ export interface NavOrderLine {
   outstandingQty: number | null; // [Outstanding Quantity]
 }
 
+// One IABC row for a SKU at a location/channel: on-hand and available-to-ship (ATP)
+// from GRUS$ItemAvailabilityByChannel. Lets the modal show inventory across HF1FTZ
+// AND TAC with both on-hand and available-to-ship.
+export interface NavIabcRow {
+  sku: string | null;
+  location: string | null;
+  channel: string | null;
+  onHand: number | null;    // [Qty On Hand]
+  available: number | null; // [Qty Available] (available to ship)
+  earliestShipDate: string | null; // [Earliest Shipment Date] (1753 => never)
+}
+
 // Unit 3b (inventory dry-run reconstruction). Current NAV available-to-promise
 // for one (sku, NAV location code) pair. This is the SAME number the middleware's
 // inventory-sync cron pushes to Shopify (the corrected available-to-promise,
@@ -143,6 +155,8 @@ export interface NavClient {
   // Per-line: SKUs already shipped for orders (GRUS$Sales Shipment Line), so a
   // partially-shipped order is recognized as in-NAV across all of its lines.
   getShippedOrderLines(limit: number): Promise<NavOrderLine[]>;
+  // Per-SKU IABC on-hand + available-to-ship across HF1FTZ + TAC (for the modal).
+  getIabcBySku(sku: string): Promise<NavIabcRow[]>;
   // Read-only SQL passthrough for curated templates (design.md section 2).
   queryReadOnly<T>(templateName: string, params?: Record<string, unknown>): Promise<T[]>;
 }
@@ -199,6 +213,7 @@ export interface NavQueries {
   newestDtcShipment: string; // Unit 2: posting time of the newest DTC (WebId) shipment
   outstandingOrderLines: string; // Round 3: outstanding item lines for open sales orders
   shippedOrderLines: string;     // Per-line: SKUs already shipped (GRUS$Sales Shipment Line)
+  iabcAvailability: string;      // Per-SKU on-hand + available-to-ship across HF1FTZ + TAC
 }
 
 export function buildQueries(company: string): NavQueries {
@@ -209,6 +224,7 @@ export function buildQueries(company: string): NavQueries {
   const staging = navTable(company, 'Sales Header Staging');
   const shipment = navTable(company, 'Sales Shipment Header');
   const shipmentLine = navTable(company, 'Sales Shipment Line');
+  const iabc = navTable(company, 'ItemAvailabilityByChannel');
   const itemLedger = navTable(company, 'Item Ledger Entry');
 
   return {
@@ -302,6 +318,15 @@ ORDER BY sl.[Document No_] DESC;`,
 FROM ${shipmentLine} sl
 WHERE sl.[Type] = 2 AND sl.[Quantity] <> 0
 ORDER BY sl.[Posting Date] DESC;`,
+    // Per-SKU IABC across the two physical warehouses HF1FTZ (Holman) + TAC:
+    // on-hand ([Qty On Hand]) and available-to-ship ([Qty Available]) per channel.
+    // Lets the modal show where TAC has inventory, not just HF1FTZ, with both numbers.
+    iabcAvailability: `SELECT [No_] AS sku, [Location] AS location, [Channel] AS channel,
+       [Qty On Hand] AS onHand, [Qty Available] AS available,
+       [Earliest Shipment Date] AS earliestShipDate
+FROM ${iabc}
+WHERE [No_] = @sku AND [Location] IN ('HF1FTZ', 'TAC')
+ORDER BY [Location], [Channel];`,
   };
 }
 
@@ -421,6 +446,17 @@ export function mapOrderLine(row: Row): NavOrderLine {
     sku: toStr(row.sku),
     location: toStr(row.location),
     outstandingQty: toNum(row.outstandingQty),
+  };
+}
+
+export function mapIabcRow(row: Row): NavIabcRow {
+  return {
+    sku: toStr(row.sku),
+    location: toStr(row.location),
+    channel: toStr(row.channel),
+    onHand: toNum(row.onHand),
+    available: toNum(row.available),
+    earliestShipDate: toIso(row.earliestShipDate),
   };
 }
 
@@ -573,6 +609,10 @@ export class NavClientStub implements NavClient {
   }
   async getShippedOrderLines(limit: number): Promise<NavOrderLine[]> {
     this.note(`shipped order lines (limit ${limit})`);
+    return [];
+  }
+  async getIabcBySku(sku: string): Promise<NavIabcRow[]> {
+    this.note(`iabc availability (${sku})`);
     return [];
   }
   async queryReadOnly<T>(templateName: string): Promise<T[]> {
@@ -741,6 +781,14 @@ class NavClientLive implements NavClient {
       return rows.map(mapOrderLine);
     } catch (err) {
       return this.degrade('shipped order lines', err, this.stub.getShippedOrderLines(limit));
+    }
+  }
+  async getIabcBySku(sku: string): Promise<NavIabcRow[]> {
+    try {
+      const rows = await this.select(this.queries.iabcAvailability, { sku });
+      return rows.map(mapIabcRow);
+    } catch (err) {
+      return this.degrade('iabc availability', err, this.stub.getIabcBySku(sku));
     }
   }
 

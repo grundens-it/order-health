@@ -27,6 +27,7 @@ import { requireRole } from '../auth/context';
 import { roleGate } from '../auth/principal';
 import { buildUrl } from '../sources/middlewareClient';
 import { buildOrderInfo } from './orderLineItems';
+import { createNavClient } from '../sources/navClient';
 
 // Per-request timeout for the read-only diagnostic proxies. A stalled middleware
 // must fail fast into a 502, never block the operator's modal.
@@ -95,6 +96,9 @@ function assertOperator(req: FastifyRequest): boolean {
 type TriggerBody = RemediationTriggerInput;
 
 export async function registerRemediationRoutes(app: FastifyInstance): Promise<void> {
+  // A dedicated read-only NAV client for the NAV-backed diagnostics (IABC
+  // availability across HF1FTZ + TAC). Lazily opens its own pool on first query.
+  const nav = createNavClient();
   // The runbook registry, read-only, with as_of (firm rule). The modal reads this
   // to name the mapped tool for a red signal; it never re-declares the runbook.
   app.get('/api/remediation/registry', async (): Promise<RemediationRegistryResponse> => ({
@@ -230,6 +234,29 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
         return reply.code(400).send({ error: 'shopify-order id must be a numeric Shopify order id' });
       }
       return proxyMiddleware(reply, 'GET', `/api/shopify/order/${id}`, undefined, buildOrderInfo);
+    },
+  );
+
+  // GET /api/diagnostics/nav-availability?sku= -> NAV IABC (read-only, direct from
+  // NAV, not the middleware). Returns on-hand + available-to-ship for the SKU across
+  // BOTH physical warehouses (HF1FTZ / Holman and TAC), per channel, so the modal can
+  // show where TAC has inventory, not just HF1FTZ, with available-to-ship next to
+  // on-hand. NAV is the source of truth.
+  app.get(
+    '/api/diagnostics/nav-availability',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      const sku = ((req.query as { sku?: string }).sku ?? '').trim();
+      if (sku.length === 0) {
+        return reply.code(400).send({ error: 'sku is required' });
+      }
+      try {
+        const rows = await nav.getIabcBySku(sku);
+        return reply.send({ sku, rows });
+      } catch {
+        return reply.code(502).send({ error: 'nav availability read did not respond' });
+      }
     },
   );
 

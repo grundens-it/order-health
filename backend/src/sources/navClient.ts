@@ -140,6 +140,9 @@ export interface NavClient {
   // Type 2, Outstanding Quantity <> 0), bounded, so an awaiting_ship order can be
   // mapped to its SKU(s) for the FS-vs-warehouse reconciliation.
   getOutstandingOrderLines(limit: number): Promise<NavOrderLine[]>;
+  // Per-line: SKUs already shipped for orders (GRUS$Sales Shipment Line), so a
+  // partially-shipped order is recognized as in-NAV across all of its lines.
+  getShippedOrderLines(limit: number): Promise<NavOrderLine[]>;
   // Read-only SQL passthrough for curated templates (design.md section 2).
   queryReadOnly<T>(templateName: string, params?: Record<string, unknown>): Promise<T[]>;
 }
@@ -195,6 +198,7 @@ export interface NavQueries {
   pendingStagingCount: string; // Unit 1: count of Status = 0 pending-promotion staging rows
   newestDtcShipment: string; // Unit 2: posting time of the newest DTC (WebId) shipment
   outstandingOrderLines: string; // Round 3: outstanding item lines for open sales orders
+  shippedOrderLines: string;     // Per-line: SKUs already shipped (GRUS$Sales Shipment Line)
 }
 
 export function buildQueries(company: string): NavQueries {
@@ -204,6 +208,7 @@ export function buildQueries(company: string): NavQueries {
   const salesLine = navTable(company, 'Sales Line');
   const staging = navTable(company, 'Sales Header Staging');
   const shipment = navTable(company, 'Sales Shipment Header');
+  const shipmentLine = navTable(company, 'Sales Shipment Line');
   const itemLedger = navTable(company, 'Item Ledger Entry');
 
   return {
@@ -288,6 +293,15 @@ ORDER BY sh.[Posting Date] DESC;`,
 FROM ${salesLine} sl
 WHERE sl.[Document Type] = 1 AND sl.[Type] = 2 AND sl.[Outstanding Quantity] <> 0
 ORDER BY sl.[Document No_] DESC;`,
+    // Per-line NAV presence across ALL lines: SKUs already shipped for an order,
+    // from posted GRUS$Sales Shipment Line ([Order No_] is the NAV leg, [No_] the
+    // item). Lets a partially-shipped order be recognized as in-NAV and its shipped
+    // lines excluded from the "dropped line" test.
+    shippedOrderLines: `SELECT TOP (@limit) sl.[Order No_] AS orderNo, sl.[No_] AS sku,
+       sl.[Location Code] AS location, sl.[Quantity] AS outstandingQty
+FROM ${shipmentLine} sl
+WHERE sl.[Type] = 2 AND sl.[Quantity] <> 0
+ORDER BY sl.[Posting Date] DESC;`,
   };
 }
 
@@ -557,6 +571,10 @@ export class NavClientStub implements NavClient {
     this.note(`outstanding order lines (limit ${limit})`);
     return [];
   }
+  async getShippedOrderLines(limit: number): Promise<NavOrderLine[]> {
+    this.note(`shipped order lines (limit ${limit})`);
+    return [];
+  }
   async queryReadOnly<T>(templateName: string): Promise<T[]> {
     this.note(`read-only template ${templateName}`);
     return [];
@@ -715,6 +733,14 @@ class NavClientLive implements NavClient {
       return rows.map(mapOrderLine);
     } catch (err) {
       return this.degrade('outstanding order lines', err, this.stub.getOutstandingOrderLines(limit));
+    }
+  }
+  async getShippedOrderLines(limit: number): Promise<NavOrderLine[]> {
+    try {
+      const rows = await this.select(this.queries.shippedOrderLines, { limit });
+      return rows.map(mapOrderLine);
+    } catch (err) {
+      return this.degrade('shipped order lines', err, this.stub.getShippedOrderLines(limit));
     }
   }
 

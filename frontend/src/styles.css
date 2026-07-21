@@ -165,6 +165,26 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .tag.owner { background: transparent; border: 1px solid var(--line); color: var(--faint); font-weight: 600; }
 .tag.owner.holman { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
 .tag.owner.grundens_ops { background: var(--red-bg); border-color: var(--red-bd); color: var(--red); }
+/* --- Order lookup dossier (ADR-0012) --------------------------------------- */
+.dossier { display: grid; gap: 14px; margin-top: 8px; }
+.dsx-head { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.dsx-owner { font-size: 12.5px; color: var(--faint); }
+.dsx-reason { flex-basis: 100%; margin: 4px 0 0; font-size: 13px; color: var(--ink); }
+.dsx-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; }
+.dsx-card h4 { margin: 0 0 8px; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+.dsx-empty { margin: 0; font-size: 12.5px; color: var(--faint); font-style: italic; }
+.dsx-kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px 18px; margin: 0; }
+.dsx-kv > div { display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line2); padding: 3px 0; }
+.dsx-kv dt { color: var(--faint); font-size: 12px; }
+.dsx-kv dd { margin: 0; font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.dsx-tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.dsx-tbl th { text-align: left; color: var(--faint); font-weight: 600; font-size: 11px; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+.dsx-tbl td { padding: 4px 8px; border-bottom: 1px solid var(--line2); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.dsx-sources { display: flex; flex-wrap: wrap; gap: 6px; }
+.dsx-src { font-size: 10.5px; padding: 2px 7px; border-radius: 4px; border: 1px solid var(--line); color: var(--faint); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.dsx-src.ok { border-color: var(--line); color: var(--faint); }
+.dsx-src.degraded { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
+.dsx-src.not_found { border-style: dashed; }
 /* --- Unit 3 monitors (price-sync, NAV job queue, Shopify webhooks) --------- */
 /* Two-card layout for the smaller monitors (they carry two verdict cards, not
    inventory-sync's three). Reuses the .ip-card / .ip-note / .ip-panel tokens. */

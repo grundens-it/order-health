@@ -3,6 +3,7 @@
 import type {
   AuthMeResponse,
   ChannelFilter,
+  OrderDossierResponse,
   OrdersResponse,
   PipelinesResponse,
   RemediationArmStateResponse,
@@ -54,6 +55,14 @@ export function fetchOrders(channel: ChannelFilter): Promise<OrdersResponse> {
 
 export function fetchRollup(): Promise<RollupResponse> {
   return getJson<RollupResponse>('/api/health/rollup');
+}
+
+// The single-order dossier (ADR-0012): NAV + Shopify + middleware composed for one
+// order under one as_of, PII-stripped and verdict-stamped. A 404 means no such order.
+export function fetchOrderDossier(orderNo: string): Promise<OrderDossierResponse> {
+  return getJson<OrderDossierResponse>(
+    `/api/orders/${encodeURIComponent(orderNo.trim())}/dossier`,
+  );
 }
 
 // The remediation runbook registry (read-only): the modal reads this to name the

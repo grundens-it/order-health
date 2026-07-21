@@ -7,6 +7,7 @@ import Fastify from 'fastify';
 import { config } from './config';
 import { registerHealthRoutes } from './api/health';
 import { registerRemediationRoutes } from './api/remediation';
+import { registerOrderDossierRoute } from './api/orderDossier';
 import { registerAdminRoutes } from './api/admin';
 import { registerStaticServing } from './api/static';
 import { startAggregator } from './aggregator';
@@ -29,6 +30,9 @@ async function main(): Promise<void> {
 
   await registerHealthRoutes(app);
   await registerRemediationRoutes(app);
+  // Single-order dossier (ADR-0012): read-only composition of NAV + Shopify +
+  // middleware for one order, PII-stripped and verdict-stamped.
+  await registerOrderDossierRoute(app);
   // Admin arm/disarm + kill-switch (issue #97) and /api/auth/me (issue #96).
   await registerAdminRoutes(app);
   // Production static serving of the built frontend (ADR-0011 single container).

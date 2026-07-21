@@ -21,6 +21,7 @@ import { JobQueuePanel } from './components/JobQueuePanel';
 import { ShopifyWebhookPanel } from './components/ShopifyWebhookPanel';
 import { AllocatorPanel } from './components/AllocatorPanel';
 import { OrderTable } from './components/OrderTable';
+import { OrderDossierView } from './components/OrderDossierView';
 import { ChannelFilter } from './components/ChannelFilter';
 
 // Tabbed shell, matching the demo: "Order Health" is the primary view (leadership
@@ -30,6 +31,7 @@ import { ChannelFilter } from './components/ChannelFilter';
 
 type TabKey =
   | 'orderhealth'
+  | 'lookup'
   | 'inventory'
   | 'backsync'
   | 'pricesync'
@@ -40,6 +42,7 @@ type TabKey =
 
 const INTERNAL_TABS: ReadonlyArray<readonly [TabKey, string]> = [
   ['orderhealth', 'Order Health'],
+  ['lookup', 'Order Lookup'],
   ['inventory', 'Inventory Sync'],
   ['backsync', 'Back-Sync'],
   ['pricesync', 'Price Sync'],
@@ -462,6 +465,8 @@ export function App(): JSX.Element {
             <OrderTable orders={shownOrders} onSelect={openOrderRemediation} />
           </>
         )}
+
+        {tab === 'lookup' && <OrderDossierView />}
 
         {tab === 'admin' && isAdmin && (
           <>

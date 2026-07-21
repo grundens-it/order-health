@@ -163,6 +163,103 @@ export const ORDER_HANDOFF_LABEL: Record<OrderHandoffState, string> = {
   in_flight: 'In flight',
 };
 
+// --- Single-order dossier (ADR-0012) ---------------------------------------
+// One order, every source we can reach, composed server-side under one as_of and
+// stamped with the same classifyHandoff verdict the board uses. This is the payload
+// the human search box renders and the future advisory agent (ADR-0013) consumes.
+// PII is stripped at the composition seam: no customer name, address, email, or
+// [Source Name]. Each block is independently nullable and the `sources` map records
+// whether each read was ok, degraded (reachable source errored), or not_found.
+
+export type DossierSourceStatus = 'ok' | 'degraded' | 'not_found';
+
+export interface OrderDossierIdentity {
+  channel: Channel | null;
+  nav_order_no: string | null;
+  shopify_order_id: string | null;
+  shopify_order_name: string | null; // human label e.g. "#1024"; never a customer name
+  order_at: string | null;
+  released: boolean | null;
+  preseason: boolean | null;
+  in_open_board: boolean;             // present in the open-orders board (vs closed/shipped)
+}
+
+export interface OrderDossierLine {
+  sku: string | null;
+  location: string | null;
+  outstanding: number | null;
+}
+
+export interface OrderDossierEdi {
+  present: boolean;      // a Holman 940 row exists at all
+  sent: boolean;         // Document Sent = 1
+  acked: boolean;        // Funct. Group Ack = 1 (the 997 came back)
+  sent_date: string | null;
+  created_date: string | null;
+}
+
+export interface OrderDossierHold {
+  reason_code: string | null;
+  owner: OrderHandoffOwner;  // derived from the reason code; never free-text comment
+  hold_date: string | null;
+  released: number | null;
+}
+
+export interface OrderDossierTraceRow {
+  entry_at: string | null;
+  decision_point: string | null;
+  item_no: string | null;
+  location_code: string | null;
+  branch_taken: string | null;
+  detail: string | null;     // allocator detail; [Source Name] is never selected upstream
+}
+
+export interface OrderDossierAvailabilityRow {
+  sku: string;
+  location: string;          // HF1FTZ (Holman) or TAC
+  channel: string | null;
+  on_hand: number | null;
+  available: number | null;  // available to ship (ATP)
+  earliest_ship_date: string | null;
+}
+
+// The Shopify order block, mirroring the backend buildOrderInfo output. Line items
+// and money only; no customer block is ever included.
+export interface OrderDossierShopifyLine {
+  sku: string;
+  quantity: number;
+  name: string;
+  unit_price: string | null;
+}
+export interface OrderDossierShopify {
+  line_items: OrderDossierShopifyLine[];
+  order_total: string | null;
+  subtotal: string | null;
+  currency: string | null;
+  financial_status: string | null;
+  fulfillment_status: string | null;
+}
+
+export interface OrderDossier {
+  order_no: string;                 // the resolved NAV order number the dossier keys on
+  as_of: string;
+  identity: OrderDossierIdentity | null;
+  handoff: (OrderHandoffDetail & { verdict: Verdict }) | null;
+  lines: OrderDossierLine[];
+  shipped_lines: OrderDossierLine[];
+  edi: OrderDossierEdi | null;
+  holds: OrderDossierHold[];
+  allocator: OrderDossierTraceRow[];
+  availability: OrderDossierAvailabilityRow[];
+  shopify: OrderDossierShopify | null;
+  sources: Record<string, DossierSourceStatus>;
+}
+
+export interface OrderDossierResponse {
+  as_of: string;
+  dossier: OrderDossier;
+}
+
 // Round 3 (Unit 1). Why an awaiting_ship order has not shipped, reconciled between
 // the Shopify Fulfillment Service (FS) location and NAV warehouse on-hand.
 //   fs_floor_at_zero : FS available < 0 while a NAV warehouse is stocked (> 0). The

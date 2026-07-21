@@ -159,6 +159,12 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .stage { font-size: 12.5px; }
 .tag { display: inline-block; margin-left: 7px; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 4px; letter-spacing: .03em; vertical-align: middle; }
 .tag.orphan { background: var(--red-bg); border: 1px solid var(--red-bd); color: var(--red); }
+/* Ownership tags. Neutral by default: they say WHOSE the order is, not how bad it is
+   (the verdict chip beside them already carries severity). Only our own defect is
+   coloured red, so a screenful of Holman backlog never reads as a pipeline failure. */
+.tag.owner { background: transparent; border: 1px solid var(--line); color: var(--faint); font-weight: 600; }
+.tag.owner.holman { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
+.tag.owner.grundens_ops { background: var(--red-bg); border-color: var(--red-bd); color: var(--red); }
 /* --- Unit 3 monitors (price-sync, NAV job queue, Shopify webhooks) --------- */
 /* Two-card layout for the smaller monitors (they carry two verdict cards, not
    inventory-sync's three). Reuses the .ip-card / .ip-note / .ip-panel tokens. */

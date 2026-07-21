@@ -112,7 +112,56 @@ export interface OrderHealth {
   // read API serves them from the order snapshot detail column (0002 migration).
   classification?: AwaitingShipClass | null;
   awaiting_ship_detail?: AwaitingShipDetail | null;
+  // Round 4: the defect-based handoff classification. This is what now DRIVES
+  // order_verdict; the legacy stage grading only supplies the stage dot. Optional /
+  // additive; served from the order snapshot detail column.
+  handoff?: OrderHandoffDetail | null;
 }
+
+// Who owns the next action on an order. Mirrors backend HandoffOwner.
+export type OrderHandoffOwner =
+  | 'holman'
+  | 'finance'
+  | 'customer_service'
+  | 'engineering'
+  | 'grundens_ops'
+  | 'none';
+
+// Mirrors backend HandoffState.
+export type OrderHandoffState =
+  | 'preseason'
+  | 'with_holman'
+  | 'holman_delayed'
+  | 'awaiting_ack'
+  | 'handoff_failed'
+  | 'held_finance'
+  | 'held_customer_service'
+  | 'blocked_code_defect'
+  | 'backorder'
+  | 'in_flight';
+
+export interface OrderHandoffDetail {
+  state: OrderHandoffState;
+  owner: OrderHandoffOwner;
+  reason: string;
+  // Short human label for the table cell, e.g. "With Holman", "Holman delay".
+  label: string;
+}
+
+// Table-cell labels, one per state. Kept beside the union so a new state cannot be
+// added without giving the UI something to render.
+export const ORDER_HANDOFF_LABEL: Record<OrderHandoffState, string> = {
+  preseason: 'Preseason',
+  with_holman: 'With Holman',
+  holman_delayed: 'Holman delay',
+  awaiting_ack: 'Awaiting 997',
+  handoff_failed: 'Handoff failed',
+  held_finance: 'Finance hold',
+  held_customer_service: 'CS hold',
+  blocked_code_defect: 'Code defect (CU 5790)',
+  backorder: 'Backorder',
+  in_flight: 'In flight',
+};
 
 // Round 3 (Unit 1). Why an awaiting_ship order has not shipped, reconciled between
 // the Shopify Fulfillment Service (FS) location and NAV warehouse on-hand.

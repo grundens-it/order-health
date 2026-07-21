@@ -39,6 +39,50 @@ test('Unit 1: an FS-floored awaiting_ship order classifies fs_floor_at_zero with
   assert.match(o.awaiting_ship_detail?.why ?? '', /FS floor-at-zero|re-floor/);
 });
 
+// --- Round 4: the ORDER VERDICT follows ownership, not the stage dot ---------
+// This is the fix for "100% of these are Holman delay": an order whose 940 was sent and
+// 997-acknowledged is not stuck, whatever its ship stage looks like. It is a risk once
+// it passes Holman's window, so amber, owned by Holman, never red and never re-driven.
+
+test('Round 4: an acked 940 past Holman\'s window grades AMBER with a Holman label, not red', async () => {
+  const now = Date.now();
+  const sources = makeSeededSources({
+    now,
+    orders: [stuckStagingDtcOrder('SP-322263-1', now)], // stage grading would call this red
+    orderLines: [{ orderNo: 'SP-322263-1', sku: 'C', location: 'HF1FTZ', outstandingQty: 1 }],
+    inventoryAvailability: [{ sku: 'C', location: 'HF1FTZ', availableQty: 12 }],
+    fsInventory: [{ sku: 'C', available: 4, onHand: 4, committed: 0 }], // FS healthy: not the floor bug
+    ediHandoff: [{ orderNo: 'SP-322263-1', sent: 1, acked: 1 }],
+  });
+  const orders = await computeOrders(sources);
+  const o = orders.find((x) => x.nav_order_no === 'SP-322263-1');
+  assert.ok(o);
+  assert.equal(o.order_verdict, 'amber');
+  assert.equal(o.handoff?.state, 'holman_delayed');
+  assert.equal(o.handoff?.owner, 'holman');
+  assert.equal(o.handoff?.label, 'Holman delay');
+  // Not "stuck": the oldest-stuck headline must not count someone else's backlog.
+  assert.equal(o.oldest_stuck_age_s, null);
+});
+
+test('Round 4: a released order with stock and no 940 at all stays RED and is ours', async () => {
+  const now = Date.now();
+  const sources = makeSeededSources({
+    now,
+    orders: [{ ...stuckStagingDtcOrder('SP-999999-1', now), navStatus: 1 }],
+    orderLines: [{ orderNo: 'SP-999999-1', sku: 'D', location: 'HF1FTZ', outstandingQty: 1 }],
+    inventoryAvailability: [{ sku: 'D', location: 'HF1FTZ', availableQty: 9 }],
+    fsInventory: [{ sku: 'D', available: 5, onHand: 5, committed: 0 }],
+    ediHandoff: [],
+  });
+  const orders = await computeOrders(sources);
+  const o = orders.find((x) => x.nav_order_no === 'SP-999999-1');
+  assert.ok(o);
+  assert.equal(o.order_verdict, 'red');
+  assert.equal(o.handoff?.state, 'handoff_failed');
+  assert.equal(o.handoff?.owner, 'grundens_ops');
+});
+
 test('Unit 1: an in-stock awaiting_ship order with FS available >= 0 classifies genuine_3pl_delay', async () => {
   const now = Date.now();
   const sources = makeSeededSources({

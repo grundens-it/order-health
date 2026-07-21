@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   ACK_GRACE_DAYS,
   HANDOFF_GRACE_DAYS,
+  HOLMAN_SLA_DAYS,
   classifyHandoff,
   holdOwnerFor,
   rollupHandoff,
@@ -30,21 +31,36 @@ function facts(over: Partial<HandoffFacts> = {}): HandoffFacts {
 
 // --- The headline rule: TRUST THE EDI --------------------------------------
 
-test('an acked 940 is healthy and owned by Holman, no matter how old', () => {
+test('an acked 940 is owned by Holman and never red, no matter how old', () => {
   for (const ageDays of [1, 15, 90]) {
     const r = classifyHandoff(facts({ ageDays }));
-    assert.equal(r.state, 'with_holman');
     assert.equal(r.owner, 'holman');
-    assert.equal(r.verdict, 'green', `age ${ageDays} must not turn red`);
+    assert.notEqual(r.verdict, 'red', `age ${ageDays} must not turn red`);
   }
 });
 
-test('an acked 940 stays healthy even when NAV still shows the header unreleased', () => {
+test('an acked 940 inside Holman\'s ship window is green', () => {
+  const r = classifyHandoff(facts({ ageDays: HOLMAN_SLA_DAYS }));
+  assert.equal(r.state, 'with_holman');
+  assert.equal(r.verdict, 'green');
+});
+
+// A Holman delay is a customer-facing RISK we want visible, but it is not our defect
+// and must never be counted as "stuck" or offered a re-drive.
+test('an acked 940 past Holman\'s ship window is AMBER risk, still owned by Holman', () => {
+  const r = classifyHandoff(facts({ ageDays: HOLMAN_SLA_DAYS + 1 }));
+  assert.equal(r.state, 'holman_delayed');
+  assert.equal(r.owner, 'holman');
+  assert.equal(r.verdict, 'amber');
+});
+
+test('an acked 940 stays non-red even when NAV still shows the header unreleased', () => {
   // Observed live: 197 orders had a sent+acked 940 but an Open-looking header.
   // EDI is the truth for handoff, not the header status.
   const r = classifyHandoff(facts({ released: false, ageDays: 40 }));
-  assert.equal(r.state, 'with_holman');
-  assert.equal(r.verdict, 'green');
+  assert.equal(r.state, 'holman_delayed');
+  assert.equal(r.owner, 'holman');
+  assert.notEqual(r.verdict, 'red');
 });
 
 test('age ALONE never makes anything red', () => {
@@ -167,26 +183,34 @@ test('a brand new order is in flight, not a defect', () => {
 
 test('rollup: only genuine defects drive red, preseason is excluded from the counts', () => {
   const rows = [
-    classifyHandoff(facts()),                                            // with Holman
-    classifyHandoff(facts({ ageDays: 40 })),                             // with Holman, old
+    classifyHandoff(facts({ ageDays: 1 })),                              // with Holman, in window
+    classifyHandoff(facts({ ageDays: 40 })),                             // Holman delay, amber risk
     classifyHandoff(facts({ isPreseason: true })),                       // excluded
     classifyHandoff(facts({ ediSent: false, ediAcked: false, ediDocExists: false, activeHoldReason: 'ACCTHOLD' })), // amber
     classifyHandoff(facts({ ediSent: false, ediAcked: false, ediDocExists: true })), // red
   ];
   const r = rollupHandoff(rows);
   assert.equal(r.defects, 1);
-  assert.equal(r.ownedElsewhere, 1);
-  assert.equal(r.healthy, 2);
+  assert.equal(r.ownedElsewhere, 2); // the Finance hold and the Holman delay
+  assert.equal(r.healthy, 1);
   assert.equal(r.excluded, 1);
   assert.equal(r.verdict, 'red');
 });
 
-test('rollup: a fleet that is entirely with-Holman is GREEN, however far behind Holman is', () => {
-  const rows = Array.from({ length: 900 }, () => classifyHandoff(facts({ ageDays: 45 })));
-  const r = rollupHandoff(rows);
-  assert.equal(r.defects, 0);
-  assert.equal(r.verdict, 'green');
-  assert.equal(r.healthy, 900);
+// A backlog sitting with Holman is NEVER our defect, so it never reds. Past their ship
+// window it is a risk worth seeing, so the fleet reads amber, not green.
+test('rollup: a fleet entirely with Holman never reds; past their window it is amber risk', () => {
+  const inWindow = Array.from({ length: 900 }, () => classifyHandoff(facts({ ageDays: 1 })));
+  const rIn = rollupHandoff(inWindow);
+  assert.equal(rIn.defects, 0);
+  assert.equal(rIn.verdict, 'green');
+  assert.equal(rIn.healthy, 900);
+
+  const late = Array.from({ length: 900 }, () => classifyHandoff(facts({ ageDays: 45 })));
+  const rLate = rollupHandoff(late);
+  assert.equal(rLate.defects, 0, 'Holman being behind is never OUR defect');
+  assert.equal(rLate.verdict, 'amber');
+  assert.equal(rLate.ownedElsewhere, 900);
 });
 
 test('rollup: work-queue holds surface as amber, never as a pipeline failure', () => {

@@ -76,6 +76,47 @@ export interface NavOrderLine {
   outstandingQty: number | null; // [Outstanding Quantity]
 }
 
+// --- Single-order composite (dossier) --------------------------------------
+// A whole order resolved across OPEN and POSTED tables, so a shipped or closed
+// order (gone from the open Sales Header) is still fully answerable. Keyed on a
+// base like SP-322263, which fans out to its legs SP-322263-1 / -2.
+
+// One line of the order, from either the open Sales Line or a posted Sales
+// Shipment Line. `source` says which, so the composer can roll up per-line status.
+export interface NavOrderCompositeLine {
+  orderNo: string;             // the NAV leg
+  lineNo: number | null;
+  sku: string | null;          // item [No_]
+  description: string | null;
+  location: string | null;
+  ordered: number | null;      // [Quantity]
+  shipped: number | null;      // open [Quantity Shipped]; on a posted line = the shipped qty
+  invoiced: number | null;     // [Quantity Invoiced]
+  outstanding: number | null;  // open [Outstanding Quantity]; 0 on a posted line
+  unitPrice: number | null;
+  source: 'open' | 'shipped';
+}
+
+// One NAV leg: an open Sales Header, a posted shipment, or both.
+export interface NavOrderCompositeLeg {
+  orderNo: string;
+  presence: 'open' | 'posted'; // an open header exists, vs only a posted shipment
+  navStatus: number | null;    // open [Status]: 0 = Open, 1 = Released
+  webId: string | null;
+  webOrder: number | null;
+  orderDate: string | null;
+  preseason: boolean | null;
+  documentType: number | null;
+  shippedAt: string | null;    // latest posted shipment date for the leg
+}
+
+export interface NavOrderComposite {
+  base: string;
+  found: boolean;
+  legs: NavOrderCompositeLeg[];
+  lines: NavOrderCompositeLine[];
+}
+
 // One IABC row for a SKU at a location/channel: on-hand and available-to-ship (ATP)
 // from GRUS$ItemAvailabilityByChannel. Lets the modal show inventory across HF1FTZ
 // AND TAC with both on-hand and available-to-ship.
@@ -226,6 +267,11 @@ export interface NavClient {
   getSplitShipTrace(orderNo: string): Promise<NavTraceRow[]>;
   // Order holds with reason codes (names the owning team for an unreleased order).
   getOrderHolds(orderNo: string): Promise<NavHoldRow[]>;
+  // Single-order dossier: a whole order resolved across OPEN Sales Header/Line AND
+  // POSTED Sales Shipment Header/Line, so a shipped or closed order is still fully
+  // answerable. `base` may be a full leg (SP-322263-1) or the base (SP-322263); the
+  // base fans out to all legs.
+  getOrderComposite(base: string): Promise<NavOrderComposite>;
   // BULK, for the reshaped health model: Holman 940 handoff state per order.
   getEdiHandoffBulk(sinceDays: number): Promise<NavEdiHandoffRow[]>;
   // BULK: active hold reason per order (names the owning team).
@@ -295,6 +341,11 @@ export interface NavQueries {
   ediHandoffBulk: string;        // Holman 940 sent/acked state, one row per order
   activeHoldsBulk: string;       // Active hold reason, one row per order
   autoReleaseSkippedBulk: string; // Orders whose autorelease was skipped (EL- / CU 5790)
+  // Single-order dossier: resolve one order across open + posted tables.
+  salesHeadersByOrder: string;   // open Sales Header rows for a base + its legs
+  salesLinesByOrder: string;     // open Sales Line item rows for a base + its legs
+  shipmentHeadersByOrder: string; // posted Sales Shipment Header rows for a base
+  shipmentLinesByOrder: string;  // posted Sales Shipment Line item rows for a base
 }
 
 export function buildQueries(company: string): NavQueries {
@@ -459,6 +510,34 @@ GROUP BY [Document No_];`,
     autoReleaseSkippedBulk: `SELECT DISTINCT [Nav Order No_] AS orderNo
 FROM ${splitTrace}
 WHERE [Decision Point] = 'EL.NoHoldNoRelease';`,
+    // Single-order dossier: open Sales Header rows for a base and all its legs.
+    // @base matches the exact base (a single-leg order); @legs matches SP-322263-%.
+    salesHeadersByOrder: `SELECT [No_] AS orderNo, [Status] AS navStatus, [WebId] AS webId,
+       [WebOrder] AS webOrder, [Document Type] AS documentType,
+       CAST([Preseason Order] AS int) AS isPreseason, [Order Date] AS orderDate
+FROM ${salesHeader}
+WHERE [No_] = @base OR [No_] LIKE @legs;`,
+    // Open item lines (Type 2) for the base + its legs, with the per-line quantities.
+    salesLinesByOrder: `SELECT [Document No_] AS orderNo, [Line No_] AS lineNo, [No_] AS sku,
+       [Description] AS description, [Location Code] AS location, [Quantity] AS ordered,
+       [Quantity Shipped] AS shipped, [Quantity Invoiced] AS invoiced,
+       [Outstanding Quantity] AS outstanding, [Unit Price] AS unitPrice
+FROM ${salesLine}
+WHERE [Type] = 2 AND ([Document No_] = @base OR [Document No_] LIKE @legs)
+ORDER BY [Document No_], [Line No_];`,
+    // Posted shipment headers for the base + its legs (presence + latest ship date).
+    shipmentHeadersByOrder: `SELECT [Order No_] AS orderNo, [WebId] AS webId,
+       MAX([Posting Date]) AS shippedAt
+FROM ${shipment}
+WHERE [Order No_] = @base OR [Order No_] LIKE @legs
+GROUP BY [Order No_], [WebId];`,
+    // Posted shipment item lines for the base + its legs (what actually shipped).
+    shipmentLinesByOrder: `SELECT [Order No_] AS orderNo, [Order Line No_] AS lineNo, [No_] AS sku,
+       [Description] AS description, [Location Code] AS location, [Quantity] AS shipped,
+       [Quantity Invoiced] AS invoiced, [Unit Price] AS unitPrice, [Posting Date] AS postedAt
+FROM ${shipmentLine}
+WHERE [Type] = 2 AND ([Order No_] = @base OR [Order No_] LIKE @legs)
+ORDER BY [Order No_], [Line No_];`,
   };
 }
 
@@ -656,6 +735,100 @@ export function mapShipmentHeader(row: Row): NavShipmentHeader {
   };
 }
 
+// Assemble a single-order composite from the four recordsets (open headers, open
+// lines, posted shipment headers, posted shipment lines). Pure and exported so the
+// live client and unit tests share it. Legs are keyed by NAV order number: an open
+// header makes a leg 'open', a posted shipment makes it 'posted', both keep 'open'
+// but carry the ship date.
+export function assembleOrderComposite(
+  base: string,
+  headerRows: Row[],
+  openLineRows: Row[],
+  shipHeaderRows: Row[],
+  shipLineRows: Row[],
+): NavOrderComposite {
+  const legs = new Map<string, NavOrderCompositeLeg>();
+
+  for (const r of headerRows) {
+    const orderNo = toStr(r.orderNo);
+    if (orderNo === null) continue;
+    legs.set(orderNo, {
+      orderNo,
+      presence: 'open',
+      navStatus: toNum(r.navStatus),
+      webId: toStr(r.webId),
+      webOrder: toNum(r.webOrder),
+      orderDate: toIso(r.orderDate),
+      preseason: r.isPreseason === null || r.isPreseason === undefined ? null : toNum(r.isPreseason) === 1,
+      documentType: toNum(r.documentType),
+      shippedAt: null,
+    });
+  }
+
+  for (const r of shipHeaderRows) {
+    const orderNo = toStr(r.orderNo);
+    if (orderNo === null) continue;
+    const shippedAt = toIso(r.shippedAt);
+    const existing = legs.get(orderNo);
+    if (existing) {
+      existing.shippedAt = shippedAt;
+      if (existing.webId === null) existing.webId = toStr(r.webId);
+    } else {
+      legs.set(orderNo, {
+        orderNo,
+        presence: 'posted',
+        navStatus: null,
+        webId: toStr(r.webId),
+        webOrder: null,
+        orderDate: null,
+        preseason: null,
+        documentType: null,
+        shippedAt,
+      });
+    }
+  }
+
+  const lines: NavOrderCompositeLine[] = [];
+  for (const r of openLineRows) {
+    const orderNo = toStr(r.orderNo);
+    if (orderNo === null) continue;
+    lines.push({
+      orderNo,
+      lineNo: toNum(r.lineNo),
+      sku: toStr(r.sku),
+      description: toStr(r.description),
+      location: toStr(r.location),
+      ordered: toNum(r.ordered),
+      shipped: toNum(r.shipped),
+      invoiced: toNum(r.invoiced),
+      outstanding: toNum(r.outstanding),
+      unitPrice: toNum(r.unitPrice),
+      source: 'open',
+    });
+  }
+  for (const r of shipLineRows) {
+    const orderNo = toStr(r.orderNo);
+    if (orderNo === null) continue;
+    const shipped = toNum(r.shipped);
+    lines.push({
+      orderNo,
+      lineNo: toNum(r.lineNo),
+      sku: toStr(r.sku),
+      description: toStr(r.description),
+      location: toStr(r.location),
+      ordered: shipped,     // a posted line's shipped qty is what was ordered on that leg
+      shipped,
+      invoiced: toNum(r.invoiced),
+      outstanding: 0,
+      unitPrice: toNum(r.unitPrice),
+      source: 'shipped',
+    });
+  }
+
+  const legList = [...legs.values()];
+  return { base, found: legList.length > 0 || lines.length > 0, legs: legList, lines };
+}
+
 // Unit 1: assemble NavJobQueueState from the three read-only job-queue reads. An
 // empty inProcess recordset is a genuine "no in-process job" (count 0, healthy),
 // distinct from an unread source (the stub returns count null => unknown). The
@@ -811,6 +984,10 @@ export class NavClientStub implements NavClient {
   async getOrderHolds(orderNo: string): Promise<NavHoldRow[]> {
     this.note(`order holds (${orderNo})`);
     return [];
+  }
+  async getOrderComposite(base: string): Promise<NavOrderComposite> {
+    this.note(`order composite (${base})`);
+    return { base, found: false, legs: [], lines: [] };
   }
   async getEdiHandoffBulk(sinceDays: number): Promise<NavEdiHandoffRow[]> {
     this.note(`edi handoff bulk (${sinceDays}d)`);
@@ -1022,6 +1199,24 @@ class NavClientLive implements NavClient {
       return rows.map(mapHoldRow);
     } catch (err) {
       return this.degrade('order holds', err, this.stub.getOrderHolds(orderNo));
+    }
+  }
+  async getOrderComposite(base: string): Promise<NavOrderComposite> {
+    // Normalize and derive the base + leg predicate. A leg (SP-322263-1) is stripped
+    // to the base so every sibling leg is returned; the base matches itself + '-%'.
+    const norm = base.trim().toUpperCase();
+    const resolvedBase = norm.replace(/-\d+$/, '');
+    const params = { base: resolvedBase, legs: `${resolvedBase}-%` };
+    try {
+      const [headers, openLines, shipHeaders, shipLines] = await Promise.all([
+        this.select(this.queries.salesHeadersByOrder, params),
+        this.select(this.queries.salesLinesByOrder, params),
+        this.select(this.queries.shipmentHeadersByOrder, params),
+        this.select(this.queries.shipmentLinesByOrder, params),
+      ]);
+      return assembleOrderComposite(resolvedBase, headers, openLines, shipHeaders, shipLines);
+    } catch (err) {
+      return this.degrade('order composite', err, this.stub.getOrderComposite(resolvedBase));
     }
   }
   async getEdiHandoffBulk(sinceDays: number): Promise<NavEdiHandoffRow[]> {

@@ -13,8 +13,11 @@ import {
   fetchFulfillmentOrders,
   fetchInventorySyncCheck,
   fetchJobQueueHealth,
+  fetchEdiHandoff,
   fetchMissedShipments,
   fetchNavAvailability,
+  fetchOrderHolds,
+  fetchSplitShipTrace,
   fetchNavInventory,
   fetchOrderPresence,
   fetchPendingFulfillment,
@@ -24,7 +27,10 @@ import {
   orderInfoFrom,
   triggerRemediation,
   type DiagnosticEnvelope,
+  type NavEdiSendRow,
+  type NavHoldRow,
   type NavIabcRow,
+  type NavTraceRow,
   type OrderInfo,
   type OrderLineItem,
 } from '../api';
@@ -920,6 +926,138 @@ function OrderPanel({ orderId }: { orderId: string }): JSX.Element {
   );
 }
 
+// Holman Logistics is Lanham EDI trade partner 2538727140; its fulfillment message
+// is the 940. Sent + functionally acknowledged (997) is PROOF the order is in
+// Holman's court, and Holman simply being behind is their SLA, never our defect.
+const HOLMAN_TRADE_PARTNER = '2538727140';
+const HOLMAN_EDI_DOC = '940';
+
+// Hold reason codes name the owning team, so an operator knows who to chase.
+function holdOwner(code: string | null): string {
+  const c = (code ?? '').toUpperCase();
+  if (c === 'ACCTHOLD' || c === 'ACCTPREPAY' || c === 'ACCTCONT') return 'Finance / AR';
+  if (c === 'CS' || c === 'CSHOLD' || c === 'CONTACTBO') return 'Customer Service';
+  return 'unassigned';
+}
+
+// A NAV order leg looks like SP-322494-1 or EL-11758-2. The modal title carries it.
+function navOrderNoFrom(label: string): string | null {
+  const m = label.trim().match(/^((?:SP|EL)-[\dA-Za-z-]+)/);
+  return m ? m[1] : null;
+}
+
+// "Why isn't this moving": the three NAV reads that actually answer it.
+//   1. the Holman EDI 940 handoff (did it reach the 3PL, and is it acknowledged)
+//   2. active order holds with reason codes (Finance / CS work queues)
+//   3. the allocator decision log (EL.NoHoldNoRelease, ATP.138M, etc.)
+function HandoffCard({ orderNo }: { orderNo: string }): JSX.Element {
+  const [state, setState] = useState<'loading' | 'ok' | 'error'>('loading');
+  const [edi, setEdi] = useState<NavEdiSendRow[]>([]);
+  const [holds, setHolds] = useState<NavHoldRow[]>([]);
+  const [trace, setTrace] = useState<NavTraceRow[]>([]);
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      try {
+        const [e, h, t] = await Promise.all([
+          fetchEdiHandoff(orderNo),
+          fetchOrderHolds(orderNo),
+          fetchSplitShipTrace(orderNo),
+        ]);
+        if (!live) return;
+        setEdi(e.rows ?? []);
+        setHolds(h.rows ?? []);
+        setTrace(t.rows ?? []);
+        setState('ok');
+      } catch {
+        if (live) setState('error');
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [orderNo]);
+
+  const holman = edi.filter(
+    (r) => r.tradePartner === HOLMAN_TRADE_PARTNER && r.ediDoc === HOLMAN_EDI_DOC,
+  );
+  const acked = holman.find((r) => r.sent === 1 && r.groupAck === 1);
+  const sentOnly = holman.find((r) => r.sent === 1);
+  const created = holman.length > 0;
+  const ediVerdict = acked
+    ? { cls: 'ok', text: `In Holman's court: 940 sent + 997 acknowledged${acked.sentDate ? ` on ${acked.sentDate.slice(0, 10)}` : ''}. Any delay from here is Holman's SLA, not a pipeline defect.` }
+    : sentOnly
+      ? { cls: 'warn', text: '940 sent, awaiting the 997 acknowledgment. In flight.' }
+      : created
+        ? { cls: 'bad', text: '940 created but NOT sent. This is our defect.' }
+        : { cls: 'bad', text: 'No 940 for this order: it has not been handed off to Holman.' };
+
+  const active = holds.filter((h) => h.released !== 1);
+  const notable = trace.filter(
+    (t) =>
+      (t.decisionPoint ?? '').startsWith('EL.NoHoldNoRelease') ||
+      (t.decisionPoint ?? '').startsWith('ATP.138M') ||
+      (t.decisionPoint ?? '').startsWith('Hold'),
+  );
+
+  return (
+    <section className="rm-section" aria-labelledby="rm-handoff-h">
+      <h4 id="rm-handoff-h" className="rm-sec-h">
+        Why this is not moving
+      </h4>
+      {state === 'loading' && (
+        <div className="rm-diag-body rm-diag-muted" role="status">
+          loading NAV handoff, holds and allocator trace...
+        </div>
+      )}
+      {state === 'error' && (
+        <div className="rm-diag-body rm-diag-muted" role="status">
+          NAV diagnostics unavailable (the read did not respond)
+        </div>
+      )}
+      {state === 'ok' && (
+        <div className="rm-diag-body">
+          <div className={`rm-handoff-verdict ${ediVerdict.cls}`}>{ediVerdict.text}</div>
+
+          <div className="rm-handoff-block">
+            <span className="rm-k">Order holds</span>
+            {active.length === 0 ? (
+              <span className="rm-diag-muted"> no active hold</span>
+            ) : (
+              <ul className="rm-li-list">
+                {active.map((h, i) => (
+                  <li className="rm-li-row" key={`${h.holdReasonCode}-${i}`}>
+                    <span className="rm-li-sku mono">{h.holdReasonCode ?? '?'}</span>
+                    <span className="rm-li-name">
+                      {holdOwner(h.holdReasonCode)}
+                      {h.holdComment ? ` - ${h.holdComment}` : ''}
+                    </span>
+                    {h.holdDate && <span className="rm-li-price mono">{h.holdDate.slice(0, 10)}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {notable.length > 0 && (
+            <div className="rm-handoff-block">
+              <span className="rm-k">Allocator decisions</span>
+              <ul className="rm-li-list">
+                {notable.slice(-6).map((t, i) => (
+                  <li className="rm-li-row" key={`${t.decisionPoint}-${i}`}>
+                    <span className="rm-li-sku mono">{t.decisionPoint}</span>
+                    <span className="rm-li-name">{t.detail ?? t.branchTaken ?? ''}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 // Inventory across BOTH physical warehouses (HF1FTZ / Holman and TAC): on-hand AND
 // available-to-ship for the order's SKU, straight from NAV IABC (the source of truth).
 // Answers "where does TAC have inventory" and puts available-to-ship next to on-hand.
@@ -1410,6 +1548,11 @@ export function RemediationModal({
           {/* ORDER - universal on every order-level modal (all lines + total) */}
           {numericOrderId(subject.orderId) !== null && (
             <OrderPanel orderId={numericOrderId(subject.orderId) as string} />
+          )}
+
+          {/* HANDOFF - the Holman EDI 940, order holds, allocator decisions (NAV) */}
+          {navOrderNoFrom(subject.label) !== null && (
+            <HandoffCard orderNo={navOrderNoFrom(subject.label) as string} />
           )}
 
           {/* WAREHOUSE INVENTORY - HF1FTZ + TAC on-hand + available-to-ship (NAV) */}

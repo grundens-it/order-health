@@ -220,6 +220,61 @@ export function fetchNavAvailability(sku: string): Promise<{ sku: string; rows: 
   );
 }
 
+// One Lanham EDI outbound doc. Holman Logistics = trade partner 2538727140, and its
+// fulfillment message is the 940. sent = 1 AND groupAck = 1 proves it reached Holman.
+export interface NavEdiSendRow {
+  docNo: string | null;
+  tradePartner: string | null;
+  ediDoc: string | null;
+  internalDoc: string | null;
+  sent: number | null;
+  sentDate: string | null;
+  groupAck: number | null;
+  createdDate: string | null;
+}
+
+// GET /api/diagnostics/edi-handoff?orderNo= -> the definitive Holman handoff check.
+export function fetchEdiHandoff(
+  orderNo: string,
+): Promise<{ orderNo: string; holmanTradePartner: string; rows: NavEdiSendRow[] }> {
+  return getJson(`/api/diagnostics/edi-handoff?orderNo=${encodeURIComponent(orderNo)}`);
+}
+
+// One NAV allocator / routing decision row: explains why an order is not moving.
+export interface NavTraceRow {
+  entryAt: string | null;
+  decisionPoint: string | null;
+  itemNo: string | null;
+  locationCode: string | null;
+  branchTaken: string | null;
+  detail: string | null;
+}
+
+// GET /api/diagnostics/split-ship-trace?orderNo= -> the NAV decision log.
+export function fetchSplitShipTrace(
+  orderNo: string,
+): Promise<{ orderNo: string; rows: NavTraceRow[] }> {
+  return getJson(`/api/diagnostics/split-ship-trace?orderNo=${encodeURIComponent(orderNo)}`);
+}
+
+// One NAV order hold. Reason code names the owning team (ACCTHOLD / ACCTPREPAY /
+// ACCTCONT = Finance; CS / CSHOLD / CONTACTBO = Customer Service).
+export interface NavHoldRow {
+  holdReasonCode: string | null;
+  holdDate: string | null;
+  holdComment: string | null;
+  enteredBy: string | null;
+  released: number | null;
+  autoEntry: number | null;
+}
+
+// GET /api/diagnostics/order-holds?orderNo= -> why an order is not released.
+export function fetchOrderHolds(
+  orderNo: string,
+): Promise<{ orderNo: string; rows: NavHoldRow[] }> {
+  return getJson(`/api/diagnostics/order-holds?orderNo=${encodeURIComponent(orderNo)}`);
+}
+
 // GET /api/diagnostics/shopify-order/:id -> the middleware Shopify order fetch,
 // normalized server-side to { line_items: [{ sku, quantity, name }] }. Read-only.
 // Lets an operator see the SKUs on a held order (the held-SKU field is often blank,

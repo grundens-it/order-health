@@ -390,3 +390,10 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .rm-wh-table th:first-child { text-align: left; }
 .rm-wh-table td { padding: 2px 8px; text-align: right; }
 .rm-wh-table td:first-child { text-align: left; }
+
+/* Handoff / why-not-moving card (modal) */
+.rm-handoff-verdict { padding: 6px 10px; border-radius: 4px; margin-bottom: 10px; font-size: 13px; }
+.rm-handoff-verdict.ok { background: rgba(64,160,96,0.15); border-left: 3px solid #40a060; }
+.rm-handoff-verdict.warn { background: rgba(200,150,40,0.15); border-left: 3px solid #c89628; }
+.rm-handoff-verdict.bad { background: rgba(200,70,70,0.15); border-left: 3px solid #c84646; }
+.rm-handoff-block { margin-top: 10px; font-size: 13px; }

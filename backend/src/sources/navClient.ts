@@ -82,6 +82,49 @@ export interface NavIabcRow {
   earliestShipDate: string | null; // [Earliest Shipment Date] (1753 => never)
 }
 
+// One Lanham EDI outbound document for an order (GRUS$E_D_I_ Send Document Hdr_).
+// Holman Logistics is trade partner 2538727140 and its fulfillment message is the
+// 940. A 940 with sent = 1 AND groupAck = 1 is PROOF the order is in Holman's court.
+// NOTE: the column [Tran_ Set Funct_ Ack_ Status] contains the token "Set" and trips
+// naive read-only SQL guards; the group ack alone is sufficient, so it is not read.
+export interface NavEdiSendRow {
+  docNo: string | null;         // [Document No_] = the NAV sales order leg
+  tradePartner: string | null;  // [Trade Partner No_]
+  ediDoc: string | null;        // [EDI Document No_] e.g. 940
+  internalDoc: string | null;   // [Internal Doc No_]
+  sent: number | null;          // [Document Sent] 1 = transmitted
+  sentDate: string | null;      // [Sent Date]
+  groupAck: number | null;      // [Funct_ Group Ack_ Status] 1 = 997 acknowledged
+  createdDate: string | null;   // [Created Date]
+}
+
+// One Split Ship Trace row: the NAV allocator/routing decision log for an order.
+// This is the diagnostic that explains WHY an order is not moving (e.g. the
+// EL.NoHoldNoRelease "hold/auto-release skipped (pending CalcATP fix)" path, or an
+// ATP.138M far-future ship date). NEVER select [Source Name]: it is a customer no.
+export interface NavTraceRow {
+  entryAt: string | null;       // [Entry DateTime]
+  decisionPoint: string | null; // [Decision Point]
+  itemNo: string | null;        // [Item No_]
+  locationCode: string | null;  // [Location Code]
+  branchTaken: string | null;   // [Branch Taken]
+  detail: string | null;        // [Detail]
+}
+
+// One order hold from GRUS$Sales Document Hold Entry, written by Codeunit 50098
+// salesHoldMgt (see Codeunit 50010 onSOReleaseChecker). An UNRELEASED order very
+// often has an active hold with a named reason (ACCTHOLD, ACCTPREPAY, CSHOLD,
+// ACCTCONT, CONTACTBO, CS): those are Finance / Customer Service work queues, NOT
+// pipeline defects, and the reason code tells the operator exactly who owns it.
+export interface NavHoldRow {
+  holdReasonCode: string | null; // [Hold Reason Code]
+  holdDate: string | null;       // [Hold Date]
+  holdComment: string | null;    // [Hold Comment]
+  enteredBy: string | null;      // [Entered By]
+  released: number | null;       // [Released] 0 = still holding
+  autoEntry: number | null;      // [Auto Entry] 1 = raised by the release checker
+}
+
 // Unit 3b (inventory dry-run reconstruction). Current NAV available-to-promise
 // for one (sku, NAV location code) pair. This is the SAME number the middleware's
 // inventory-sync cron pushes to Shopify (the corrected available-to-promise,
@@ -157,6 +200,12 @@ export interface NavClient {
   getShippedOrderLines(limit: number): Promise<NavOrderLine[]>;
   // Per-SKU IABC on-hand + available-to-ship across HF1FTZ + TAC (for the modal).
   getIabcBySku(sku: string): Promise<NavIabcRow[]>;
+  // Lanham EDI outbound docs for one order (the Holman 940 handoff proof).
+  getEdiSendStatus(orderNo: string): Promise<NavEdiSendRow[]>;
+  // NAV allocator / routing decision log for one order (why it is not moving).
+  getSplitShipTrace(orderNo: string): Promise<NavTraceRow[]>;
+  // Order holds with reason codes (names the owning team for an unreleased order).
+  getOrderHolds(orderNo: string): Promise<NavHoldRow[]>;
   // Read-only SQL passthrough for curated templates (design.md section 2).
   queryReadOnly<T>(templateName: string, params?: Record<string, unknown>): Promise<T[]>;
 }
@@ -214,6 +263,9 @@ export interface NavQueries {
   outstandingOrderLines: string; // Round 3: outstanding item lines for open sales orders
   shippedOrderLines: string;     // Per-line: SKUs already shipped (GRUS$Sales Shipment Line)
   iabcAvailability: string;      // Per-SKU on-hand + available-to-ship across HF1FTZ + TAC
+  ediSendStatus: string;         // Lanham EDI outbound docs (the Holman 940) for one order
+  splitShipTrace: string;        // NAV allocator/routing decision log for one order
+  orderHolds: string;            // Active + historical holds with reason codes for one order
 }
 
 export function buildQueries(company: string): NavQueries {
@@ -225,6 +277,9 @@ export function buildQueries(company: string): NavQueries {
   const shipment = navTable(company, 'Sales Shipment Header');
   const shipmentLine = navTable(company, 'Sales Shipment Line');
   const iabc = navTable(company, 'ItemAvailabilityByChannel');
+  const ediSend = navTable(company, 'E_D_I_ Send Document Hdr_');
+  const splitTrace = navTable(company, 'Split Ship Trace');
+  const holdEntry = navTable(company, 'Sales Document Hold Entry');
   const itemLedger = navTable(company, 'Item Ledger Entry');
 
   return {
@@ -327,6 +382,35 @@ ORDER BY sl.[Posting Date] DESC;`,
 FROM ${iabc}
 WHERE [No_] = @sku AND [Location] IN ('HF1FTZ', 'TAC')
 ORDER BY [Location], [Channel];`,
+    // Lanham EDI outbound documents for ONE order. Holman Logistics is trade partner
+    // 2538727140 and its fulfillment message is the 940; sent = 1 AND groupAck = 1 is
+    // proof the order reached Holman. [Tran_ Set Funct_ Ack_ Status] is deliberately
+    // NOT selected (the "Set" token trips read-only SQL guards; group ack suffices).
+    ediSendStatus: `SELECT TOP 20 [Document No_] AS docNo, [Trade Partner No_] AS tradePartner,
+       [EDI Document No_] AS ediDoc, [Internal Doc No_] AS internalDoc,
+       CAST([Document Sent] AS int) AS sent, [Sent Date] AS sentDate,
+       [Funct_ Group Ack_ Status] AS groupAck, [Created Date] AS createdDate
+FROM ${ediSend}
+WHERE [Document No_] = @orderNo
+ORDER BY [Created Date] DESC;`,
+    // The NAV allocator / routing decision log for ONE order: the diagnostic that
+    // explains why an order is not moving (EL.NoHoldNoRelease, ATP.138M, holds).
+    // [Source Name] is a customer number and is NEVER selected.
+    splitShipTrace: `SELECT TOP 200 [Entry DateTime] AS entryAt, [Decision Point] AS decisionPoint,
+       [Item No_] AS itemNo, [Location Code] AS locationCode,
+       [Branch Taken] AS branchTaken, [Detail] AS detail
+FROM ${splitTrace}
+WHERE [Nav Order No_] = @orderNo
+ORDER BY [Entry No_];`,
+    // Order holds with their reason codes. An unreleased order usually has one of
+    // these (ACCTHOLD / ACCTPREPAY / CSHOLD / ACCTCONT / CONTACTBO / CS), which names
+    // the owning team. Unreleased with NO active hold is the genuinely unexplained case.
+    orderHolds: `SELECT TOP 50 [Hold Reason Code] AS holdReasonCode, [Hold Date] AS holdDate,
+       [Hold Comment] AS holdComment, [Entered By] AS enteredBy,
+       CAST([Released] AS int) AS released, CAST([Auto Entry] AS int) AS autoEntry
+FROM ${holdEntry}
+WHERE [Document No_] = @orderNo AND [Document Type] = 1
+ORDER BY [Entry No_] DESC;`,
   };
 }
 
@@ -457,6 +541,41 @@ export function mapIabcRow(row: Row): NavIabcRow {
     onHand: toNum(row.onHand),
     available: toNum(row.available),
     earliestShipDate: toIso(row.earliestShipDate),
+  };
+}
+
+export function mapEdiSendRow(row: Row): NavEdiSendRow {
+  return {
+    docNo: toStr(row.docNo),
+    tradePartner: toStr(row.tradePartner),
+    ediDoc: toStr(row.ediDoc),
+    internalDoc: toStr(row.internalDoc),
+    sent: toNum(row.sent),
+    sentDate: toIso(row.sentDate),
+    groupAck: toNum(row.groupAck),
+    createdDate: toIso(row.createdDate),
+  };
+}
+
+export function mapHoldRow(row: Row): NavHoldRow {
+  return {
+    holdReasonCode: toStr(row.holdReasonCode),
+    holdDate: toIso(row.holdDate),
+    holdComment: toStr(row.holdComment),
+    enteredBy: toStr(row.enteredBy),
+    released: toNum(row.released),
+    autoEntry: toNum(row.autoEntry),
+  };
+}
+
+export function mapTraceRow(row: Row): NavTraceRow {
+  return {
+    entryAt: toIso(row.entryAt),
+    decisionPoint: toStr(row.decisionPoint),
+    itemNo: toStr(row.itemNo),
+    locationCode: toStr(row.locationCode),
+    branchTaken: toStr(row.branchTaken),
+    detail: toStr(row.detail),
   };
 }
 
@@ -613,6 +732,18 @@ export class NavClientStub implements NavClient {
   }
   async getIabcBySku(sku: string): Promise<NavIabcRow[]> {
     this.note(`iabc availability (${sku})`);
+    return [];
+  }
+  async getEdiSendStatus(orderNo: string): Promise<NavEdiSendRow[]> {
+    this.note(`edi send status (${orderNo})`);
+    return [];
+  }
+  async getSplitShipTrace(orderNo: string): Promise<NavTraceRow[]> {
+    this.note(`split ship trace (${orderNo})`);
+    return [];
+  }
+  async getOrderHolds(orderNo: string): Promise<NavHoldRow[]> {
+    this.note(`order holds (${orderNo})`);
     return [];
   }
   async queryReadOnly<T>(templateName: string): Promise<T[]> {
@@ -789,6 +920,30 @@ class NavClientLive implements NavClient {
       return rows.map(mapIabcRow);
     } catch (err) {
       return this.degrade('iabc availability', err, this.stub.getIabcBySku(sku));
+    }
+  }
+  async getEdiSendStatus(orderNo: string): Promise<NavEdiSendRow[]> {
+    try {
+      const rows = await this.select(this.queries.ediSendStatus, { orderNo });
+      return rows.map(mapEdiSendRow);
+    } catch (err) {
+      return this.degrade('edi send status', err, this.stub.getEdiSendStatus(orderNo));
+    }
+  }
+  async getSplitShipTrace(orderNo: string): Promise<NavTraceRow[]> {
+    try {
+      const rows = await this.select(this.queries.splitShipTrace, { orderNo });
+      return rows.map(mapTraceRow);
+    } catch (err) {
+      return this.degrade('split ship trace', err, this.stub.getSplitShipTrace(orderNo));
+    }
+  }
+  async getOrderHolds(orderNo: string): Promise<NavHoldRow[]> {
+    try {
+      const rows = await this.select(this.queries.orderHolds, { orderNo });
+      return rows.map(mapHoldRow);
+    } catch (err) {
+      return this.degrade('order holds', err, this.stub.getOrderHolds(orderNo));
     }
   }
 

@@ -33,6 +33,12 @@ import { createNavClient } from '../sources/navClient';
 // must fail fast into a 502, never block the operator's modal.
 const DIAGNOSTIC_TIMEOUT_MS = 6000;
 
+// Holman Logistics, the DTC 3PL at HF1FTZ, is Lanham EDI trade partner 2538727140.
+// Its fulfillment message is the 940 (warehouse shipping order); a 940 that is sent
+// AND functionally acknowledged (997) is proof the order is in Holman's court.
+export const HOLMAN_TRADE_PARTNER = '2538727140';
+export const HOLMAN_EDI_DOC = '940';
+
 // Proxy one READ-ONLY middleware request server-side and hand the JSON back to the
 // modal, so the browser never needs middleware network access. No password is ever
 // attached (these are unauthenticated observability reads). Any failure degrades to
@@ -256,6 +262,73 @@ export async function registerRemediationRoutes(app: FastifyInstance): Promise<v
         return reply.send({ sku, rows });
       } catch {
         return reply.code(502).send({ error: 'nav availability read did not respond' });
+      }
+    },
+  );
+
+  // GET /api/diagnostics/edi-handoff?orderNo= -> Lanham EDI outbound docs for the
+  // order, straight from NAV. Holman Logistics is trade partner 2538727140 and its
+  // fulfillment message is the 940: sent = 1 AND groupAck = 1 proves the order is in
+  // Holman's court. This is the definitive handoff check; read-only.
+  app.get(
+    '/api/diagnostics/edi-handoff',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      const orderNo = ((req.query as { orderNo?: string }).orderNo ?? '').trim();
+      if (orderNo.length === 0) {
+        return reply.code(400).send({ error: 'orderNo is required' });
+      }
+      try {
+        const rows = await nav.getEdiSendStatus(orderNo);
+        return reply.send({ orderNo, holmanTradePartner: HOLMAN_TRADE_PARTNER, rows });
+      } catch {
+        return reply.code(502).send({ error: 'EDI handoff read did not respond' });
+      }
+    },
+  );
+
+  // GET /api/diagnostics/split-ship-trace?orderNo= -> the NAV allocator / routing
+  // decision log for the order. This is the read that explains WHY an order is not
+  // moving (e.g. EL.NoHoldNoRelease "hold/auto-release skipped (pending CalcATP
+  // fix)", or ATP.138M pushing the ship date ~138 months out). Read-only, no PII.
+  app.get(
+    '/api/diagnostics/split-ship-trace',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      const orderNo = ((req.query as { orderNo?: string }).orderNo ?? '').trim();
+      if (orderNo.length === 0) {
+        return reply.code(400).send({ error: 'orderNo is required' });
+      }
+      try {
+        const rows = await nav.getSplitShipTrace(orderNo);
+        return reply.send({ orderNo, rows });
+      } catch {
+        return reply.code(502).send({ error: 'split ship trace read did not respond' });
+      }
+    },
+  );
+
+  // GET /api/diagnostics/order-holds?orderNo= -> NAV order holds with reason codes
+  // (GRUS$Sales Document Hold Entry, written by CU 50098 salesHoldMgt). An unreleased
+  // order usually has an active hold naming the owning team: ACCTHOLD / ACCTPREPAY /
+  // ACCTCONT (Finance), CS / CSHOLD / CONTACTBO (Customer Service). Those are work
+  // queues, not pipeline defects. Unreleased with NO active hold is unexplained.
+  app.get(
+    '/api/diagnostics/order-holds',
+    async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
+      const principal = requireRole(req, reply, [APP_ROLES.operator, APP_ROLES.admin]);
+      if (principal === null) return reply;
+      const orderNo = ((req.query as { orderNo?: string }).orderNo ?? '').trim();
+      if (orderNo.length === 0) {
+        return reply.code(400).send({ error: 'orderNo is required' });
+      }
+      try {
+        const rows = await nav.getOrderHolds(orderNo);
+        return reply.send({ orderNo, rows });
+      } catch {
+        return reply.code(502).send({ error: 'order holds read did not respond' });
       }
     },
   );

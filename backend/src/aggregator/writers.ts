@@ -36,6 +36,7 @@ import {
   bucketHeldOrder,
   computeOosHeld,
   extractDroppedSku,
+  isNavComplete,
   type HeldNavFacts,
   type OosHeldInput,
 } from './oosHeld';
@@ -242,7 +243,12 @@ export async function computeOosHeldPipeline(sources: Sources): Promise<Pipeline
         navLineSkus,
         shippedSkus,
       };
-      return bucketHeldOrder(o, facts);
+      const bucketed = bucketHeldOrder(o, facts);
+      // NAV is the final source of truth. If NAV shows the order complete (shipped,
+      // nothing outstanding, the held line itself shipped), mark the lingering
+      // middleware hold resolved so it stops driving the verdict red. This kills the
+      // false positives like SP-322580 (fully shipped + invoiced, yet still red).
+      return isNavComplete(facts) ? { ...bucketed, status: 'resolved' as const } : bucketed;
     });
   }
 

@@ -11,6 +11,7 @@ import {
   bucketHeldOrder,
   computeOosHeld,
   extractDroppedSku,
+  isNavComplete,
   routeHeldOrder,
   type HeldNavFacts,
   type OosHeldThresholds,
@@ -98,6 +99,32 @@ test('routing: a held line whose SKU already SHIPPED routes to the stale-hold cl
   });
   assert.equal(route.bucket, 'in_nav_line_present');
   assert.equal(route.toolId, STALE_HOLD_CLEAR_TOOL);
+});
+
+// NAV is the final source of truth: a NAV-complete order (shipped, nothing
+// outstanding) is resolved even if a stale middleware hold record lingers.
+test('isNavComplete: a fully shipped order with no open lines is complete (false positive suppressed)', () => {
+  // SP-322580: shipped + invoiced, held SKU itself shipped (style prefix match).
+  assert.equal(
+    isNavComplete({ inNav: true, droppedSku: '50432-425', navLineSkus: [], shippedSkus: ['50432-425-0018', '50218-001-0018'] }),
+    true,
+  );
+  // No known dropped line, shipped, nothing outstanding => complete.
+  assert.equal(isNavComplete({ inNav: true, droppedSku: null, navLineSkus: [], shippedSkus: ['A-1'] }), true);
+});
+
+test('isNavComplete: a partially-shipped order with a dropped line is NOT complete (stays actionable)', () => {
+  // SP-322494: two lines shipped, the oversold Taxman never shipped => not complete.
+  assert.equal(
+    isNavComplete({ inNav: true, droppedSku: '50625-425', navLineSkus: [], shippedSkus: ['10110-443-0001', '50533-001-0001'] }),
+    false,
+  );
+  // Still has an open outstanding line => not complete.
+  assert.equal(isNavComplete({ inNav: true, droppedSku: null, navLineSkus: ['X-1'], shippedSkus: ['A-1'] }), false);
+  // Nothing shipped => not complete.
+  assert.equal(isNavComplete({ inNav: true, droppedSku: null, navLineSkus: [], shippedSkus: [] }), false);
+  // Not in NAV => not complete.
+  assert.equal(isNavComplete({ inNav: false, droppedSku: null, navLineSkus: [], shippedSkus: [] }), false);
 });
 
 test('duplicate-skip invariant: NO in-NAV held order EVER routes to forward_sync_replay', () => {

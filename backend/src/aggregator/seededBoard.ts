@@ -64,6 +64,7 @@ export interface BoardSeed {
   allocator?: Partial<AllocatorStatus>;
   orders?: NavOrderLifecycleRow[];
   orderLines?: NavOrderLine[]; // Round 3: outstanding order lines for FS classification
+  shippedOrderLines?: NavOrderLine[]; // Per-line: SKUs already shipped (Sales Shipment Line)
   inventoryAvailability?: NavInventoryAvailabilityRow[]; // Round 3: NAV warehouse on-hand
   fsInventory?: ShopifyFsInventory[]; // Round 3: Shopify FS-location available per SKU
   oosHeld?: OosHeldOrder[] | null;    // WI1 (#87): OOS-held backlog rows (default [] => green)
@@ -134,6 +135,9 @@ class SeededNavClient implements NavClient {
   }
   async getOutstandingOrderLines(): Promise<NavOrderLine[]> {
     return this.seed.orderLines ?? [];
+  }
+  async getShippedOrderLines(): Promise<NavOrderLine[]> {
+    return this.seed.shippedOrderLines ?? [];
   }
   async queryReadOnly<T>(): Promise<T[]> {
     return [];

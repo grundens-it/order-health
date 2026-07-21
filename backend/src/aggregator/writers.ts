@@ -203,28 +203,44 @@ export async function computeOosHeldPipeline(sources: Sources): Promise<Pipeline
     // WI3 NAV join (read-only). Match held order names to NAV order numbers and
     // gather the SKUs present on those NAV lines so a missing dropped line is
     // distinguishable from a present one.
-    const [navOrders, navLines] = await Promise.all([
+    const [navOrders, navLines, navShipments, navShippedLines] = await Promise.all([
       sources.nav.getOrderLifecycleRows(),
       sources.nav.getOutstandingOrderLines(5000),
+      sources.nav.getRecentShipments(5000),
+      sources.nav.getShippedOrderLines(5000),
     ]);
     const navOrderNos = navOrders
       .map((o) => o.navOrderNo)
+      .filter((x): x is string => x !== null);
+    // Shipped legs prove the order reached NAV even when its open Sales Header is
+    // gone (NAV deletes fully-posted headers). This is the per-line fix: a
+    // partially-shipped order is still "in NAV" so it never routes to the no-op
+    // whole-order re-drive.
+    const shippedOrderNos = navShipments
+      .map((s) => s.orderRef)
       .filter((x): x is string => x !== null);
 
     joined = held.map((o) => {
       const orderName = o.order_name;
       if (orderName === null) {
         // No name to join on: treat as line-present (an ops verify), never a re-drive.
-        return bucketHeldOrder(o, { inNav: true, droppedSku: null, navLineSkus: [] });
+        return bucketHeldOrder(o, { inNav: true, droppedSku: null, navLineSkus: [], shippedSkus: [] });
       }
-      const inNav = navOrderNos.some((no) => navOrderMatchesName(no, orderName));
+      // NAV presence is evaluated across ALL lines: an open leg OR a posted shipment.
+      const inNav =
+        navOrderNos.some((no) => navOrderMatchesName(no, orderName)) ||
+        shippedOrderNos.some((no) => navOrderMatchesName(no, orderName));
       const navLineSkus = navLines
+        .filter((l) => l.orderNo !== null && l.sku !== null && navOrderMatchesName(l.orderNo, orderName))
+        .map((l) => l.sku as string);
+      const shippedSkus = navShippedLines
         .filter((l) => l.orderNo !== null && l.sku !== null && navOrderMatchesName(l.orderNo, orderName))
         .map((l) => l.sku as string);
       const facts: HeldNavFacts = {
         inNav,
         droppedSku: extractDroppedSku(o.last_detail),
         navLineSkus,
+        shippedSkus,
       };
       return bucketHeldOrder(o, facts);
     });

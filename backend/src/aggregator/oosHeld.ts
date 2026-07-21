@@ -87,9 +87,14 @@ function isNeedsOperator(o: OosHeldOrder): boolean {
 // forward_sync_replay is returned ONLY for a not-in-NAV order; an in-NAV order
 // (where a re-drive returns DuplicateSkip) never routes to it.
 export interface HeldNavFacts {
-  inNav: boolean;            // a GRUS$Sales Header exists ([No_] LIKE order_name + '-%')
+  // NAV presence is PER-ORDER-ACROSS-ALL-LINES: an order has NAV footprint when a
+  // GRUS$Sales Header exists (open leg) OR a GRUS$Sales Shipment Header exists (a
+  // leg already shipped). A partially-shipped order whose open legs are gone is
+  // still "in NAV" and must NOT route to the no-op re-drive.
+  inNav: boolean;
   droppedSku: string | null; // the SKU the hold is about (from last_detail), null when unknown
-  navLineSkus: string[];     // SKUs present on the matched NAV order's GRUS$Sales Line rows
+  navLineSkus: string[];     // SKUs on OPEN NAV legs (GRUS$Sales Line, outstanding > 0)
+  shippedSkus?: string[];    // SKUs on POSTED shipments (GRUS$Sales Shipment Line); optional, defaults to []
 }
 
 export interface HeldRoute {
@@ -105,18 +110,26 @@ export const NAV_LINE_ADD_TOOL = 'oos_held_nav_line_add';
 export const STALE_HOLD_CLEAR_TOOL = 'oos_held_stale_clear';
 
 export function routeHeldOrder(facts: HeldNavFacts): HeldRoute {
-  // Not in NAV: the re-drive falls through and re-stages the order. Valid.
+  // The "present" set is evaluated ACROSS ALL LINES of the order: a SKU counts as
+  // present if it is on an open NAV leg OR already shipped. This is the fix for
+  // partially-shipped orders: the shipped legs prove the order reached NAV even
+  // when its open Sales Header is gone.
+  const presentSkus = [...facts.navLineSkus, ...(facts.shippedSkus ?? [])];
+
+  // Not in NAV at all (no open leg, no shipment): the order never reached NAV, so
+  // a re-drive re-stages it. This is the ONLY case forward_sync_replay is valid.
   if (!facts.inNav) {
     return { bucket: 'not_in_nav', toolId: FORWARD_SYNC_REPLAY_TOOL };
   }
-  // In NAV with the dropped line missing: a re-drive returns DuplicateSkip and
-  // no-ops. There is no middleware endpoint to add the line, so this routes to a
-  // manual NAV line-add runbook, NEVER to forward_sync_replay.
-  if (facts.droppedSku !== null && !facts.navLineSkus.includes(facts.droppedSku)) {
+  // In NAV (some line shipped or is open) but the held line's SKU is on NEITHER an
+  // open leg NOR a shipment: that line was DROPPED at intake (oversold) and never
+  // staged. A whole-order re-drive returns DuplicateSkip and no-ops, so this routes
+  // to creating the missing NAV leg, NEVER to forward_sync_replay.
+  if (facts.droppedSku !== null && !presentSkus.includes(facts.droppedSku)) {
     return { bucket: 'in_nav_line_missing', toolId: NAV_LINE_ADD_TOOL };
   }
-  // In NAV with the line present: the order reached NAV whole; the hold record is
-  // stale. An ops step verifies and clears it. Not a re-drive.
+  // In NAV with the held line present (open or shipped): the order reached NAV with
+  // this line; the hold record is stale. An ops step verifies and clears it.
   return { bucket: 'in_nav_line_present', toolId: STALE_HOLD_CLEAR_TOOL };
 }
 

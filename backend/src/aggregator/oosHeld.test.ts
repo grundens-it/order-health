@@ -73,6 +73,33 @@ test('routing: an in-NAV order with the line PRESENT routes to the stale-hold cl
   assert.notEqual(route.toolId, FORWARD_SYNC_REPLAY_TOOL);
 });
 
+// Per-line fix (SP-322494): a PARTIALLY-shipped order. The open Sales Header is
+// gone (its legs shipped), so inNav comes from the shipment, and the held line is
+// the oversold SKU that never staged. It must route to NAV line-add, not re-drive.
+test('routing: a partially-shipped order whose held line was DROPPED routes to NAV line-add', () => {
+  const route = routeHeldOrder({
+    inNav: true,
+    droppedSku: '50625-425',
+    navLineSkus: [],
+    shippedSkus: ['10110-443', '50533-001'], // the two lines that shipped
+  });
+  assert.equal(route.bucket, 'in_nav_line_missing');
+  assert.equal(route.toolId, NAV_LINE_ADD_TOOL);
+  assert.notEqual(route.toolId, FORWARD_SYNC_REPLAY_TOOL);
+});
+
+// The held line's SKU is itself already shipped: the hold is stale, not a drop.
+test('routing: a held line whose SKU already SHIPPED routes to the stale-hold clear', () => {
+  const route = routeHeldOrder({
+    inNav: true,
+    droppedSku: '50625-425',
+    navLineSkus: [],
+    shippedSkus: ['50625-425'],
+  });
+  assert.equal(route.bucket, 'in_nav_line_present');
+  assert.equal(route.toolId, STALE_HOLD_CLEAR_TOOL);
+});
+
 test('duplicate-skip invariant: NO in-NAV held order EVER routes to forward_sync_replay', () => {
   // The middleware returns DuplicateSkip when allocations exist AND the order is in
   // NAV, so a re-drive no-ops. Every in-NAV variant must avoid forward_sync_replay.

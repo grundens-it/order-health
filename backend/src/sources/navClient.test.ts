@@ -55,6 +55,37 @@ test('every built query prefixes EVERY table with the company code (GRUS$)', () 
   }
 });
 
+// The exact production bug: `[Line No_] AS lineNo` shipped and every Order Lookup
+// returned "Not found", because LINENO is a reserved T-SQL keyword and SQL Server
+// rejected the whole statement ("Incorrect syntax near the keyword 'lineNo'"). A bare
+// reserved word as a column alias is always a latent runtime failure, so no query may
+// contain one. Bracketed ([lineNo]) and quoted aliases are fine and are ignored here.
+test('no query uses a bare reserved T-SQL word as a column alias', () => {
+  // The reserved words most likely to be reached for as a natural alias. Not the full
+  // list; this is a tripwire for the mistake we actually made, cheap to extend.
+  const RESERVED = new Set([
+    'lineno', 'key', 'user', 'order', 'group', 'percent', 'plan', 'public', 'file',
+    'identity', 'check', 'current', 'default', 'primary', 'schema', 'session', 'system',
+    'left', 'right', 'full', 'inner', 'outer', 'union', 'view', 'rule', 'save', 'set',
+  ]);
+  const q = buildQueries('GRUS');
+  const offenders: string[] = [];
+  for (const [name, sql] of Object.entries(q)) {
+    // Match `AS alias` where alias is a BARE identifier (not [bracketed], not "quoted").
+    for (const m of sql.matchAll(/\bAS\s+([A-Za-z_][A-Za-z0-9_]*)/g)) {
+      const alias = m[1] as string;
+      if (RESERVED.has(alias.toLowerCase())) offenders.push(`${name}: AS ${alias}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `bare reserved-word aliases must be bracketed: ${offenders.join(', ')}`);
+});
+
+test('the dossier line queries keep the lineNo alias bracketed', () => {
+  const q = buildQueries('GRUS');
+  assert.ok(q.salesLinesByOrder.includes('AS [lineNo]'), 'salesLinesByOrder must bracket [lineNo]');
+  assert.ok(q.shipmentLinesByOrder.includes('AS [lineNo]'), 'shipmentLinesByOrder must bracket [lineNo]');
+});
+
 test('a non-default company code re-prefixes every table', () => {
   const q = buildQueries('CHILE');
   assert.ok(q.orderLifecycle.includes('[CHILE$Sales Header]'));

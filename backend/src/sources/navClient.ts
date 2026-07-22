@@ -518,7 +518,9 @@ WHERE [Decision Point] = 'EL.NoHoldNoRelease';`,
 FROM ${salesHeader}
 WHERE [No_] = @base OR [No_] LIKE @legs;`,
     // Open item lines (Type 2) for the base + its legs, with the per-line quantities.
-    salesLinesByOrder: `SELECT [Document No_] AS orderNo, [Line No_] AS lineNo, [No_] AS sku,
+    // NOTE: [lineNo] MUST stay bracketed. LINENO is a reserved T-SQL keyword, so a bare
+    // `AS lineNo` alias fails with "Incorrect syntax near the keyword 'lineNo'".
+    salesLinesByOrder: `SELECT [Document No_] AS orderNo, [Line No_] AS [lineNo], [No_] AS sku,
        [Description] AS description, [Location Code] AS location, [Quantity] AS ordered,
        [Quantity Shipped] AS shipped, [Quantity Invoiced] AS invoiced,
        [Outstanding Quantity] AS outstanding, [Unit Price] AS unitPrice
@@ -532,7 +534,8 @@ FROM ${shipment}
 WHERE [Order No_] = @base OR [Order No_] LIKE @legs
 GROUP BY [Order No_], [WebId];`,
     // Posted shipment item lines for the base + its legs (what actually shipped).
-    shipmentLinesByOrder: `SELECT [Order No_] AS orderNo, [Order Line No_] AS lineNo, [No_] AS sku,
+    // [lineNo] bracketed for the same reason as above (LINENO is reserved).
+    shipmentLinesByOrder: `SELECT [Order No_] AS orderNo, [Order Line No_] AS [lineNo], [No_] AS sku,
        [Description] AS description, [Location Code] AS location, [Quantity] AS shipped,
        [Quantity Invoiced] AS invoiced, [Unit Price] AS unitPrice, [Posting Date] AS postedAt
 FROM ${shipmentLine}
@@ -1216,7 +1219,16 @@ class NavClientLive implements NavClient {
       ]);
       return assembleOrderComposite(resolvedBase, headers, openLines, shipHeaders, shipLines);
     } catch (err) {
-      return this.degrade('order composite', err, this.stub.getOrderComposite(resolvedBase));
+      // Deliberately NOT degraded to the stub. Every other read here feeds a cadence
+      // verdict, where degrading to "unknown" is right. This one answers a human's
+      // direct "where is this order", and an empty composite there is indistinguishable
+      // from "no such order" -- which is exactly how a broken query (the reserved
+      // LINENO alias) silently reported every real order as Not found. Rethrow so the
+      // caller reports the source as degraded and the operator sees a failure, not a lie.
+      // eslint-disable-next-line no-console
+      console.warn(`[nav:live] order composite failed for ${resolvedBase}: ${String(err)}`);
+      this.poolPromise = null; // allow a later retry to reconnect
+      throw err;
     }
   }
   async getEdiHandoffBulk(sinceDays: number): Promise<NavEdiHandoffRow[]> {

@@ -31,7 +31,7 @@ import { requireRole } from '../auth/context';
 import { buildUrl } from '../sources/middlewareClient';
 import { buildOrderInfo } from './orderLineItems';
 import { classifyHandoff, holdOwnerFor } from '../aggregator/orderHandoffClass';
-import { createNavClient } from '../sources/navClient';
+import { createNavClient, resolveOrderBase } from '../sources/navClient';
 import type {
   NavClient,
   NavEdiSendRow,
@@ -280,7 +280,9 @@ async function guarded<T>(label: string, p: Promise<T>, fallback: T, sources: Re
 export async function buildOrderDossier(nav: NavClient, orderNo: string): Promise<OrderDossier> {
   const sources: Record<string, DossierSourceStatus> = {};
   const nowMs = Date.now();
-  const base = orderNo.trim().toUpperCase().replace(/-\d+$/, '');
+  // Same leg-stripping rule as the NAV client. Never the naive /-\d+$/ strip, which
+  // turned SP-322150 into "SP" and scanned every order in NAV.
+  const base = resolveOrderBase(orderNo);
 
   const composite = await guarded(
     'nav_order',

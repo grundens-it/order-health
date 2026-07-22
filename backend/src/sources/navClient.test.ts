@@ -11,7 +11,10 @@ import test from 'node:test';
 import {
   NAV_IABC_OBJECT_ID,
   NAV_JOB_STATUS_SUCCESS,
+  NAV_ORDER_COMPOSITE_LIMIT,
   assertReadOnly,
+  isLookupableOrderBase,
+  resolveOrderBase,
   buildAuthentication,
   buildQueries,
   channelFromWebOrder,
@@ -78,6 +81,52 @@ test('no query uses a bare reserved T-SQL word as a column alias', () => {
     }
   }
   assert.deepEqual(offenders, [], `bare reserved-word aliases must be bracketed: ${offenders.join(', ')}`);
+});
+
+// The OOM that crash-looped production and took the aggregator down with it. The old
+// /-\d+$/ strip removed the ORDER'S OWN digits when there was no leg suffix, so
+// "SP-322150" became "SP", whose LIKE 'SP-%' predicate matched every SP order in NAV.
+test('resolveOrderBase strips ONLY a leg suffix, never the order number itself', () => {
+  // A base with no leg must survive intact. This is the exact OOM input.
+  assert.equal(resolveOrderBase('SP-322150'), 'SP-322150');
+  assert.equal(resolveOrderBase('sp-322150'), 'SP-322150');
+  assert.equal(resolveOrderBase('EL-10652'), 'EL-10652');
+  // A leg is stripped back to the base so sibling legs resolve.
+  assert.equal(resolveOrderBase('SP-322263-1'), 'SP-322263');
+  assert.equal(resolveOrderBase('sp-322263-2'), 'SP-322263');
+  // Anything not of the <prefix>-<digits>[-<leg>] shape is left untouched.
+  assert.equal(resolveOrderBase('HR-HR23YXMM'), 'HR-HR23YXMM');
+  // Never collapses to a bare prefix.
+  for (const input of ['SP-322150', 'sp-322150', 'EL-10652', 'SP-322263-1']) {
+    assert.notEqual(resolveOrderBase(input), 'SP');
+    assert.notEqual(resolveOrderBase(input), 'EL');
+  }
+});
+
+test('isLookupableOrderBase refuses a base too broad to be a real order', () => {
+  // A BARE PREFIX is the dangerous shape: it becomes LIKE 'SP-%' and matches every
+  // order with that prefix. These must never reach NAV.
+  for (const bad of ['SP', 'EL', 'S', '', '   ', 'SP-', 'ABC']) {
+    assert.equal(isLookupableOrderBase(bad), false, `${bad} must be refused`);
+  }
+  // A base carrying digits is safe even if truncated, because the predicate anchors a
+  // dash after it ('SP-3221-%' cannot match SP-322150). Happy Returns must keep working.
+  for (const good of ['SP-322150', 'EL-10652', 'SP-322263', 'HR-HR23YXMM']) {
+    assert.equal(isLookupableOrderBase(good), true, `${good} must be allowed`);
+  }
+});
+
+test('every dossier query is row-capped so a broad predicate cannot exhaust the heap', () => {
+  const q = buildQueries('GRUS');
+  for (const name of [
+    'salesHeadersByOrder',
+    'salesLinesByOrder',
+    'shipmentHeadersByOrder',
+    'shipmentLinesByOrder',
+  ] as const) {
+    assert.ok(q[name].includes('SELECT TOP (@limit)'), `${name} must be row-capped`);
+  }
+  assert.ok(NAV_ORDER_COMPOSITE_LIMIT > 0 && NAV_ORDER_COMPOSITE_LIMIT <= 5000);
 });
 
 test('the dossier line queries keep the lineNo alias bracketed', () => {

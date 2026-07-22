@@ -117,6 +117,34 @@ export interface NavOrderComposite {
   lines: NavOrderCompositeLine[];
 }
 
+// Derive the order BASE from whatever the operator typed, stripping ONLY a split-leg
+// suffix. NAV order numbers are <prefix>-<number> (SP-322150, EL-10652) with optional
+// legs (SP-322150-1, -2).
+//
+// This exists because the naive /-\d+$/ strip was catastrophic: "SP-322150" has no leg,
+// so it stripped the ORDER'S OWN digits and produced "SP". The resulting
+// LIKE 'SP-%' predicate matched every SP order in NAV, pulled every one of their sales
+// lines into memory, and OOM-killed the container, which crash-looped the app and took
+// the aggregator down with it. Only a trailing leg on a well-formed order number is
+// ever removed; anything else is returned untouched.
+export function resolveOrderBase(input: string): string {
+  const norm = input.trim().toUpperCase();
+  const m = /^([A-Z]+-\d+)(?:-\d+)?$/.exec(norm);
+  return m ? (m[1] as string) : norm;
+}
+
+// Guard against a base so broad its LIKE predicate would scan the order tables.
+//
+// The dangerous shape is specifically a BARE PREFIX: "SP" becomes LIKE 'SP-%', which
+// matches every SP order in NAV (the OOM). A merely truncated base is NOT dangerous,
+// because the predicate anchors a dash immediately after it: 'SP-3221-%' cannot match
+// SP-322150. So the rule is "must carry at least one digit", not "must be long", which
+// keeps legitimate non-numeric-ish orders such as Happy Returns (HR-HR23YXMM) working.
+export function isLookupableOrderBase(base: string): boolean {
+  const b = base.trim();
+  return b.length >= 4 && /\d/.test(b);
+}
+
 // One IABC row for a SKU at a location/channel: on-hand and available-to-ship (ATP)
 // from GRUS$ItemAvailabilityByChannel. Lets the modal show inventory across HF1FTZ
 // AND TAC with both on-hand and available-to-ship.
@@ -311,6 +339,12 @@ export const NAV_JQE_STATUS_IN_PROCESS = 1;
 // GRUS$Sales Header Staging [Status] = 0 is a real row pending promotion (the true
 // backlog). Status = 1 rows are old "Not Auto-released" rows and are NOT counted.
 export const NAV_STAGING_STATUS_PENDING_PROMOTION = 0;
+
+// Hard row cap on every single-order dossier read. Defence in depth behind
+// isLookupableOrderBase: even if a too-broad predicate ever reaches NAV again, the
+// result set cannot grow large enough to exhaust the container heap. A real order,
+// legs included, is a handful of rows; this is orders of magnitude of headroom.
+export const NAV_ORDER_COMPOSITE_LIMIT = 500;
 
 // Bracketed, company-prefixed table name: navTable('GRUS', 'Sales Header') =>
 // "[GRUS$Sales Header]". Centralising this is what guarantees no query can read
@@ -512,7 +546,7 @@ FROM ${splitTrace}
 WHERE [Decision Point] = 'EL.NoHoldNoRelease';`,
     // Single-order dossier: open Sales Header rows for a base and all its legs.
     // @base matches the exact base (a single-leg order); @legs matches SP-322263-%.
-    salesHeadersByOrder: `SELECT [No_] AS orderNo, [Status] AS navStatus, [WebId] AS webId,
+    salesHeadersByOrder: `SELECT TOP (@limit) [No_] AS orderNo, [Status] AS navStatus, [WebId] AS webId,
        [WebOrder] AS webOrder, [Document Type] AS documentType,
        CAST([Preseason Order] AS int) AS isPreseason, [Order Date] AS orderDate
 FROM ${salesHeader}
@@ -520,7 +554,7 @@ WHERE [No_] = @base OR [No_] LIKE @legs;`,
     // Open item lines (Type 2) for the base + its legs, with the per-line quantities.
     // NOTE: [lineNo] MUST stay bracketed. LINENO is a reserved T-SQL keyword, so a bare
     // `AS lineNo` alias fails with "Incorrect syntax near the keyword 'lineNo'".
-    salesLinesByOrder: `SELECT [Document No_] AS orderNo, [Line No_] AS [lineNo], [No_] AS sku,
+    salesLinesByOrder: `SELECT TOP (@limit) [Document No_] AS orderNo, [Line No_] AS [lineNo], [No_] AS sku,
        [Description] AS description, [Location Code] AS location, [Quantity] AS ordered,
        [Quantity Shipped] AS shipped, [Quantity Invoiced] AS invoiced,
        [Outstanding Quantity] AS outstanding, [Unit Price] AS unitPrice
@@ -528,14 +562,14 @@ FROM ${salesLine}
 WHERE [Type] = 2 AND ([Document No_] = @base OR [Document No_] LIKE @legs)
 ORDER BY [Document No_], [Line No_];`,
     // Posted shipment headers for the base + its legs (presence + latest ship date).
-    shipmentHeadersByOrder: `SELECT [Order No_] AS orderNo, [WebId] AS webId,
+    shipmentHeadersByOrder: `SELECT TOP (@limit) [Order No_] AS orderNo, [WebId] AS webId,
        MAX([Posting Date]) AS shippedAt
 FROM ${shipment}
 WHERE [Order No_] = @base OR [Order No_] LIKE @legs
 GROUP BY [Order No_], [WebId];`,
     // Posted shipment item lines for the base + its legs (what actually shipped).
     // [lineNo] bracketed for the same reason as above (LINENO is reserved).
-    shipmentLinesByOrder: `SELECT [Order No_] AS orderNo, [Order Line No_] AS [lineNo], [No_] AS sku,
+    shipmentLinesByOrder: `SELECT TOP (@limit) [Order No_] AS orderNo, [Order Line No_] AS [lineNo], [No_] AS sku,
        [Description] AS description, [Location Code] AS location, [Quantity] AS shipped,
        [Quantity Invoiced] AS invoiced, [Unit Price] AS unitPrice, [Posting Date] AS postedAt
 FROM ${shipmentLine}
@@ -1207,9 +1241,16 @@ class NavClientLive implements NavClient {
   async getOrderComposite(base: string): Promise<NavOrderComposite> {
     // Normalize and derive the base + leg predicate. A leg (SP-322263-1) is stripped
     // to the base so every sibling leg is returned; the base matches itself + '-%'.
-    const norm = base.trim().toUpperCase();
-    const resolvedBase = norm.replace(/-\d+$/, '');
-    const params = { base: resolvedBase, legs: `${resolvedBase}-%` };
+    const resolvedBase = resolveOrderBase(base);
+    // Refuse a base too broad to be a real order number. Without this an input like
+    // "SP" becomes LIKE 'SP-%' and scans every order in NAV (the OOM that crash-looped
+    // the container). Returning empty is correct: there is no such order.
+    if (!isLookupableOrderBase(resolvedBase)) {
+      // eslint-disable-next-line no-console
+      console.warn(`[nav:live] refusing over-broad order lookup "${resolvedBase}"`);
+      return { base: resolvedBase, found: false, legs: [], lines: [] };
+    }
+    const params = { base: resolvedBase, legs: `${resolvedBase}-%`, limit: NAV_ORDER_COMPOSITE_LIMIT };
     try {
       const [headers, openLines, shipHeaders, shipLines] = await Promise.all([
         this.select(this.queries.salesHeadersByOrder, params),

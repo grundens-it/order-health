@@ -53,6 +53,16 @@ function DossierBody({ d }: { d: OrderDossier }): JSX.Element {
   return (
     <div className="dossier">
       {/* Overall status + the handoff verdict: where is this order, and whose is it. */}
+      {/* A failed NAV read must never read as "no such order". */}
+      {d.sources.nav_order === 'degraded' && (
+        <div className="dsx-head">
+          <span className="dsx-status s-not_found">NAV read failed</span>
+          <span className="dsx-owner">
+            The NAV order lookup did not complete, so this order could not be resolved. This is a
+            source failure, not a missing order. Retry, and if it persists check the backend logs.
+          </span>
+        </div>
+      )}
       <div className="dsx-head">
         <span className={`dsx-status s-${d.order_status}`}>{ORDER_STATUS_LABEL[d.order_status]}</span>
         {d.handoff && <VerdictChip verdict={d.handoff.verdict} />}

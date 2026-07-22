@@ -305,9 +305,13 @@ export async function buildOrderDossier(nav: NavClient, orderNo: string): Promis
   const holds = legReads.flatMap((r) => r[1]);
   const trace = legReads.flatMap((r) => r[2]);
   // Collapse the per-leg statuses into three summary keys for the UI.
-  sources.nav_edi = legNos.every((l) => sources[`nav_edi:${l}`] === 'ok') ? 'ok' : legNos.length === 0 ? 'not_found' : 'degraded';
-  sources.nav_holds = legNos.every((l) => sources[`nav_holds:${l}`] === 'ok') ? 'ok' : legNos.length === 0 ? 'not_found' : 'degraded';
-  sources.nav_allocator = legNos.every((l) => sources[`nav_allocator:${l}`] === 'ok') ? 'ok' : legNos.length === 0 ? 'not_found' : 'degraded';
+  // Empty-array .every() is vacuously true, so the no-legs case MUST be checked first
+  // or a lookup that found nothing reports every NAV read as a healthy "ok".
+  const rollUp = (prefix: string): DossierSourceStatus =>
+    legNos.length === 0 ? 'not_found' : legNos.every((l) => sources[`${prefix}:${l}`] === 'ok') ? 'ok' : 'degraded';
+  sources.nav_edi = rollUp('nav_edi');
+  sources.nav_holds = rollUp('nav_holds');
+  sources.nav_allocator = rollUp('nav_allocator');
   for (const l of legNos) {
     delete sources[`nav_edi:${l}`];
     delete sources[`nav_holds:${l}`];

@@ -20,6 +20,7 @@ import { PriceSyncPanel } from './components/PriceSyncPanel';
 import { JobQueuePanel } from './components/JobQueuePanel';
 import { ShopifyWebhookPanel } from './components/ShopifyWebhookPanel';
 import { AllocatorPanel } from './components/AllocatorPanel';
+import grundensLogo from './assets/grundens-logo.png';
 import { OrderTable } from './components/OrderTable';
 import { OrderDossierView } from './components/OrderDossierView';
 import { ChannelFilter } from './components/ChannelFilter';
@@ -333,10 +334,10 @@ export function App(): JSX.Element {
       <div className="band">
         <div className="band-in">
           <div className="logo">
-            <span className="mark">G</span>
+            <img className="mark" src={grundensLogo} alt="Grundens" />
             <span>
               Order Health
-              <small>Grundens observability</small>
+              <small>observability</small>
             </span>
           </div>
           <div className="band-spacer" />

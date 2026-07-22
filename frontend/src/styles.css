@@ -21,7 +21,9 @@ body { margin: 0; background: var(--bg); color: var(--ink); font-size: 14px; lin
 .band { background: var(--band); color: #fff; }
 .band-in { max-width: 1180px; margin: 0 auto; padding: 16px 20px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .02em; }
-.logo .mark { width: 26px; height: 26px; border-radius: 6px; background: var(--orange); display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 15px; }
+/* The real Grundens wordmark (official orange asset, same one the branded docs use).
+   Height-constrained with auto width so the aspect ratio is never distorted. */
+.logo .mark { height: 22px; width: auto; display: block; }
 .logo small { display: block; font-weight: 400; color: #aeb6c0; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
 .band-spacer { flex: 1; }
 .asof { font-size: 12px; color: #c6cdd6; text-align: right; line-height: 1.35; }

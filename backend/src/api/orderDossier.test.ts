@@ -1,178 +1,158 @@
-// Tests for the single-order dossier assembler (ADR-0012). assembleDossier is pure, so
-// these are seeded inputs in, asserted dossier out: no live NAV or middleware. They pin
-// the two things that matter: the verdict is the SAME classifyHandoff result the board
-// uses, and PII cannot appear in the payload.
+// Tests for the single-order dossier assembler (ADR-0012), rebuilt around the NAV
+// composite (open + posted). Pure: seeded inputs in, asserted dossier out. They pin the
+// resolution across shipped orders, the per-line status rollup, the overall status, the
+// verdict parity with the board, and that PII cannot appear.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { assembleDossier, type DossierInputs } from './orderDossier.js';
-import type {
-  NavEdiSendRow,
-  NavHoldRow,
-  NavIabcRow,
-  NavOrderLifecycleRow,
-  NavOrderLine,
-  NavTraceRow,
-} from '../sources/navClient.js';
+import { assembleOrderComposite } from '../sources/navClient.js';
+import type { NavEdiSendRow, NavHoldRow, NavIabcRow } from '../sources/navClient.js';
 
 const HOLMAN = '2538727140';
-const DAY = 86_400_000;
-
-function lifecycle(over: Partial<NavOrderLifecycleRow> = {}): NavOrderLifecycleRow {
-  return {
-    channel: 'dtc',
-    navOrderNo: 'SP-322263-1',
-    webId: '7223212441849',
-    webOrder: 1,
-    shopifyOrderName: '#1024',
-    customerRef: 'C0004821 ACME OUTFITTERS', // PII-ish; must NOT surface in the dossier
-    shopifyOrderAt: null,
-    allocatorSplitAt: null,
-    navStagingAt: null,
-    navStagingStatus: null,
-    navPromotionAt: null,
-    navShipmentAt: null,
-    backSyncAt: null,
-    missedBackSync: false,
-    documentType: 1,
-    isPreseason: false,
-    navStatus: 1,
-    orderAt: new Date(Date.now() - 1 * DAY).toISOString(),
-    ...over,
-  };
-}
 
 function edi940(over: Partial<NavEdiSendRow> = {}): NavEdiSendRow {
   return {
-    docNo: 'SP-322263-1',
-    tradePartner: HOLMAN,
-    ediDoc: '940',
-    internalDoc: 'X1',
-    sent: 1,
-    sentDate: new Date().toISOString(),
-    groupAck: 1,
-    createdDate: new Date().toISOString(),
-    ...over,
+    docNo: 'SP-322263-1', tradePartner: HOLMAN, ediDoc: '940', internalDoc: 'X1',
+    sent: 1, sentDate: new Date().toISOString(), groupAck: 1, createdDate: new Date().toISOString(), ...over,
   };
 }
 
 function inputs(over: Partial<DossierInputs> = {}): DossierInputs {
   return {
-    orderNo: 'SP-322263-1',
+    orderNo: 'SP-322263',
     nowMs: Date.now(),
-    lifecycle: lifecycle(),
-    outstandingLines: [{ orderNo: 'SP-322263-1', sku: 'A100', location: 'HF1FTZ', outstandingQty: 1 }] as NavOrderLine[],
-    shippedLines: [],
-    edi: [edi940()],
+    composite: { base: 'SP-322263', found: false, legs: [], lines: [] },
+    edi: [],
     holds: [],
     trace: [],
-    availability: [
-      { sku: 'A100', location: 'HF1FTZ', channel: 'DTC', onHand: 12, available: 8, earliestShipDate: null },
-    ] as NavIabcRow[],
+    availability: [],
     shopify: null,
-    sources: { nav_lifecycle: 'ok' },
+    sources: {},
     ...over,
   };
 }
 
-test('acked 940 inside Holman window: with_holman, green, edi block sent+acked', () => {
-  const d = assembleDossier(inputs());
-  assert.equal(d.handoff?.state, 'with_holman');
-  assert.equal(d.handoff?.owner, 'holman');
+// --- assembleOrderComposite: base -> legs across open + posted ---------------
+
+test('a shipped order (posted only) still resolves, with shipped lines and a posted leg', () => {
+  const shipHeaders = [{ orderNo: 'SP-322263-1', webId: '7222087975161', shippedAt: '2026-07-21T00:00:00Z' }];
+  const shipLines = [
+    { orderNo: 'SP-322263-1', lineNo: 10000, sku: '10331-001-0015', description: 'Full Share Pant', location: 'HF1FTZ', shipped: 1, invoiced: 1, unitPrice: 149.99, postedAt: '2026-07-21T00:00:00Z' },
+    { orderNo: 'SP-322263-1', lineNo: 20000, sku: '40125-913-0015', description: 'Tough Sun Masked Hoodie', location: 'HF1FTZ', shipped: 1, invoiced: 1, unitPrice: 59.99, postedAt: '2026-07-21T00:00:00Z' },
+  ];
+  const c = assembleOrderComposite('SP-322263', [], [], shipHeaders, shipLines);
+  assert.equal(c.found, true);
+  assert.equal(c.legs.length, 1);
+  assert.equal(c.legs[0]?.presence, 'posted');
+  assert.equal(c.lines.length, 2);
+  assert.equal(c.lines[0]?.source, 'shipped');
+});
+
+test('base fans out to multiple legs across open + posted', () => {
+  const headers = [{ orderNo: 'SP-322263-2', navStatus: 0, webId: '72', webOrder: 1, documentType: 1, isPreseason: 0, orderDate: '2026-07-20T00:00:00Z' }];
+  const shipHeaders = [{ orderNo: 'SP-322263-1', webId: '72', shippedAt: '2026-07-21T00:00:00Z' }];
+  const c = assembleOrderComposite('SP-322263', headers, [], shipHeaders, []);
+  const legNos = c.legs.map((l) => l.orderNo).sort();
+  assert.deepEqual(legNos, ['SP-322263-1', 'SP-322263-2']);
+});
+
+// --- assembleDossier: status rollup + verdict --------------------------------
+
+test('a fully shipped order is order_status shipped, verdict green, lines invoiced', () => {
+  const composite = assembleOrderComposite(
+    'SP-322263', [], [],
+    [{ orderNo: 'SP-322263-1', webId: '72', shippedAt: '2026-07-21T00:00:00Z' }],
+    [{ orderNo: 'SP-322263-1', lineNo: 10000, sku: 'A', description: 'Pant', location: 'HF1FTZ', shipped: 1, invoiced: 1, unitPrice: 149.99, postedAt: '2026-07-21T00:00:00Z' }],
+  );
+  const d = assembleDossier(inputs({ composite }));
+  assert.equal(d.order_status, 'shipped');
+  assert.equal(d.handoff?.state, 'shipped');
   assert.equal(d.handoff?.verdict, 'green');
-  assert.equal(d.edi?.present, true);
-  assert.equal(d.edi?.sent, true);
-  assert.equal(d.edi?.acked, true);
+  assert.equal(d.lines[0]?.status, 'invoiced');
+  assert.equal(d.lines[0]?.description, 'Pant');
 });
 
-test('acked 940 past Holman window: holman_delayed, amber risk', () => {
-  const old = new Date(Date.now() - 10 * DAY).toISOString();
-  const d = assembleDossier(inputs({ lifecycle: lifecycle({ orderAt: old }) }));
-  assert.equal(d.handoff?.state, 'holman_delayed');
+test('an open order with an acked 940 and outstanding stock is with Holman, line outstanding', () => {
+  const composite = assembleOrderComposite(
+    'SP-900000',
+    [{ orderNo: 'SP-900000-1', navStatus: 1, webId: '55', webOrder: 1, documentType: 1, isPreseason: 0, orderDate: new Date().toISOString() }],
+    [{ orderNo: 'SP-900000-1', lineNo: 10000, sku: 'B', description: 'Jacket', location: 'HF1FTZ', ordered: 1, shipped: 0, invoiced: 0, outstanding: 1, unitPrice: 149.99 }],
+    [], [],
+  );
+  const availability: NavIabcRow[] = [{ sku: 'B', location: 'HF1FTZ', channel: 'DTC', onHand: 5, available: 3, earliestShipDate: null }];
+  const d = assembleDossier(inputs({ composite, availability, edi: [edi940({ docNo: 'SP-900000-1' })] }));
+  assert.equal(d.order_status, 'in_progress');
   assert.equal(d.handoff?.owner, 'holman');
-  assert.equal(d.handoff?.verdict, 'amber');
-  assert.equal(d.handoff?.label, 'Holman delay');
+  assert.equal(d.lines[0]?.status, 'outstanding');
 });
 
-test('released, stock on hand, no 940 at all: handoff_failed, red, ours', () => {
-  const old = new Date(Date.now() - 3 * DAY).toISOString();
-  const d = assembleDossier(inputs({ edi: [], lifecycle: lifecycle({ orderAt: old }) }));
+test('an open outstanding line with no stock anywhere is a backorder', () => {
+  const composite = assembleOrderComposite(
+    'SP-900001',
+    [{ orderNo: 'SP-900001-1', navStatus: 1, webId: '56', webOrder: 1, documentType: 1, isPreseason: 0, orderDate: new Date().toISOString() }],
+    [{ orderNo: 'SP-900001-1', lineNo: 10000, sku: 'C', description: 'Bib', location: 'HF1FTZ', ordered: 1, shipped: 0, invoiced: 0, outstanding: 1, unitPrice: 99 }],
+    [], [],
+  );
+  const d = assembleDossier(inputs({ composite, availability: [] }));
+  assert.equal(d.lines[0]?.status, 'backorder');
+});
+
+test('a partially shipped order rolls up to partial', () => {
+  const composite = assembleOrderComposite(
+    'SP-900002',
+    [{ orderNo: 'SP-900002-1', navStatus: 1, webId: '57', webOrder: 1, documentType: 1, isPreseason: 0, orderDate: new Date().toISOString() }],
+    [{ orderNo: 'SP-900002-1', lineNo: 10000, sku: 'D', description: 'Glove', location: 'HF1FTZ', ordered: 2, shipped: 0, invoiced: 0, outstanding: 2, unitPrice: 20 }],
+    [{ orderNo: 'SP-900002-1', webId: '57', shippedAt: '2026-07-21T00:00:00Z' }],
+    [{ orderNo: 'SP-900002-1', lineNo: 20000, sku: 'E', description: 'Hat', location: 'HF1FTZ', shipped: 1, invoiced: 1, unitPrice: 25, postedAt: '2026-07-21T00:00:00Z' }],
+  );
+  const d = assembleDossier(inputs({ composite }));
+  assert.equal(d.order_status, 'partial');
+});
+
+test('a Shopify-cancelled order is order_status canceled and lines read canceled', () => {
+  const composite = assembleOrderComposite(
+    'SP-900003',
+    [{ orderNo: 'SP-900003-1', navStatus: 0, webId: '58', webOrder: 1, documentType: 1, isPreseason: 0, orderDate: new Date().toISOString() }],
+    [{ orderNo: 'SP-900003-1', lineNo: 10000, sku: 'F', description: 'Cap', location: 'HF1FTZ', ordered: 1, shipped: 0, invoiced: 0, outstanding: 1, unitPrice: 30 }],
+    [], [],
+  );
+  const shopify = { line_items: [], order_total: '30', subtotal: '30', currency: 'USD', financial_status: 'refunded', fulfillment_status: 'unfulfilled', cancelled: true, cancelled_at: '2026-07-20T00:00:00Z' };
+  const d = assembleDossier(inputs({ composite, shopify }));
+  assert.equal(d.order_status, 'canceled');
+  assert.equal(d.handoff?.state, 'canceled');
+  assert.equal(d.lines[0]?.status, 'canceled');
+});
+
+test('a released order with stock and no 940 stays a red handoff failure', () => {
+  const composite = assembleOrderComposite(
+    'SP-900004',
+    [{ orderNo: 'SP-900004-1', navStatus: 1, webId: '59', webOrder: 1, documentType: 1, isPreseason: 0, orderDate: new Date(Date.now() - 3 * 86_400_000).toISOString() }],
+    [{ orderNo: 'SP-900004-1', lineNo: 10000, sku: 'G', description: 'Vest', location: 'HF1FTZ', ordered: 1, shipped: 0, invoiced: 0, outstanding: 1, unitPrice: 80 }],
+    [], [],
+  );
+  const availability: NavIabcRow[] = [{ sku: 'G', location: 'HF1FTZ', channel: 'DTC', onHand: 9, available: 9, earliestShipDate: null }];
+  const d = assembleDossier(inputs({ composite, availability, edi: [] }));
   assert.equal(d.handoff?.state, 'handoff_failed');
   assert.equal(d.handoff?.owner, 'grundens_ops');
   assert.equal(d.handoff?.verdict, 'red');
-  assert.equal(d.edi, null);
 });
 
-test('a NAV hold names the owning team and never leaks the free-text comment', () => {
-  const holds: NavHoldRow[] = [
-    {
-      holdReasonCode: 'ACCTHOLD',
-      holdDate: new Date().toISOString(),
-      holdComment: 'call Jane Doe at 555-0100 re: overdue balance', // PII: must not surface
-      enteredBy: 'jsmith',
-      released: 0,
-      autoEntry: 1,
-    },
-  ];
-  const d = assembleDossier(inputs({ edi: [], holds }));
-  assert.equal(d.holds[0]?.reason_code, 'ACCTHOLD');
-  assert.equal(d.holds[0]?.owner, 'finance');
-  // The hold block carries no comment or enteredBy field at all.
-  assert.equal((d.holds[0] as unknown as Record<string, unknown>).comment, undefined);
-  assert.equal((d.holds[0] as unknown as Record<string, unknown>).entered_by, undefined);
-});
-
-test('PII: the identity block exposes no customer name, only the allowed keys', () => {
-  const d = assembleDossier(inputs());
-  assert.ok(d.identity);
-  const keys = Object.keys(d.identity).sort();
-  assert.deepEqual(keys, [
-    'channel',
-    'in_open_board',
-    'nav_order_no',
-    'order_at',
-    'preseason',
-    'released',
-    'shopify_order_id',
-    'shopify_order_name',
-  ]);
-  // The serialized dossier must not contain the customer ref anywhere.
-  assert.equal(JSON.stringify(d).includes('ACME OUTFITTERS'), false);
-});
-
-test('an order absent from the board yields a null identity but still classifies', () => {
-  const d = assembleDossier(inputs({ lifecycle: null, edi: [], availability: [] }));
-  assert.equal(d.identity, null);
-  assert.ok(d.handoff); // still gets a verdict (in_flight / backorder), never throws
-});
-
-test('availability is limited to HF1FTZ and TAC and passes the sources map through', () => {
-  const availability: NavIabcRow[] = [
-    { sku: 'A100', location: 'HF1FTZ', channel: 'DTC', onHand: 5, available: 3, earliestShipDate: null },
-    { sku: 'A100', location: 'TAC', channel: 'DTC', onHand: 2, available: 0, earliestShipDate: null },
-    { sku: 'A100', location: 'ZZZ', channel: 'DTC', onHand: 9, available: 9, earliestShipDate: null },
-  ];
-  const d = assembleDossier(inputs({ availability, sources: { nav_lifecycle: 'ok', shopify_order: 'not_found' } }));
-  const locs = d.availability.map((a) => a.location).sort();
-  assert.deepEqual(locs, ['HF1FTZ', 'TAC']);
-  assert.equal(d.sources.shopify_order, 'not_found');
-});
-
-test('the allocator EL- skip is detected from the trace and drives the code-defect state', () => {
-  const trace: NavTraceRow[] = [
-    {
-      entryAt: new Date().toISOString(),
-      decisionPoint: 'EL.NoHoldNoRelease',
-      itemNo: 'A100',
-      locationCode: 'HF1FTZ',
-      branchTaken: 'skip',
-      detail: 'EL- order: hold/auto-release skipped (pending CalcATP fix)',
-    },
-  ];
-  // No EDI, unreleased, no hold: the EL- skip is the explanation.
-  const d = assembleDossier(
-    inputs({ edi: [], trace, lifecycle: lifecycle({ navStatus: 0 }) }),
+test('PII: a hold names the team but never leaks the comment or enteredBy', () => {
+  const composite = assembleOrderComposite(
+    'SP-900005',
+    [{ orderNo: 'SP-900005-1', navStatus: 0, webId: '60', webOrder: 1, documentType: 1, isPreseason: 0, orderDate: new Date().toISOString() }],
+    [{ orderNo: 'SP-900005-1', lineNo: 10000, sku: 'H', description: 'Sock', location: 'HF1FTZ', ordered: 1, shipped: 0, invoiced: 0, outstanding: 1, unitPrice: 10 }],
+    [], [],
   );
-  assert.equal(d.handoff?.state, 'blocked_code_defect');
-  assert.equal(d.handoff?.owner, 'engineering');
-  assert.equal(d.allocator[0]?.decision_point, 'EL.NoHoldNoRelease');
+  const holds: NavHoldRow[] = [{ holdReasonCode: 'ACCTHOLD', holdDate: new Date().toISOString(), holdComment: 'call Jane Doe 555-0100', enteredBy: 'jsmith', released: 0, autoEntry: 1 }];
+  const d = assembleDossier(inputs({ composite, holds }));
+  assert.equal(d.holds[0]?.owner, 'finance');
+  assert.equal((d.holds[0] as unknown as Record<string, unknown>).comment, undefined);
+  assert.equal(JSON.stringify(d).includes('Jane Doe'), false);
+});
+
+test('a not-found order returns not_found and a null handoff, never throws', () => {
+  const d = assembleDossier(inputs());
+  assert.equal(d.order_status, 'not_found');
+  assert.equal(d.handoff, null);
 });

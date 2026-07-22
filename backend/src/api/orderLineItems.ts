@@ -60,6 +60,8 @@ export interface OrderInfo {
   currency: string | null;
   financial_status: string | null;
   fulfillment_status: string | null;
+  cancelled: boolean;
+  cancelled_at: string | null;
 }
 
 function strOrNull(v: unknown): string | null {
@@ -88,5 +90,7 @@ export function buildOrderInfo(json: unknown): OrderInfo {
     currency: strOrNull(orderObj.currency),
     financial_status: strOrNull(orderObj.financial_status),
     fulfillment_status: strOrNull(orderObj.fulfillment_status) ?? 'unfulfilled',
+    cancelled: strOrNull(orderObj.cancelled_at) !== null,
+    cancelled_at: strOrNull(orderObj.cancelled_at),
   };
 }

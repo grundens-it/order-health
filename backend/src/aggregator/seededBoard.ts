@@ -30,6 +30,7 @@ import type {
   NavHoldRow,
   NavHoldSummaryRow,
   NavIabcRow,
+  NavOrderComposite,
   NavOrderLine,
   NavTraceRow,
   NavShipmentHeader,
@@ -72,6 +73,7 @@ export interface BoardSeed {
   orderLines?: NavOrderLine[]; // Round 3: outstanding order lines for FS classification
   shippedOrderLines?: NavOrderLine[]; // Per-line: SKUs already shipped (Sales Shipment Line)
   iabc?: NavIabcRow[]; // Per-SKU on-hand + available-to-ship (HF1FTZ + TAC)
+  orderComposite?: NavOrderComposite; // Single-order dossier: resolved open + posted legs/lines
   ediHandoff?: NavEdiHandoffRow[];      // Holman 940 sent/acked per order
   activeHolds?: NavHoldSummaryRow[];    // active hold reason per order
   autoReleaseSkipped?: string[];        // orders with the EL- autorelease skip
@@ -160,6 +162,9 @@ class SeededNavClient implements NavClient {
   }
   async getOrderHolds(): Promise<NavHoldRow[]> {
     return [];
+  }
+  async getOrderComposite(base: string): Promise<NavOrderComposite> {
+    return this.seed.orderComposite ?? { base, found: false, legs: [], lines: [] };
   }
   async getEdiHandoffBulk(): Promise<NavEdiHandoffRow[]> {
     return this.seed.ediHandoff ?? [];

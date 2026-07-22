@@ -138,7 +138,9 @@ export type OrderHandoffState =
   | 'held_customer_service'
   | 'blocked_code_defect'
   | 'backorder'
-  | 'in_flight';
+  | 'in_flight'
+  | 'shipped'    // fully posted / shipped: done, nothing to chase
+  | 'canceled';  // cancelled in Shopify / never fulfilled
 
 export interface OrderHandoffDetail {
   state: OrderHandoffState;
@@ -161,6 +163,8 @@ export const ORDER_HANDOFF_LABEL: Record<OrderHandoffState, string> = {
   blocked_code_defect: 'Code defect (CU 5790)',
   backorder: 'Backorder',
   in_flight: 'In flight',
+  shipped: 'Shipped',
+  canceled: 'Canceled',
 };
 
 // --- Single-order dossier (ADR-0012) ---------------------------------------
@@ -184,10 +188,37 @@ export interface OrderDossierIdentity {
   in_open_board: boolean;             // present in the open-orders board (vs closed/shipped)
 }
 
+// A line's status rolled up from the NAV quantities (ordered vs shipped vs invoiced
+// vs outstanding) and, for an open outstanding line, whether stock exists anywhere.
+export type OrderLineStatus =
+  | 'shipped'      // fully shipped, not yet invoiced
+  | 'invoiced'     // shipped and invoiced: done
+  | 'partial'      // some shipped, some still outstanding
+  | 'outstanding'  // open, nothing shipped yet, stock exists
+  | 'backorder'    // open, nothing shipped, no stock anywhere
+  | 'canceled'
+  | 'unknown';
+
 export interface OrderDossierLine {
+  leg: string | null;          // the NAV order leg this line belongs to
   sku: string | null;
+  description: string | null;
   location: string | null;
-  outstanding: number | null;
+  ordered: number | null;      // [Quantity]
+  shipped: number | null;      // [Quantity Shipped] (open) or the posted shipment qty
+  invoiced: number | null;     // [Quantity Invoiced]
+  outstanding: number | null;  // [Outstanding Quantity]
+  unit_price: string | null;
+  status: OrderLineStatus;
+}
+
+// One NAV leg of an order (an SP-######-1 / -2 split), and whether it is still an
+// open order or now only a posted shipment.
+export interface OrderDossierLeg {
+  order_no: string;
+  presence: 'open' | 'posted'; // an open Sales Header exists, vs only a posted shipment
+  nav_status: number | null;   // open header [Status]: 0 = Open, 1 = Released
+  shipped_at: string | null;   // latest posted shipment date for this leg
 }
 
 export interface OrderDossierEdi {
@@ -238,15 +269,26 @@ export interface OrderDossierShopify {
   currency: string | null;
   financial_status: string | null;
   fulfillment_status: string | null;
+  cancelled: boolean;          // Shopify cancelled_at is set
+  cancelled_at: string | null;
 }
 
+// The one-line overall status of the whole order, rolled up across its legs.
+export type OrderOverallStatus =
+  | 'shipped'       // every line shipped / invoiced
+  | 'partial'       // some lines shipped, some still open
+  | 'in_progress'   // open, nothing shipped yet
+  | 'canceled'
+  | 'not_found';    // no NAV order and no Shopify order
+
 export interface OrderDossier {
-  order_no: string;                 // the resolved NAV order number the dossier keys on
+  order_no: string;                 // the base order number the dossier keys on
   as_of: string;
+  order_status: OrderOverallStatus; // the rolled-up "where is this order" answer
+  legs: OrderDossierLeg[];          // every NAV leg (open and/or posted)
   identity: OrderDossierIdentity | null;
   handoff: (OrderHandoffDetail & { verdict: Verdict }) | null;
-  lines: OrderDossierLine[];
-  shipped_lines: OrderDossierLine[];
+  lines: OrderDossierLine[];        // every line across every leg, open + shipped
   edi: OrderDossierEdi | null;
   holds: OrderDossierHold[];
   allocator: OrderDossierTraceRow[];

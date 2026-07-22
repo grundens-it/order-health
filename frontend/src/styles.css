@@ -185,6 +185,12 @@ tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line2); vertical-a
 .dsx-src.ok { border-color: var(--line); color: var(--faint); }
 .dsx-src.degraded { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
 .dsx-src.not_found { border-style: dashed; }
+.dsx-status { display: inline-block; font-size: 13px; font-weight: 700; padding: 3px 10px; border-radius: 5px; letter-spacing: .02em; border: 1px solid var(--line); }
+.dsx-status.s-shipped { background: var(--green-bg, #12281c); border-color: #1f5a34; color: #58c983; }
+.dsx-status.s-partial { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
+.dsx-status.s-in_progress { background: var(--amber-bg); border-color: var(--amber-bd); color: var(--amber); }
+.dsx-status.s-canceled { background: transparent; color: var(--faint); }
+.dsx-status.s-not_found { background: var(--red-bg); border-color: var(--red-bd); color: var(--red); }
 /* --- Unit 3 monitors (price-sync, NAV job queue, Shopify webhooks) --------- */
 /* Two-card layout for the smaller monitors (they carry two verdict cards, not
    inventory-sync's three). Reuses the .ip-card / .ip-note / .ip-panel tokens. */

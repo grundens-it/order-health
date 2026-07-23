@@ -675,10 +675,12 @@ export interface LeadershipRollup {
   headline_verdict: Verdict;
   // Age of the oldest STUCK (red) order, in seconds; null when no order is red.
   oldest_stuck_age_s: number | null;
-  // The inventory_sync pipe's freshness: true = fresh (green), false = stale
-  // (amber/red), null = unknown (no inventory_sync row, or its freshness is
-  // unknown / not yet provisioned).
-  inventory_sync_fresh: boolean | null;
+  // The inventory_sync pipe's freshness verdict, carried FAITHFULLY (green /
+  // amber / red / unknown), not collapsed to a boolean. The old boolean painted
+  // any non-green as red "STALE", so an amber (mid-cycle lagging) freshness showed
+  // red on the headline while the pipe card correctly showed amber. The headline
+  // now renders the same three states the pipe does.
+  inventory_freshness: Verdict;
   counts: RollupCounts;
 }
 

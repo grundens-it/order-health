@@ -49,17 +49,23 @@ function buildKpis(r: LeadershipRollup): Kpi[] {
   // while any is at risk, else green.
   const oldestRail: Rail = stuck > 0 ? 'r' : risk > 0 ? 'a' : 'g';
 
-  // inventory_sync_fresh is a tri-state: true (fresh/green), false (stale/red),
-  // null (unknown, no inventory_sync freshness reported yet).
-  const fresh = r.inventory_sync_fresh;
-  const invRail: Rail = fresh === true ? 'g' : fresh === false ? 'r' : 'a';
-  const invVal = fresh === true ? 'Fresh' : fresh === false ? 'STALE' : 'pending';
+  // Inventory freshness is now the pipe's own verdict, so the headline card shows the
+  // SAME three states the pipe card does: green Fresh, amber Lagging, red Stale, and
+  // unknown pending. The old boolean collapsed amber into red, so a normal mid-cycle
+  // lag (the IABC populate legitimately runs every ~2 to 2.7h) lit the headline red
+  // STALE while the pipe only showed At risk.
+  const invFresh = r.inventory_freshness;
+  const invRail: Rail = invFresh === 'green' ? 'g' : invFresh === 'red' ? 'r' : invFresh === 'amber' ? 'a' : 'a';
+  const invVal =
+    invFresh === 'green' ? 'Fresh' : invFresh === 'red' ? 'STALE' : invFresh === 'amber' ? 'Lagging' : 'pending';
   const invSub =
-    fresh === true
+    invFresh === 'green'
       ? 'watermark within cycle'
-      : fresh === false
+      : invFresh === 'red'
         ? 'watcher behind, needs attention'
-        : 'no freshness signal yet';
+        : invFresh === 'amber'
+          ? 'mid-cycle lag, self-clears next walk'
+          : 'no freshness signal yet';
 
   return [
     {

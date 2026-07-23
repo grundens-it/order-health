@@ -116,7 +116,7 @@ test('empty snapshot => healthy-empty: healthy bucket with an unknown chip', () 
   assert.equal(r.headline, 'healthy');
   assert.equal(r.headline_verdict, 'unknown');
   assert.equal(r.oldest_stuck_age_s, null);
-  assert.equal(r.inventory_sync_fresh, null);
+  assert.equal(r.inventory_freshness, 'unknown');
   assert.equal(r.counts.orders_total, 0);
   assert.equal(r.counts.pipes_total, 0);
 });
@@ -183,29 +183,31 @@ test('oldest_stuck_age_s ignores red orders with a null age', () => {
   assert.equal(r.oldest_stuck_age_s, 1200);
 });
 
-// --- Inventory-sync-fresh derivation --------------------------------------
-test('inventory_sync_fresh true when the inventory_sync freshness is green', () => {
+// --- Inventory-freshness derivation ----------------------------------------
+// The verdict is now carried FAITHFULLY: amber freshness stays amber on the headline
+// (the old boolean collapsed it to red STALE, the exact card/headline mismatch).
+test('inventory_freshness is green when the inventory_sync freshness is green', () => {
   const r = computeRollup([pipe('inventory_sync', 'amber', 'green')], []);
-  // pipe rolled up amber, but FRESHNESS specifically is green => fresh.
-  assert.equal(r.inventory_sync_fresh, true);
+  // pipe rolled up amber, but FRESHNESS specifically is green => green.
+  assert.equal(r.inventory_freshness, 'green');
 });
 
-test('inventory_sync_fresh false when freshness is stale (amber or red)', () => {
+test('inventory_freshness keeps amber amber and red red (no collapse)', () => {
   assert.equal(
-    computeRollup([pipe('inventory_sync', 'amber', 'amber')], []).inventory_sync_fresh,
-    false,
+    computeRollup([pipe('inventory_sync', 'amber', 'amber')], []).inventory_freshness,
+    'amber',
   );
   assert.equal(
-    computeRollup([pipe('inventory_sync', 'red', 'red')], []).inventory_sync_fresh,
-    false,
+    computeRollup([pipe('inventory_sync', 'red', 'red')], []).inventory_freshness,
+    'red',
   );
 });
 
-test('inventory_sync_fresh null when the pipe is absent or freshness unknown', () => {
-  assert.equal(computeRollup([pipe('back_sync', 'green')], []).inventory_sync_fresh, null);
+test('inventory_freshness is unknown when the pipe is absent or freshness unknown', () => {
+  assert.equal(computeRollup([pipe('back_sync', 'green')], []).inventory_freshness, 'unknown');
   assert.equal(
-    computeRollup([pipe('inventory_sync', 'unknown', 'unknown')], []).inventory_sync_fresh,
-    null,
+    computeRollup([pipe('inventory_sync', 'unknown', 'unknown')], []).inventory_freshness,
+    'unknown',
   );
 });
 

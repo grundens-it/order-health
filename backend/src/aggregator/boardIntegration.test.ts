@@ -82,7 +82,7 @@ test('all-green board: every one of the nine pipes is green and the headline is 
   assert.equal(rollup.headline, 'healthy');
   assert.equal(rollup.headline_verdict, 'green');
   assert.equal(rollup.oldest_stuck_age_s, null);
-  assert.equal(rollup.inventory_sync_fresh, true);
+  assert.equal(rollup.inventory_freshness, 'green');
 });
 
 // --- One red pipe drives the headline to stuck ------------------------------

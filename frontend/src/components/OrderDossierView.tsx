@@ -45,8 +45,35 @@ function yesNo(v: boolean): string {
   return v ? 'yes' : 'no';
 }
 
+// Quantities: strip float noise from NAV decimals (222.00000000000003 -> 222).
 function num(n: number | null): string {
-  return n === null ? '-' : String(n);
+  if (n === null) return '-';
+  return String(Number(n.toFixed(2)));
+}
+
+// --- Timezone-correct rendering (2026-07-23) --------------------------------
+// NAV date-only fields (Order Date, Posting Date, Earliest Shipment Date, Hold
+// Date) are calendar dates authored at midnight in NAV's UTC service tier. Rendering
+// them in the viewer's local zone rolls them back a day in Pacific (a midnight-UTC
+// value is 5pm the PREVIOUS day in PT). So a date-only field is formatted in UTC to
+// recover the intended calendar date. True instant timestamps (allocator entry time,
+// the snapshot as-of) are real moments, so they render in Pacific and are labelled PT.
+const PT_TZ = 'America/Los_Angeles';
+
+// A NAV calendar date: show the literal date, no timezone shift.
+function fmtNavDate(iso: string | null): string {
+  if (iso === null) return '-';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '-';
+  return new Date(t).toLocaleDateString('en-US', { timeZone: 'UTC' });
+}
+
+// A true instant: render in Pacific and label it.
+function fmtInstantPT(iso: string | null): string {
+  if (iso === null) return '-';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '-';
+  return `${new Date(t).toLocaleString('en-US', { timeZone: PT_TZ })} PT`;
 }
 
 function DossierBody({ d }: { d: OrderDossier }): JSX.Element {
@@ -83,7 +110,7 @@ function DossierBody({ d }: { d: OrderDossier }): JSX.Element {
                   <td>{l.order_no}</td>
                   <td>{l.presence === 'open' ? 'open order' : 'posted / shipped'}</td>
                   <td>{l.nav_status === null ? '-' : l.nav_status === 1 ? 'Released' : 'Open'}</td>
-                  <td>{l.shipped_at ? new Date(l.shipped_at).toLocaleDateString() : '-'}</td>
+                  <td>{fmtNavDate(l.shipped_at)}</td>
                 </tr>
               ))}
             </tbody>
@@ -128,7 +155,7 @@ function DossierBody({ d }: { d: OrderDossier }): JSX.Element {
               <div><dt>Total</dt><dd>{d.shopify.order_total ?? '-'} {d.shopify.currency ?? ''}</dd></div>
               <div><dt>Financial</dt><dd>{d.shopify.financial_status ?? '-'}</dd></div>
               <div><dt>Fulfillment</dt><dd>{d.shopify.fulfillment_status ?? '-'}</dd></div>
-              <div><dt>Cancelled</dt><dd>{d.shopify.cancelled ? `yes (${d.shopify.cancelled_at ? new Date(d.shopify.cancelled_at).toLocaleDateString() : 'date unknown'})` : 'no'}</dd></div>
+              <div><dt>Cancelled</dt><dd>{d.shopify.cancelled ? `yes (${d.shopify.cancelled_at ? fmtInstantPT(d.shopify.cancelled_at) : 'date unknown'})` : 'no'}</dd></div>
             </dl>
             {d.shopify.line_items.length > 0 && (
               <table className="dsx-tbl">
@@ -154,24 +181,28 @@ function DossierBody({ d }: { d: OrderDossier }): JSX.Element {
             <div><dt>940 created</dt><dd>{yesNo(d.edi.present)}</dd></div>
             <div><dt>Sent</dt><dd>{yesNo(d.edi.sent)}</dd></div>
             <div><dt>997 acknowledged</dt><dd>{yesNo(d.edi.acked)}</dd></div>
-            <div><dt>Sent date</dt><dd>{d.edi.sent_date ? new Date(d.edi.sent_date).toLocaleString() : '-'}</dd></div>
+            <div><dt>Sent date</dt><dd>{fmtNavDate(d.edi.sent_date)}</dd></div>
           </dl>
         ) : (
           <p className="dsx-empty">No Holman 940 exists for this order.</p>
         )}
       </div>
 
-      {/* Warehouse availability for any outstanding SKUs. */}
+      {/* Warehouse availability for any outstanding SKUs. NAV IABC is keyed by
+          (SKU, location, CHANNEL), so each SKU has one row per channel (AMZN / DTC /
+          INTL / WHLSL) with its own channel-specific available-to-promise. The Channel
+          column is what makes the four rows legible instead of looking like duplicates. */}
       {d.availability.length > 0 && (
         <div className="dsx-card">
           <h4>Warehouse availability</h4>
           <table className="dsx-tbl">
-            <thead><tr><th>SKU</th><th>Location</th><th>On hand</th><th>Available</th><th>Earliest ship</th></tr></thead>
+            <thead><tr><th>SKU</th><th>Location</th><th>Channel</th><th>On hand</th><th>Available</th><th>Earliest ship</th></tr></thead>
             <tbody>
               {d.availability.map((a, i) => (
-                <tr key={`${a.sku}-${a.location}-${i}`}>
-                  <td>{a.sku}</td><td>{a.location}</td><td>{num(a.on_hand)}</td><td>{num(a.available)}</td>
-                  <td>{a.earliest_ship_date ? new Date(a.earliest_ship_date).toLocaleDateString() : '-'}</td>
+                <tr key={`${a.sku}-${a.location}-${a.channel ?? ''}-${i}`}>
+                  <td>{a.sku}</td><td>{a.location}</td><td>{a.channel ?? '-'}</td>
+                  <td>{num(a.on_hand)}</td><td>{num(a.available)}</td>
+                  <td>{fmtNavDate(a.earliest_ship_date)}</td>
                 </tr>
               ))}
             </tbody>
@@ -189,7 +220,7 @@ function DossierBody({ d }: { d: OrderDossier }): JSX.Element {
               {d.holds.map((h, i) => (
                 <tr key={`${h.reason_code}-${i}`}>
                   <td>{h.reason_code ?? '-'}</td><td>{ownerLabel(h.owner)}</td>
-                  <td>{h.hold_date ? new Date(h.hold_date).toLocaleDateString() : '-'}</td>
+                  <td>{fmtNavDate(h.hold_date)}</td>
                   <td>{h.released === 0 ? 'active' : 'released'}</td>
                 </tr>
               ))}
@@ -207,7 +238,7 @@ function DossierBody({ d }: { d: OrderDossier }): JSX.Element {
             <tbody>
               {d.allocator.map((r, i) => (
                 <tr key={i}>
-                  <td>{r.entry_at ? new Date(r.entry_at).toLocaleString() : '-'}</td>
+                  <td>{fmtInstantPT(r.entry_at)}</td>
                   <td>{r.decision_point ?? '-'}</td><td>{r.item_no ?? '-'}</td>
                   <td>{r.location_code ?? '-'}</td><td>{r.branch_taken ?? '-'}</td><td>{r.detail ?? '-'}</td>
                 </tr>
@@ -277,7 +308,7 @@ export function OrderDossierView(): JSX.Element {
         <button type="button" className="tab on" onClick={run} disabled={loading}>
           {loading ? 'Looking up...' : 'Look up'}
         </button>
-        {asOf && !loading && <span className="count">as of {new Date(asOf).toLocaleTimeString()}</span>}
+        {asOf && !loading && <span className="count">as of {fmtInstantPT(asOf)}</span>}
       </div>
 
       {error && (

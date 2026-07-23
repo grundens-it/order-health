@@ -266,10 +266,16 @@ export const config: Config = {
     togglePassword: str('NAV_TOGGLE_PASSWORD'),
   },
   inventorySync: {
-    // Defaults: green under one cycle, amber one to two cycles, red beyond.
-    cycleSeconds: num('INVENTORY_CYCLE_SECONDS', 7200), // ~2h IABC cycle
-    freshnessAmberCycles: num('INVENTORY_FRESHNESS_AMBER_CYCLES', 1),
-    freshnessRedCycles: num('INVENTORY_FRESHNESS_RED_CYCLES', 2),
+    // Freshness widened to the REAL CU 50007 cadence (health-fidelity, 2026-07-23).
+    // Measured live, the IABC populate completes every ~2 to 2.7h, not on a tight 2h
+    // beat, so the watermark is legitimately up to one full inter-walk gap old right
+    // before the next run. At amber = 1 cycle (2h) it tripped amber for a chunk of
+    // EVERY cycle (a false "STALE" on the headline). Amber now fires at 2 cycles
+    // (~4h) and red at 3 (~6h), matching how liveness was already widened, so a normal
+    // mid-cycle lag reads GREEN while a genuine multi-cycle stall still fires.
+    cycleSeconds: num('INVENTORY_CYCLE_SECONDS', 7200), // ~2h nominal IABC cycle
+    freshnessAmberCycles: num('INVENTORY_FRESHNESS_AMBER_CYCLES', 2),
+    freshnessRedCycles: num('INVENTORY_FRESHNESS_RED_CYCLES', 3),
     // Liveness widened to the real walk cadence (Unit 3, health-fidelity). Walks
     // run about every 2h (one cycle), so a heartbeat is legitimately up to one full
     // inter-walk gap old right before the next run. Amber at 2 missed cadences (~4h),

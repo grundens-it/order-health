@@ -38,7 +38,7 @@ test('STALENESS SIMULATION: a starved aggregator reds inventory_sync via FRESHNE
       watermark: {
         navNewestIabcEntryNo: 105_400, // NAV kept producing IABC completions...
         watermarkEntryNo: 104_100, // ...but the watermark is stuck ~1,300 entries behind
-        lastWalkAt: agoIso(2.5 * ONE_CYCLE_S, now), // last walk > 2 cycles ago => freshness RED
+        lastWalkAt: agoIso(3.5 * ONE_CYCLE_S, now), // last walk > 3 cycles ago => freshness RED (bands widened to 2/3)
         watcherHeartbeatAt: agoIso(90, now), // watcher heartbeat is fresh => liveness GREEN
       },
     },
@@ -54,7 +54,7 @@ test('STALENESS SIMULATION: a starved aggregator reds inventory_sync via FRESHNE
   //   freshness RED  (watermark starved)  -> reds the pipe
   //   liveness GREEN (watcher still alive) -> would have stayed "healthy" on a naive check
   //   job queue GREEN (CU 50007 completing) -> the other "is it running" signal is fine
-  assert.equal(inv.freshness_verdict, 'red', 'freshness is RED: watermark stalled > 2 IABC cycles');
+  assert.equal(inv.freshness_verdict, 'red', 'freshness is RED: watermark stalled > 3 IABC cycles');
   assert.equal(inv.liveness_verdict, 'green', 'liveness is GREEN: the watcher heartbeat is fresh');
   assert.equal(jobQueue.pipe_verdict, 'green', 'NAV job-queue (CU 50007) is GREEN: the job still completes');
 
@@ -74,7 +74,7 @@ test('STALENESS SIMULATION: a starved aggregator reds inventory_sync via FRESHNE
   const rollup = computeRollup(pipes, []);
   assert.equal(rollup.headline, 'stuck');
   assert.equal(rollup.headline_verdict, 'red');
-  assert.equal(rollup.inventory_sync_fresh, false);
+  assert.equal(rollup.inventory_freshness, 'red');
 });
 
 test('control: with the watermark advancing (fresh last walk), the SAME live signals leave inventory_sync GREEN', async () => {

@@ -77,13 +77,13 @@ function oldestStuckAge(orders: readonly OrderHealth[]): number | null {
   return oldest;
 }
 
-// The inventory_sync pipe's freshness as yes / no / unknown. true = fresh
-// (green), false = stale (amber or red), null = unknown (no row, or the pipe's
-// freshness is itself unknown / not yet provisioned).
-function inventorySyncFresh(pipelines: readonly PipelineHealth[]): boolean | null {
+// The inventory_sync pipe's freshness verdict, passed through FAITHFULLY. Returning
+// the verdict (green / amber / red / unknown) rather than a boolean is what lets the
+// headline distinguish "lagging" (amber) from "stale" (red), instead of painting both
+// as red STALE. A missing inventory_sync row reads 'unknown'.
+function inventoryFreshness(pipelines: readonly PipelineHealth[]): Verdict {
   const inv = pipelines.find((p) => p.pipe === 'inventory_sync');
-  if (inv === undefined || inv.freshness_verdict === 'unknown') return null;
-  return inv.freshness_verdict === 'green';
+  return inv === undefined ? 'unknown' : inv.freshness_verdict;
 }
 
 // The rollup compute. Pure: same pipeline + order rows => same result. Derived
@@ -127,7 +127,7 @@ export function computeRollup(
     headline,
     headline_verdict: headlineVerdict,
     oldest_stuck_age_s: oldestStuckAge(orders),
-    inventory_sync_fresh: inventorySyncFresh(pipelines),
+    inventory_freshness: inventoryFreshness(pipelines),
     counts,
   };
 }

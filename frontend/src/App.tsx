@@ -66,6 +66,11 @@ const STAGE_OPTIONS: ReadonlyArray<readonly [LifecycleStage, string]> = [
 type RowCount = 25 | 50 | 100 | 'all';
 const ROW_COUNTS: readonly RowCount[] = [25, 50, 100, 'all'];
 
+// How often the dashboard re-polls the snapshot so the "Snapshot as of" header and
+// the cards stay current without a manual page refresh. The order layer aggregates
+// every ~3 min; 60s keeps the header within one cadence of the backend.
+const SNAPSHOT_POLL_MS = 60_000;
+
 // Unit 4 "why" builders. Turn a subject's verdict + detail into a one-line reason
 // plus supporting rows the modal shows FIRST. Read-only, pure UI derivation.
 function humanAgeShort(s: number | null): string {
@@ -180,38 +185,52 @@ export function App(): JSX.Element {
     };
   }, []);
 
+  // The snapshot is fetched on mount AND re-polled on an interval, so a tab left open
+  // keeps showing the CURRENT "Snapshot as of" time and current cards instead of the
+  // load-time snapshot forever. The aggregator writes a new order snapshot every ~3
+  // min; polling at 60s keeps the header within a cadence of the backend without
+  // hammering it. Read-only. A failed poll surfaces the banner but does not wipe the
+  // last good data, so a transient blip does not blank the dashboard.
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchPipelines(), fetchOrders(channel), fetchRollup()])
-      .then(([pipeRes, orderRes, rollupRes]) => {
-        if (cancelled) return;
-        setPipelines(pipeRes.data);
-        setOrders(orderRes.data);
-        const { as_of: rollupTime, ...rollupData } = rollupRes;
-        setRollup(rollupData);
-        setRollupAsOf(rollupTime);
-        setAsOf(orderRes.as_of ?? pipeRes.as_of);
-        setError(null);
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        if (err instanceof ApiError) {
-          setError({ kind: err.kind, message: err.message });
-        } else {
-          setError({
-            kind: 'unknown',
-            message: err instanceof Error ? err.message : 'failed to load health snapshot',
-          });
-        }
-      });
+
+    const load = (): void => {
+      Promise.all([fetchPipelines(), fetchOrders(channel), fetchRollup()])
+        .then(([pipeRes, orderRes, rollupRes]) => {
+          if (cancelled) return;
+          setPipelines(pipeRes.data);
+          setOrders(orderRes.data);
+          const { as_of: rollupTime, ...rollupData } = rollupRes;
+          setRollup(rollupData);
+          setRollupAsOf(rollupTime);
+          setAsOf(orderRes.as_of ?? pipeRes.as_of);
+          setError(null);
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          if (err instanceof ApiError) {
+            setError({ kind: err.kind, message: err.message });
+          } else {
+            setError({
+              kind: 'unknown',
+              message: err instanceof Error ? err.message : 'failed to load health snapshot',
+            });
+          }
+        });
+    };
+
+    load();
+    const timer = setInterval(load, SNAPSHOT_POLL_MS);
     return () => {
       cancelled = true;
+      clearInterval(timer);
     };
   }, [channel]);
 
   const asOfLabel = useMemo(() => {
     if (!asOf) return 'no snapshot yet';
-    return `as of ${new Date(asOf).toLocaleString()}`;
+    // Labelled Pacific so the header time is unambiguous (matches the Order Lookup).
+    return `as of ${new Date(asOf).toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })} PT`;
   }, [asOf]);
 
   const pipeByKey = useMemo(() => {
